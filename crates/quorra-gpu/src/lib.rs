@@ -26,18 +26,42 @@
 //!
 //! # State
 //!
-//! Skeleton: every module below states what it owns, what it must never do, and the
-//! signatures it will hold. No module contains code yet, and there is deliberately no
-//! empty `Device` struct standing in for one — see `doc/adr/0003`. M1 in `doc/PLAN.md` is
-//! a device, a rectangle, and the timestamp queries that answer §11's first question.
+//! M1 is implemented: a device (headless and surface-attached), the three targets of
+//! §2.4, the analytic rectangle lane, timestamped frames, and the startup split of §7.
+//! [`atlas`] (M4) and [`mask`] (M6) still hold their contracts rather than code — see
+//! `doc/adr/0003` and `doc/PLAN.md` for which milestone fills which module.
 
 #![forbid(unsafe_code)]
 
 pub mod atlas;
+mod compose;
 pub mod device;
+mod encode;
+pub mod error;
 pub mod frame;
 pub mod mask;
 pub mod pipeline;
+mod raster;
+mod readback;
 pub mod report;
+mod resources;
+mod surface;
 pub mod target;
+mod timing;
 pub mod viewport;
+
+pub use device::{
+    DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_RESOURCE_BYTES, Device, Limits, Options, StartupTimings,
+};
+pub use error::{DeviceError, RenderError, ResourceProblem, SurfaceProblem};
+pub use frame::{Counters, Frame, Raster, TimingProvenance, Timings};
+pub use report::{Report, ReportKind};
+pub use target::Target;
+pub use viewport::Viewport;
+
+/// The exact `wgpu` this crate was built against, re-exported so a tier-3 host can
+/// name the types [`Device::wgpu`] hands it — and a windowing host the
+/// [`wgpu::SurfaceTarget`] that [`Device::for_surface`] takes — without a second
+/// `wgpu` dependency whose version could skew (integration note 4 in
+/// `doc/PLAN.md`).
+pub use wgpu;

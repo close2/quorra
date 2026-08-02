@@ -1,0 +1,1859 @@
+//! Phase 1 of a frame: classify into lanes, resolve clips, rasterise coverage, count,
+//! then lay out instance data.
+//!
+//! One CPU walk over the scene's commands (PLAN.md Part 1 §1.2), sorting each into
+//! the cheapest lane that draws it exactly:
+//!
+//! - **rectangle** — axis-aligned rect, axis-preserving transform, fully rectangular
+//!   clip: analytic coverage in the shader, clip applied by intersection here
+//!   (ADR 0007), zero per-pixel clip cost;
+//! - **glyph** — a fill whose device size fits an atlas tile: coverage rasterised
+//!   once per `(outline, linear part, quantised phase)` key (ADR 0008/0009) and drawn
+//!   as a quad over the persistent R8 atlas;
+//! - **path** — everything else that is drawable today: large fills, strokes,
+//!   rect-with-residue-clip: coverage rasterised into the frame's scratch image and
+//!   drawn as a quad. Non-rectangular clip links multiply into the mask here, which
+//!   is M5's residue — the R8 mask the brief said a *rectangular* clip must never
+//!   become, applied exactly where it must.
+//!
+//! **Counting precedes allocation** (§5's first preference): instance buffers are
+//! sized from the command count and every rasterised mask is charged against the
+//! frame budget before its bytes exist, so there is no fixed-size table for a scene
+//! to overflow.
+//!
+//! Since M6 the walk also builds the **layer tree**: a group becomes a child
+//! [`LayerPlan`] composited once under its spec (ISO 32000-2 §11.4.5); an element
+//! with a non-`Normal` blend becomes an implicit single-element child, so §11.3.5
+//! runs through one compositor; knockout groups and `Compose::Src` elements mark
+//! their draws [`DrawStyle::Knockout`] for the two-pass erase/add of ADR 0010; and a
+//! used soft mask's group is planned like any layer, for reduction before the frame
+//! draws.
+//!
+//! M7 completes the vocabulary with the **rare-case lanes** (ADR 0011): an image, a
+//! ramp shading or a mesh becomes a single uniform-driven quad ([`ImageOp`],
+//! [`ShadedOp`]) rather than a fourth instance stream — the brief's §0 premise is
+//! that most of a page is glyphs and rectangles, and the encoding matches it.
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use quorra_scene::{
+    Affine, BlendMode, ClipId, Command, Compose, FillRule, ImageFilter, ImageId, MaskId, MaskKind,
+    OutlineId, Paint, Point, Rect, Scene, ShadingKind,
+};
+
+use crate::atlas::{AtlasStore, GlyphKey, PhaseKey};
+use crate::error::RenderError;
+use crate::raster::{self, DeviceTransform, Polyline, Rule};
+use crate::resources::ResourceStore;
+use crate::viewport::Viewport;
+
+/// Bytes per rectangle instance: device rect (4 × f32), premultiplied colour
+/// (4 × f32). Must match `rect.wgsl`.
+pub(crate) const RECT_INSTANCE_STRIDE: u64 = 32;
+
+/// Bytes per coverage-quad instance: dest min (2), size (2), texel origin + source
+/// selector (4), premultiplied colour (4), clip rect (4) — 16 × f32. Must match
+/// `coverage.wgsl`.
+pub(crate) const QUAD_INSTANCE_STRIDE: u64 = 64;
+
+/// The largest tile the glyph lane caches, per side. Beyond it a fill takes the
+/// scratch path — still correct, merely uncached; the bound keeps one zoomed-in
+/// letterform from evicting a page's worth of text (ADR 0009 records the number).
+const MAX_GLYPH_DIM: f32 = 128.0;
+
+/// A clip rectangle that admits everything, for unclipped instances.
+const OPEN_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
+
+/// Which lane a batch draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BatchKind {
+    Rect,
+    Quad,
+}
+
+/// How a batch composites: ordinary premultiplied over, or the knockout two-pass
+/// (per-element erase by shape, then additive deposit — ADR 0010, §11.4.6/§4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DrawStyle {
+    Over,
+    Knockout,
+}
+
+/// A run of consecutive instances in one lane with one style and one soft mask, in
+/// scene order — the painter's algorithm survives switching by batch breaks, not by
+/// reordering.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Batch {
+    pub kind: BatchKind,
+    pub first: u32,
+    pub count: u32,
+    pub style: DrawStyle,
+    /// The soft mask sampled by these draws, as a mask index.
+    pub mask: Option<u32>,
+}
+
+/// One node of the frame's layer tree: what to draw, in order, including child
+/// layers to composite at their place in the order.
+#[derive(Debug, Default)]
+pub(crate) struct LayerPlan {
+    pub ops: Vec<Op>,
+}
+
+#[derive(Debug)]
+pub(crate) enum Op {
+    Draw(Batch),
+    /// One image quad (boxed: rare on real pages, and `Op` stays small for the
+    /// common draws).
+    Image(Box<ImageOp>),
+    /// One shading or mesh quad.
+    Shaded(Box<ShadedOp>),
+    Child(ChildOp),
+}
+
+/// One image draw (ISO 32000-2 §8.9.5), executed as a single uniform-driven quad.
+///
+/// The fragment shader maps device pixels back through `inv`, so the quad only has
+/// to cover the footprint; an axis-preserving placement gets analytic edge coverage
+/// from `image_rect`, an oblique one paints where centres land inside the unit
+/// square (ADR 0011 carries both decisions).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ImageOp {
+    /// The resident image's raw id.
+    pub image: u32,
+    /// Inverse of the unit-square → device transform, §8.3.3 coefficient order.
+    pub inv: [f32; 6],
+    /// The footprint's device bounding rectangle (exact when `axis_aligned`).
+    pub image_rect: [f32; 4],
+    /// The quad drawn: footprint ∩ clip ∩ target, at pixel bounds.
+    pub dest: [f32; 4],
+    /// The resolved clip rectangle.
+    pub clip: [f32; 4],
+    /// Where a rasterised residue clip sits in the frame's scratch, if one applies;
+    /// its tile spans exactly `dest`.
+    pub residue_origin: Option<[f32; 2]>,
+    /// Whether the placement preserves axes (analytic edges).
+    pub axis_aligned: bool,
+    /// The command's constant alpha (§11.6.4.3).
+    pub alpha: f32,
+    /// The placement's resolved filter: `true` for linear (§4.5, integration
+    /// note 1).
+    pub linear: bool,
+    pub style: DrawStyle,
+    pub mask: Option<u32>,
+}
+
+/// Which texture paints a [`ShadedOp`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PaintSource {
+    /// A 256×1 pre-sampled colour ramp (raw ramp id).
+    Ramp(u32),
+    /// A pre-rasterised mesh (raw mesh id), sampled at absolute device pixels.
+    Mesh(u32),
+}
+
+/// One shading or mesh draw (ISO 32000-2 §8.7.4.5), a single uniform-driven quad
+/// over a coverage source: a scratch tile for a rasterised shape, or the analytic
+/// rectangle for the rect-hinted case.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ShadedOp {
+    pub paint: PaintSource,
+    /// Inverse of the shading-space → device transform (identity for meshes, which
+    /// are already device-space).
+    pub inv: [f32; 6],
+    /// 0 axial, 1 radial, 2 mesh — the shader's kind word.
+    pub kind_word: f32,
+    /// Bit 0: extend beyond the start; bit 1: beyond the end (§8.7.4.5.2/.3).
+    pub extend_bits: u32,
+    /// Axial/radial: start.xy, end.xy in shading space. Mesh: left, top in device
+    /// pixels.
+    pub geo0: [f32; 4],
+    /// Radial: start radius, end radius.
+    pub geo1: [f32; 4],
+    /// The quad drawn; when coverage comes from scratch, exactly the tile's bounds.
+    pub dest: [f32; 4],
+    /// The coverage tile's origin in scratch, or `None` for the analytic rectangle.
+    pub coverage_origin: Option<[f32; 2]>,
+    /// The analytic coverage rectangle (the shape itself), used when
+    /// `coverage_origin` is `None`.
+    pub coverage_rect: [f32; 4],
+    pub clip: [f32; 4],
+    pub style: DrawStyle,
+    pub mask: Option<u32>,
+}
+
+/// The shading-space geometry of a non-solid paint, resolved once per command.
+#[derive(Debug, Clone, Copy)]
+struct ShadedGeometry {
+    paint: PaintSource,
+    kind_word: f32,
+    extend_bits: u32,
+    geo0: [f32; 4],
+    geo1: [f32; 4],
+    inv: [f32; 6],
+}
+
+/// Composite one finished child layer onto this layer (§11.4.5), exactly once.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChildOp {
+    /// Index into `Encoded::layers`.
+    pub layer: usize,
+    /// §11.3.5 mode, in `BlendMode`'s declaration order (the shader's numbering).
+    pub mode: u32,
+    /// The group's constant alpha.
+    pub alpha: f32,
+    /// The group's resolved clip rectangle, device space.
+    pub clip_rect: [f32; 4],
+    /// Clip-residue placement in the scratch image: region rect then texel origin;
+    /// an empty region means no residue.
+    pub residue_rect: [f32; 4],
+    pub residue_origin: [f32; 2],
+    /// The group's soft mask, as a mask index.
+    pub mask: Option<u32>,
+}
+
+/// A soft mask's realisation plan: its group's layer tree plus the reduction
+/// parameters (§11.5, mirrored byte-for-byte against the caller's rule).
+#[derive(Debug)]
+pub(crate) struct MaskPlan {
+    /// Index into `Encoded::layers` of the mask group's plan.
+    pub root: usize,
+    /// 0 = Alpha (§11.5.2), 1 = Luminosity (§11.5.3).
+    pub kind_word: u32,
+    /// The luminosity backdrop, device RGB (unused for Alpha).
+    pub backdrop: [f32; 3],
+    /// §11.6.5.1's transfer table, identity when the scene gave none.
+    pub table: [u8; 256],
+}
+
+/// The frame's scratch coverage image: every uncached mask, shelf-packed into one
+/// R8 upload.
+#[derive(Debug)]
+pub(crate) struct Scratch {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+}
+
+/// The encoded frame.
+#[derive(Debug)]
+pub(crate) struct Encoded {
+    pub rect_instances: Vec<u8>,
+    pub quad_instances: Vec<u8>,
+    /// The page's own plan; child layers live in `layers`.
+    pub root: LayerPlan,
+    pub layers: Vec<LayerPlan>,
+    /// Realisation plans for the masks this frame uses, indexed by `MaskId`.
+    pub mask_plans: Vec<Option<MaskPlan>>,
+    pub scratch: Option<Scratch>,
+    /// The raw ids of every image, ramp and mesh this frame draws, for the device
+    /// to realise as textures before the passes run.
+    pub used_images: Vec<u32>,
+    pub used_ramps: Vec<u32>,
+    pub used_meshes: Vec<u32>,
+    pub commands: u32,
+    pub clip_distinct_regions: u32,
+    pub distinct_outlines: u32,
+    pub atlas_distinct_keys: u32,
+    pub segments: u32,
+    /// Set when a glyph tile no longer fit the atlas and fell through to scratch:
+    /// the device resets the atlas after the frame so the next frame repacks fresh.
+    pub atlas_pressure: bool,
+}
+
+/// A resolved clip chain: the intersection of its rectangular links, plus the chain
+/// of non-rectangular links (the residue) that must multiply into a coverage mask.
+#[derive(Debug, Clone)]
+struct ResolvedClip {
+    rect: Rect,
+    residues: Option<Arc<ResidueLink>>,
+}
+
+#[derive(Debug)]
+struct ResidueLink {
+    clip: ClipId,
+    parent: Option<Arc<ResidueLink>>,
+}
+
+fn open_clip() -> ResolvedClip {
+    ResolvedClip {
+        rect: Rect::new(
+            Point::new(OPEN_CLIP[0], OPEN_CLIP[1]),
+            Point::new(OPEN_CLIP[2], OPEN_CLIP[3]),
+        ),
+        residues: None,
+    }
+}
+
+/// Chains resolved so far this frame, memoised across shared prefixes — the caller's
+/// worst page holds 3 608 chains.
+struct ClipResolver {
+    resolved: Vec<Option<ResolvedClip>>,
+}
+
+impl ClipResolver {
+    fn new(clip_count: usize) -> Self {
+        Self {
+            resolved: vec![None; clip_count],
+        }
+    }
+
+    /// Iterative on purpose: chains are deep on real pages and a recursive walk
+    /// would put the depth on the stack. Cycles cannot occur — a parent id is always
+    /// smaller than its child's, by construction in `SceneBuilder::clip`.
+    fn resolve(
+        &mut self,
+        id: ClipId,
+        scene: &Scene,
+        viewport: &Viewport<'_>,
+        resources: &ResourceStore,
+    ) -> Result<ResolvedClip, RenderError> {
+        let mut pending: Vec<ClipId> = Vec::new();
+        let mut cursor = Some(id);
+        let mut inherited: Option<ResolvedClip> = None;
+        while let Some(link) = cursor {
+            if let Some(resolved) = &self.resolved[link.0 as usize] {
+                inherited = Some(resolved.clone());
+                break;
+            }
+            pending.push(link);
+            cursor = scene.clips()[link.0 as usize].parent;
+        }
+        let mut current = inherited.unwrap_or_else(open_clip);
+        while let Some(link) = pending.pop() {
+            let def = &scene.clips()[link.0 as usize];
+            let stored = resources
+                .outline(def.outline)
+                .ok_or(RenderError::UnknownOutline {
+                    outline: def.outline,
+                })?;
+            let to_device = compose(def.transform, viewport);
+            let rect_link = if transform_preserves_axes(&to_device) {
+                stored.rect_hint
+            } else {
+                None
+            };
+            current = match rect_link {
+                Some(rect) => {
+                    let p0 = apply(&to_device, rect.min);
+                    let p1 = apply(&to_device, rect.max);
+                    let device_rect = Rect::new(
+                        Point::new(p0.x.min(p1.x), p0.y.min(p1.y)),
+                        Point::new(p0.x.max(p1.x), p0.y.max(p1.y)),
+                    );
+                    ResolvedClip {
+                        rect: current.rect.intersection(device_rect),
+                        residues: current.residues.clone(),
+                    }
+                }
+                // Not a rectangle under this transform: a residue link, multiplied
+                // into coverage masks at draw time (M5).
+                None => ResolvedClip {
+                    rect: current.rect,
+                    residues: Some(Arc::new(ResidueLink {
+                        clip: link,
+                        parent: current.residues.clone(),
+                    })),
+                },
+            };
+            self.resolved[link.0 as usize] = Some(current.clone());
+        }
+        Ok(current)
+    }
+}
+
+/// The frame's scratch shelf packer: coverage tiles packed into one growing R8
+/// image, uploaded once.
+struct ScratchPacker {
+    width: u32,
+    max_height: u32,
+    shelves: Vec<(u32, u32, u32)>, // (y, height, cursor)
+    next_y: u32,
+    data: Vec<u8>,
+}
+
+impl ScratchPacker {
+    fn new(width: u32, max_height: u32) -> Self {
+        Self {
+            width,
+            max_height,
+            shelves: Vec::new(),
+            next_y: 0,
+            data: Vec::new(),
+        }
+    }
+
+    /// Pack a mask's bytes; `None` when the frame's scratch would outgrow the
+    /// texture dimension limit (the byte budget was already charged by the caller).
+    #[allow(clippy::arithmetic_side_effects)] // bounded by width/max_height checks
+    fn pack(&mut self, mask: &raster::CoverageMask) -> Option<(u32, u32)> {
+        if mask.width == 0 || mask.height == 0 || mask.width > self.width {
+            return None;
+        }
+        let position = self
+            .shelves
+            .iter_mut()
+            .find(|(_, height, cursor)| {
+                *height >= mask.height
+                    && *height <= mask.height.saturating_mul(2)
+                    && cursor + mask.width <= self.width
+            })
+            .map(|(y, _, cursor)| {
+                let position = (*cursor, *y);
+                *cursor += mask.width;
+                position
+            })
+            .or_else(|| {
+                if self.next_y + mask.height <= self.max_height {
+                    let y = self.next_y;
+                    self.next_y += mask.height;
+                    self.shelves.push((y, mask.height, mask.width));
+                    Some((0, y))
+                } else {
+                    None
+                }
+            })?;
+        let row_bytes = self.width as usize;
+        let needed_rows = (position.1 + mask.height) as usize;
+        if self.data.len() < needed_rows * row_bytes {
+            self.data.resize(needed_rows * row_bytes, 0);
+        }
+        for row in 0..mask.height as usize {
+            let src = &mask.coverage[row * mask.width as usize..(row + 1) * mask.width as usize];
+            let dst_start = (position.1 as usize + row) * row_bytes + position.0 as usize;
+            self.data[dst_start..dst_start + mask.width as usize].copy_from_slice(src);
+        }
+        Some(position)
+    }
+
+    fn finish(self) -> Option<Scratch> {
+        if self.next_y == 0 {
+            None
+        } else {
+            Some(Scratch {
+                width: self.width,
+                height: self.next_y,
+                data: self.data,
+            })
+        }
+    }
+}
+
+fn compose(transform: Affine, viewport: &Viewport<'_>) -> DeviceTransform {
+    let t = transform.then(viewport.transform);
+    DeviceTransform {
+        a: t.a,
+        b: t.b,
+        c: t.c,
+        d: t.d,
+        e: t.e,
+        f: t.f,
+    }
+}
+
+fn transform_preserves_axes(t: &DeviceTransform) -> bool {
+    // Exact zeros, as in `Affine::preserves_axes`: document transforms carry them.
+    #[allow(clippy::float_cmp)]
+    {
+        (t.b == 0.0 && t.c == 0.0) || (t.a == 0.0 && t.d == 0.0)
+    }
+}
+
+fn apply(t: &DeviceTransform, p: Point) -> Point {
+    Point::new(t.a * p.x + t.c * p.y + t.e, t.b * p.x + t.d * p.y + t.f)
+}
+
+/// The composed-transform bounding box of an outline's control points — a bound on
+/// the curve itself, by the convex-hull property of Béziers.
+fn outline_device_bounds(
+    segments: &[quorra_scene::Segment],
+    t: &DeviceTransform,
+) -> Option<(f32, f32, f32, f32)> {
+    use quorra_scene::Segment;
+    let mut bounds: Option<(f32, f32, f32, f32)> = None;
+    let mut extend = |p: Point| {
+        let q = apply(t, p);
+        bounds = Some(match bounds {
+            None => (q.x, q.y, q.x, q.y),
+            Some((x0, y0, x1, y1)) => (x0.min(q.x), y0.min(q.y), x1.max(q.x), y1.max(q.y)),
+        });
+    };
+    for segment in segments {
+        match *segment {
+            Segment::MoveTo(p) | Segment::LineTo(p) => extend(p),
+            Segment::CubicTo { c1, c2, to } => {
+                extend(c1);
+                extend(c2);
+                extend(to);
+            }
+            Segment::Close => {}
+        }
+    }
+    bounds
+}
+
+/// The encoder's working state for one frame walk.
+struct Encoder<'a> {
+    scene: &'a Scene,
+    viewport: &'a Viewport<'a>,
+    resources: &'a ResourceStore,
+    atlas: &'a mut AtlasStore,
+    quantum: Option<u16>,
+    clips: ClipResolver,
+    scratch: ScratchPacker,
+    rect_instances: Vec<u8>,
+    quad_instances: Vec<u8>,
+    /// The plan under construction: `usize::MAX` is the root, anything else an
+    /// index into `layers`.
+    current_plan: usize,
+    root: LayerPlan,
+    layers: Vec<LayerPlan>,
+    mask_plans: Vec<Option<MaskPlan>>,
+    /// The active drawing style, set by the enclosing knockout group.
+    style: DrawStyle,
+    budget: u64,
+    spent: u64,
+    distinct_outlines: HashSet<u32>,
+    atlas_keys: HashSet<GlyphKey>,
+    used_images: HashSet<u32>,
+    used_ramps: HashSet<u32>,
+    used_meshes: HashSet<u32>,
+    segments: u64,
+    atlas_pressure: bool,
+}
+
+/// Walk the scene once: classify, count, rasterise, check the budget, lay out
+/// instances.
+pub(crate) fn encode(
+    scene: &Scene,
+    viewport: &Viewport<'_>,
+    frame_budget_bytes: u64,
+    max_dimension: u32,
+    resources: &ResourceStore,
+    atlas: &mut AtlasStore,
+    quantum: Option<u16>,
+) -> Result<Encoded, RenderError> {
+    let commands = scene.commands();
+
+    // Count, check against the stated budget, then allocate — in that order. Every
+    // command costs at most one rect and one quad instance.
+    let per_command = RECT_INSTANCE_STRIDE.saturating_add(QUAD_INSTANCE_STRIDE);
+    let needed = (commands.len() as u64).saturating_mul(per_command);
+    if needed > frame_budget_bytes {
+        return Err(RenderError::FrameBudgetExceeded {
+            needed,
+            budget: frame_budget_bytes,
+        });
+    }
+
+    let mut encoder = Encoder {
+        scene,
+        viewport,
+        resources,
+        atlas,
+        quantum,
+        clips: ClipResolver::new(scene.clips().len()),
+        scratch: ScratchPacker::new(2048.min(max_dimension), max_dimension),
+        rect_instances: Vec::new(),
+        quad_instances: Vec::new(),
+        current_plan: usize::MAX,
+        root: LayerPlan::default(),
+        layers: Vec::new(),
+        mask_plans: (0..scene.masks().len()).map(|_| None).collect(),
+        style: DrawStyle::Over,
+        budget: frame_budget_bytes,
+        spent: needed,
+        distinct_outlines: HashSet::new(),
+        atlas_keys: HashSet::new(),
+        used_images: HashSet::new(),
+        used_ramps: HashSet::new(),
+        used_meshes: HashSet::new(),
+        segments: 0,
+        atlas_pressure: false,
+    };
+
+    for (index, command) in commands.iter().enumerate() {
+        encoder.command(index, command)?;
+    }
+
+    let mut distinct = HashSet::new();
+    for resolved in encoder.clips.resolved.iter().flatten() {
+        distinct.insert([
+            resolved.rect.min.x.to_bits(),
+            resolved.rect.min.y.to_bits(),
+            resolved.rect.max.x.to_bits(),
+            resolved.rect.max.y.to_bits(),
+        ]);
+    }
+
+    let sorted = |set: HashSet<u32>| {
+        let mut ids: Vec<u32> = set.into_iter().collect();
+        ids.sort_unstable();
+        ids
+    };
+
+    Ok(Encoded {
+        rect_instances: encoder.rect_instances,
+        quad_instances: encoder.quad_instances,
+        root: encoder.root,
+        layers: encoder.layers,
+        mask_plans: encoder.mask_plans,
+        scratch: encoder.scratch.finish(),
+        used_images: sorted(encoder.used_images),
+        used_ramps: sorted(encoder.used_ramps),
+        used_meshes: sorted(encoder.used_meshes),
+        commands: u32::try_from(commands.len()).unwrap_or(u32::MAX),
+        clip_distinct_regions: u32::try_from(distinct.len()).unwrap_or(u32::MAX),
+        distinct_outlines: u32::try_from(encoder.distinct_outlines.len()).unwrap_or(u32::MAX),
+        atlas_distinct_keys: u32::try_from(encoder.atlas_keys.len()).unwrap_or(u32::MAX),
+        segments: u32::try_from(encoder.segments).unwrap_or(u32::MAX),
+        atlas_pressure: encoder.atlas_pressure,
+    })
+}
+
+impl Encoder<'_> {
+    // `index` names commands in refusals; with only M7's images left to refuse it
+    // currently reaches errors only through nested walks, which the lint misreads.
+    #[allow(clippy::only_used_in_recursion)]
+    fn command(&mut self, index: usize, command: &Command) -> Result<(), RenderError> {
+        match command {
+            Command::Rect {
+                rect,
+                transform,
+                color,
+                clip,
+                mask,
+            } => self.encode_rect(*rect, *transform, *color, *clip, *mask),
+            Command::Fill {
+                outline,
+                transform,
+                rule,
+                paint,
+                clip,
+                blend,
+                compose: compose_mode,
+                mask,
+            } => self.encode_fill(
+                *outline,
+                *transform,
+                *rule,
+                *paint,
+                *clip,
+                *blend,
+                *compose_mode,
+                *mask,
+            ),
+            Command::Stroke {
+                outline,
+                transform,
+                stroke,
+                paint,
+                clip,
+                blend,
+                mask,
+            } => self.encode_stroke(
+                index, *outline, *transform, *stroke, *paint, *clip, *blend, *mask,
+            ),
+            Command::Image {
+                image,
+                transform,
+                alpha,
+                filter,
+                clip,
+                blend,
+                mask,
+            } => self.encode_image(*image, *transform, *alpha, *filter, *clip, *blend, *mask),
+            Command::Group { spec, commands } => {
+                let mask = self.use_mask(spec.mask)?;
+                let resolved = self.resolve_clip(spec.clip)?;
+                let outer_style = self.style;
+                let child = self.plan_child(|encoder| {
+                    // §11.4.6 binds inside this group; §11.4.1 makes it isolated, so
+                    // the initial backdrop is transparent and elements draw plainly
+                    // unless the group itself knocks out.
+                    encoder.style = if spec.knockout {
+                        DrawStyle::Knockout
+                    } else {
+                        DrawStyle::Over
+                    };
+                    for (i, command) in commands.iter().enumerate() {
+                        encoder.command(i, command)?;
+                    }
+                    Ok(())
+                });
+                self.style = outer_style;
+                let child = child?;
+                let (residue_rect, residue_origin) = self.plan_group_residue(&resolved)?;
+                self.push_op(Op::Child(ChildOp {
+                    layer: child,
+                    mode: blend_word(spec.blend),
+                    alpha: spec.alpha,
+                    clip_rect: [
+                        resolved.rect.min.x,
+                        resolved.rect.min.y,
+                        resolved.rect.max.x,
+                        resolved.rect.max.y,
+                    ],
+                    residue_rect,
+                    residue_origin,
+                    mask,
+                }));
+                Ok(())
+            }
+        }
+    }
+
+    /// The stroke arm: expansion via the path lane, non-Normal blends through an
+    /// implicit child (as in `encode_fill`).
+    #[allow(clippy::too_many_arguments)] // one command's fields, destructured once
+    fn encode_stroke(
+        &mut self,
+        index: usize,
+        outline: OutlineId,
+        transform: Affine,
+        stroke: quorra_scene::Stroke,
+        paint: Paint,
+        clip: Option<ClipId>,
+        blend: BlendMode,
+        mask: Option<MaskId>,
+    ) -> Result<(), RenderError> {
+        let mask = self.use_mask(mask)?;
+        if blend != BlendMode::Normal {
+            // §11.3.5 for a single element: an implicit one-element group.
+            let child = self.plan_child(|encoder| {
+                let plain = Command::Stroke {
+                    outline,
+                    transform,
+                    stroke,
+                    paint,
+                    clip,
+                    blend: BlendMode::Normal,
+                    mask: None,
+                };
+                encoder.command(index, &plain)
+            })?;
+            self.push_op(Op::Child(ChildOp {
+                layer: child,
+                mode: blend_word(blend),
+                alpha: 1.0,
+                clip_rect: OPEN_CLIP,
+                residue_rect: [0.0; 4],
+                residue_origin: [0.0; 2],
+                mask,
+            }));
+            return Ok(());
+        }
+        let stored = self
+            .resources
+            .outline(outline)
+            .ok_or(RenderError::UnknownOutline { outline })?;
+        self.distinct_outlines.insert(outline.0);
+        self.segments = self.segments.saturating_add(stored.segments.len() as u64);
+        let resolved = self.resolve_clip(clip)?;
+        let to_device = compose(transform, self.viewport);
+        // Flatten under the full transform, then expand: the width arrived
+        // resolved (§4.5), so our job is caps, joins and miters only.
+        let polylines = raster::flatten(&stored.segments, to_device);
+        let stroked = raster::stroke_polylines(&polylines, stroke);
+        match paint {
+            Paint::Solid(color) => {
+                self.push_coverage(&stroked, Rule::NonZero, color, &resolved, mask)
+            }
+            Paint::Shading { .. } | Paint::Mesh(_) => {
+                let Some(geometry) = self.shaded_geometry(paint)? else {
+                    return Ok(());
+                };
+                let style = self.style;
+                self.push_shaded_coverage(geometry, &stroked, Rule::NonZero, &resolved, style, mask)
+            }
+        }
+    }
+
+    /// Plan a child layer: run `body` with the current plan switched to a fresh
+    /// node, restoring on both paths.
+    fn plan_child(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<(), RenderError>,
+    ) -> Result<usize, RenderError> {
+        let child = self.layers.len();
+        self.layers.push(LayerPlan::default());
+        let outer = self.current_plan;
+        self.current_plan = child;
+        let result = body(self);
+        self.current_plan = outer;
+        result?;
+        Ok(child)
+    }
+
+    /// Realise a referenced soft mask's plan on first use; masks reference only
+    /// earlier masks (the builder enforced it), so this terminates.
+    fn use_mask(&mut self, mask: Option<MaskId>) -> Result<Option<u32>, RenderError> {
+        let Some(id) = mask else { return Ok(None) };
+        let index = id.0 as usize;
+        if self.mask_plans[index].is_none() {
+            let def = &self.scene.masks()[index];
+            let commands = def.commands.clone();
+            let (kind_word, backdrop) = match def.kind {
+                MaskKind::Alpha => (0, [0.0, 0.0, 0.0]),
+                MaskKind::Luminosity { backdrop } => (1, [backdrop.r, backdrop.g, backdrop.b]),
+            };
+            let table = def
+                .transfer
+                .as_ref()
+                .map_or_else(|| quorra_scene::Transfer::identity().0, |t| t.0);
+            let outer_style = self.style;
+            let root = self.plan_child(|encoder| {
+                encoder.style = DrawStyle::Over;
+                for (i, command) in commands.iter().enumerate() {
+                    encoder.command(i, command)?;
+                }
+                Ok(())
+            });
+            self.style = outer_style;
+            let root = root?;
+            self.mask_plans[index] = Some(MaskPlan {
+                root,
+                kind_word,
+                backdrop,
+                table,
+            });
+        }
+        Ok(Some(id.0))
+    }
+
+    /// A composited group's clip residue, rasterised over its visible region into
+    /// the scratch image for the composite pass to sample.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
+    fn plan_group_residue(
+        &mut self,
+        resolved: &ResolvedClip,
+    ) -> Result<([f32; 4], [f32; 2]), RenderError> {
+        let Some(_) = resolved.residues else {
+            return Ok(([0.0; 4], [0.0; 2]));
+        };
+        let vx0 = resolved.rect.min.x.max(0.0);
+        let vy0 = resolved.rect.min.y.max(0.0);
+        let vx1 = resolved.rect.max.x.min(self.viewport.width as f32);
+        let vy1 = resolved.rect.max.y.min(self.viewport.height as f32);
+        if vx0 >= vx1 || vy0 >= vy1 {
+            // Clipped to nothing: an empty region, which the composite reads as
+            // "admit nothing inside, nothing outside" — the group vanishes, as an
+            // empty clip demands. Represent as a 1x1 zero mask.
+            let zero = raster::CoverageMask {
+                left: 0,
+                top: 0,
+                width: 1,
+                height: 1,
+                coverage: vec![0],
+            };
+            let (sx, sy) = self.pack_scratch(&zero)?;
+            return Ok(([0.0, 0.0, 1.0, 1.0], [sx as f32, sy as f32]));
+        }
+        let left = vx0.floor() as i32;
+        let top = vy0.floor() as i32;
+        let width = (vx1.ceil() as i32 - left).max(1) as u32;
+        let height = (vy1.ceil() as i32 - top).max(1) as u32;
+        self.charge(u64::from(width) * u64::from(height))?;
+        // Present by construction: the residues Option was checked above.
+        let Some(mask) = self.residue_product(resolved, left, top, width, height)? else {
+            return Ok(([0.0; 4], [0.0; 2]));
+        };
+        let (sx, sy) = self.pack_scratch(&mask)?;
+        Ok((
+            [left as f32, top as f32, vx1.ceil(), vy1.ceil()],
+            [sx as f32, sy as f32],
+        ))
+    }
+
+    /// The product of a chain's residue links over a region, as one coverage tile —
+    /// `None` when the chain has none. Per-pixel bytes multiply in the deterministic
+    /// rule `(a·b + 127) / 255`. The caller charges the region's bytes.
+    #[allow(clippy::cast_possible_truncation)] // the byte rule's product stays in u8
+    #[allow(clippy::arithmetic_side_effects)] // u16 byte products cannot overflow
+    fn residue_product(
+        &mut self,
+        resolved: &ResolvedClip,
+        left: i32,
+        top: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<raster::CoverageMask>, RenderError> {
+        let mut combined: Option<raster::CoverageMask> = None;
+        let mut residue = resolved.residues.clone();
+        while let Some(link) = residue.take() {
+            let def = &self.scene.clips()[link.clip.0 as usize];
+            let stored =
+                self.resources
+                    .outline(def.outline)
+                    .ok_or(RenderError::UnknownOutline {
+                        outline: def.outline,
+                    })?;
+            let link_transform = compose(def.transform, self.viewport);
+            let link_polylines = raster::flatten(&stored.segments, link_transform);
+            let link_rule = match def.rule {
+                FillRule::NonZero => Rule::NonZero,
+                FillRule::EvenOdd => Rule::EvenOdd,
+            };
+            let link_mask = raster::fill_mask(&link_polylines, link_rule, left, top, width, height);
+            combined = Some(match combined {
+                None => link_mask,
+                Some(mut base) => {
+                    for (m, l) in base.coverage.iter_mut().zip(&link_mask.coverage) {
+                        *m = ((u16::from(*m) * u16::from(*l) + 127) / 255) as u8;
+                    }
+                    base
+                }
+            });
+            residue =
+                Arc::try_unwrap(link).map_or_else(|link| link.parent.clone(), |link| link.parent);
+        }
+        Ok(combined)
+    }
+
+    /// The rectangle arm: the analytic lane when everything is axis-aligned and
+    /// rectangular, the path lane otherwise (ADR 0007).
+    fn encode_rect(
+        &mut self,
+        rect: Rect,
+        transform: Affine,
+        color: quorra_scene::Color,
+        clip: Option<ClipId>,
+        mask: Option<MaskId>,
+    ) -> Result<(), RenderError> {
+        let mask = self.use_mask(mask)?;
+        let resolved = self.resolve_clip(clip)?;
+        let to_device = compose(transform, self.viewport);
+        if transform_preserves_axes(&to_device) && resolved.residues.is_none() {
+            // The analytic lane: clip applied by intersection (ADR 0007).
+            let p0 = apply(&to_device, rect.min);
+            let p1 = apply(&to_device, rect.max);
+            let device_rect = Rect::new(
+                Point::new(p0.x.min(p1.x), p0.y.min(p1.y)),
+                Point::new(p0.x.max(p1.x), p0.y.max(p1.y)),
+            )
+            .intersection(resolved.rect);
+            if device_rect.is_empty() {
+                return Ok(()); // clipped to nothing: draws nothing, legitimately
+            }
+            self.push_rect_instance(device_rect, color, mask);
+            return Ok(());
+        }
+        // Oblique transform or residue clip: the rectangle is a polygon and
+        // takes the path lane, exactly.
+        let polylines = vec![Polyline {
+            points: vec![
+                apply(&to_device, rect.min),
+                apply(&to_device, Point::new(rect.max.x, rect.min.y)),
+                apply(&to_device, rect.max),
+                apply(&to_device, Point::new(rect.min.x, rect.max.y)),
+            ],
+            closed: true,
+        }];
+        self.push_coverage(&polylines, Rule::NonZero, color, &resolved, mask)
+    }
+
+    /// The fill arm of the command walk: pick the glyph or path lane by device size
+    /// and residue state; route non-Normal blends through an implicit child layer;
+    /// mark `Compose::Src` for the knockout two-pass (§4.1).
+    #[allow(clippy::too_many_arguments)] // one command's fields, destructured once
+    fn encode_fill(
+        &mut self,
+        outline: OutlineId,
+        transform: Affine,
+        rule: FillRule,
+        paint: Paint,
+        clip: Option<ClipId>,
+        blend: BlendMode,
+        compose_mode: Compose,
+        mask: Option<MaskId>,
+    ) -> Result<(), RenderError> {
+        let mask = self.use_mask(mask)?;
+        if blend != BlendMode::Normal && self.style == DrawStyle::Over {
+            // §11.3.5 for a single element: an implicit one-element group. (Inside a
+            // knockout group the element composites with the transparent initial
+            // backdrop, where every blend mode degenerates to Normal — §11.4.6 with
+            // §11.3.6's αb = 0 — so knockout draws skip this wrap.)
+            let child = self.plan_child(|encoder| {
+                encoder.encode_fill(
+                    outline,
+                    transform,
+                    rule,
+                    paint,
+                    clip,
+                    BlendMode::Normal,
+                    compose_mode,
+                    None,
+                )
+            })?;
+            self.push_op(Op::Child(ChildOp {
+                layer: child,
+                mode: blend_word(blend),
+                alpha: 1.0,
+                clip_rect: OPEN_CLIP,
+                residue_rect: [0.0; 4],
+                residue_origin: [0.0; 2],
+                mask,
+            }));
+            return Ok(());
+        }
+        let style = if compose_mode == Compose::Src {
+            DrawStyle::Knockout
+        } else {
+            self.style
+        };
+        let stored = self
+            .resources
+            .outline(outline)
+            .ok_or(RenderError::UnknownOutline { outline })?;
+        self.distinct_outlines.insert(outline.0);
+        self.segments = self.segments.saturating_add(stored.segments.len() as u64);
+        let resolved = self.resolve_clip(clip)?;
+        let to_device = compose(transform, self.viewport);
+        let rule = match rule {
+            FillRule::NonZero => Rule::NonZero,
+            FillRule::EvenOdd => Rule::EvenOdd,
+        };
+        if let Paint::Solid(color) = paint {
+            let Some((bx0, by0, bx1, by1)) = outline_device_bounds(&stored.segments, &to_device)
+            else {
+                return Ok(()); // no geometry: draws nothing
+            };
+            if resolved.residues.is_none()
+                && bx1 - bx0 <= MAX_GLYPH_DIM
+                && by1 - by0 <= MAX_GLYPH_DIM
+            {
+                return self.push_glyph(outline, &to_device, rule, color, &resolved, style, mask);
+            }
+            let polylines = raster::flatten(&stored.segments, to_device);
+            return self.push_coverage_styled(&polylines, rule, color, &resolved, style, mask);
+        }
+        // Shading or mesh paint (§8.7.4.5): one quad over a coverage source. The
+        // rect-hinted case needs no scratch tile — analytic coverage, mirroring the
+        // rectangle lane (ADR 0011).
+        let Some(geometry) = self.shaded_geometry(paint)? else {
+            return Ok(());
+        };
+        if resolved.residues.is_none()
+            && transform_preserves_axes(&to_device)
+            && let Some(rect) = stored.rect_hint
+        {
+            self.push_shaded_rect(geometry, rect, &to_device, &resolved, style, mask);
+            return Ok(());
+        }
+        let polylines = raster::flatten(&stored.segments, to_device);
+        self.push_shaded_coverage(geometry, &polylines, rule, &resolved, style, mask)
+    }
+
+    fn resolve_clip(&mut self, clip: Option<ClipId>) -> Result<ResolvedClip, RenderError> {
+        match clip {
+            Some(id) => self
+                .clips
+                .resolve(id, self.scene, self.viewport, self.resources),
+            None => Ok(open_clip()),
+        }
+    }
+
+    /// The image arm (ISO 32000-2 §8.9.5): one uniform-driven quad per placement,
+    /// with a non-Normal blend through an implicit child, as fills take it.
+    #[allow(clippy::too_many_arguments)] // one command's fields, destructured once
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
+    fn encode_image(
+        &mut self,
+        image: ImageId,
+        transform: Affine,
+        alpha: f32,
+        filter: ImageFilter,
+        clip: Option<ClipId>,
+        blend: BlendMode,
+        mask: Option<MaskId>,
+    ) -> Result<(), RenderError> {
+        let mask = self.use_mask(mask)?;
+        if blend != BlendMode::Normal && self.style == DrawStyle::Over {
+            // §11.3.5 for a single element: an implicit one-element group (the same
+            // degeneracy argument as in `encode_fill` skips it under knockout).
+            let child = self.plan_child(|encoder| {
+                encoder.encode_image(
+                    image,
+                    transform,
+                    alpha,
+                    filter,
+                    clip,
+                    BlendMode::Normal,
+                    None,
+                )
+            })?;
+            self.push_op(Op::Child(ChildOp {
+                layer: child,
+                mode: blend_word(blend),
+                alpha: 1.0,
+                clip_rect: OPEN_CLIP,
+                residue_rect: [0.0; 4],
+                residue_origin: [0.0; 2],
+                mask,
+            }));
+            return Ok(());
+        }
+        if self.resources.image(image).is_none() {
+            return Err(RenderError::UnknownImage { image });
+        }
+        self.used_images.insert(image.0);
+        let resolved = self.resolve_clip(clip)?;
+        let to_device = compose(transform, self.viewport);
+        let Some(inverse) = transform.then(self.viewport.transform).invert() else {
+            // A singular placement collapses the unit square to a zero-area set:
+            // nothing to paint, and no way to map pixels back into it.
+            return Ok(());
+        };
+        let corners = [
+            apply(&to_device, Point::new(0.0, 0.0)),
+            apply(&to_device, Point::new(1.0, 0.0)),
+            apply(&to_device, Point::new(0.0, 1.0)),
+            apply(&to_device, Point::new(1.0, 1.0)),
+        ];
+        let bx0 = corners.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        let by0 = corners.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let bx1 = corners
+            .iter()
+            .map(|p| p.x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let by1 = corners
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        // The quad drawn: footprint ∩ clip ∩ target, expanded to pixel bounds so
+        // partially covered edge pixels get their fragments.
+        let vx0 = bx0.max(resolved.rect.min.x).max(0.0);
+        let vy0 = by0.max(resolved.rect.min.y).max(0.0);
+        let vx1 = bx1.min(resolved.rect.max.x).min(self.viewport.width as f32);
+        let vy1 = by1
+            .min(resolved.rect.max.y)
+            .min(self.viewport.height as f32);
+        if vx0 >= vx1 || vy0 >= vy1 {
+            return Ok(()); // clipped to nothing: draws nothing, legitimately
+        }
+        let left = vx0.floor() as i32;
+        let top = vy0.floor() as i32;
+        let width = (vx1.ceil() as i32 - left).max(1) as u32;
+        let height = (vy1.ceil() as i32 - top).max(1) as u32;
+        let residue_origin = if resolved.residues.is_some() {
+            self.charge(u64::from(width) * u64::from(height))?;
+            match self.residue_product(&resolved, left, top, width, height)? {
+                Some(product) => {
+                    let (sx, sy) = self.pack_scratch(&product)?;
+                    Some([sx as f32, sy as f32])
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        self.push_op(Op::Image(Box::new(ImageOp {
+            image: image.0,
+            inv: [
+                inverse.a, inverse.b, inverse.c, inverse.d, inverse.e, inverse.f,
+            ],
+            image_rect: [bx0, by0, bx1, by1],
+            dest: [left as f32, top as f32, vx1.ceil(), vy1.ceil()],
+            clip: [
+                resolved.rect.min.x,
+                resolved.rect.min.y,
+                resolved.rect.max.x,
+                resolved.rect.max.y,
+            ],
+            residue_origin,
+            axis_aligned: transform_preserves_axes(&to_device),
+            alpha,
+            linear: filter == ImageFilter::Linear,
+            style: self.style,
+            mask,
+        })));
+        Ok(())
+    }
+
+    /// The shading-space geometry of a non-solid paint. `None` means a singular
+    /// shading transform made the sweep unmappable — a degenerate shading matrix
+    /// paints nothing rather than something arbitrary (§4.7).
+    ///
+    /// Callers guarantee `paint` is not `Solid`. The shaded *command's* transform is
+    /// deliberately absent here: a shading anchors to the scene through its own
+    /// transform (§8.7.4.3), not to the path it fills.
+    #[allow(clippy::cast_precision_loss)] // mesh anchors are device pixel indices
+    fn shaded_geometry(&mut self, paint: Paint) -> Result<Option<ShadedGeometry>, RenderError> {
+        match paint {
+            // The two callers matched Solid off before calling.
+            Paint::Solid(_) => unreachable!("shaded_geometry is called for non-solid paints only"),
+            Paint::Shading {
+                ramp,
+                kind,
+                transform,
+            } => {
+                if self.resources.ramp(ramp).is_none() {
+                    return Err(RenderError::UnknownRamp { ramp });
+                }
+                self.used_ramps.insert(ramp.0);
+                let Some(inverse) = transform.then(self.viewport.transform).invert() else {
+                    return Ok(None);
+                };
+                let (kind_word, extend, geo0, geo1) = match kind {
+                    ShadingKind::Axial { start, end, extend } => {
+                        (0.0, extend, [start.x, start.y, end.x, end.y], [0.0; 4])
+                    }
+                    ShadingKind::Radial {
+                        start,
+                        start_radius,
+                        end,
+                        end_radius,
+                        extend,
+                    } => (
+                        1.0,
+                        extend,
+                        [start.x, start.y, end.x, end.y],
+                        [start_radius, end_radius, 0.0, 0.0],
+                    ),
+                };
+                Ok(Some(ShadedGeometry {
+                    paint: PaintSource::Ramp(ramp.0),
+                    kind_word,
+                    extend_bits: u32::from(extend.0) | (u32::from(extend.1) << 1),
+                    geo0,
+                    geo1,
+                    inv: [
+                        inverse.a, inverse.b, inverse.c, inverse.d, inverse.e, inverse.f,
+                    ],
+                }))
+            }
+            Paint::Mesh(mesh) => {
+                let Some(stored) = self.resources.mesh(mesh) else {
+                    return Err(RenderError::UnknownMesh { mesh });
+                };
+                self.used_meshes.insert(mesh.0);
+                // Meshes sample at absolute device pixels (integration note 5): no
+                // inverse needed, the anchor is the whole mapping.
+                Ok(Some(ShadedGeometry {
+                    paint: PaintSource::Mesh(mesh.0),
+                    kind_word: 2.0,
+                    extend_bits: 0,
+                    geo0: [stored.spec.left as f32, stored.spec.top as f32, 0.0, 0.0],
+                    geo1: [0.0; 4],
+                    inv: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                }))
+            }
+        }
+    }
+
+    /// A shaded fill of a rect-hinted outline under an axis-preserving transform:
+    /// analytic coverage, no scratch tile (the shading twin of ADR 0007's fast
+    /// path).
+    #[allow(clippy::cast_precision_loss)]
+    fn push_shaded_rect(
+        &mut self,
+        geometry: ShadedGeometry,
+        rect: Rect,
+        to_device: &DeviceTransform,
+        resolved: &ResolvedClip,
+        style: DrawStyle,
+        mask: Option<u32>,
+    ) {
+        let p0 = apply(to_device, rect.min);
+        let p1 = apply(to_device, rect.max);
+        let device_rect = Rect::new(
+            Point::new(p0.x.min(p1.x), p0.y.min(p1.y)),
+            Point::new(p0.x.max(p1.x), p0.y.max(p1.y)),
+        );
+        let vx0 = device_rect.min.x.max(resolved.rect.min.x).max(0.0);
+        let vy0 = device_rect.min.y.max(resolved.rect.min.y).max(0.0);
+        let vx1 = device_rect
+            .max
+            .x
+            .min(resolved.rect.max.x)
+            .min(self.viewport.width as f32);
+        let vy1 = device_rect
+            .max
+            .y
+            .min(resolved.rect.max.y)
+            .min(self.viewport.height as f32);
+        if vx0 >= vx1 || vy0 >= vy1 {
+            return;
+        }
+        self.push_op(Op::Shaded(Box::new(ShadedOp {
+            paint: geometry.paint,
+            inv: geometry.inv,
+            kind_word: geometry.kind_word,
+            extend_bits: geometry.extend_bits,
+            geo0: geometry.geo0,
+            geo1: geometry.geo1,
+            dest: [vx0.floor(), vy0.floor(), vx1.ceil(), vy1.ceil()],
+            coverage_origin: None,
+            coverage_rect: [
+                device_rect.min.x,
+                device_rect.min.y,
+                device_rect.max.x,
+                device_rect.max.y,
+            ],
+            clip: [
+                resolved.rect.min.x,
+                resolved.rect.min.y,
+                resolved.rect.max.x,
+                resolved.rect.max.y,
+            ],
+            style,
+            mask,
+        })));
+    }
+
+    /// A shaded fill or stroke through a rasterised coverage tile in scratch.
+    #[allow(clippy::cast_precision_loss, clippy::arithmetic_side_effects)]
+    fn push_shaded_coverage(
+        &mut self,
+        geometry: ShadedGeometry,
+        polylines: &[Polyline],
+        rule: Rule,
+        resolved: &ResolvedClip,
+        style: DrawStyle,
+        mask: Option<u32>,
+    ) -> Result<(), RenderError> {
+        let Some(tile) = self.coverage_tile(polylines, rule, resolved)? else {
+            return Ok(());
+        };
+        let (sx, sy) = self.pack_scratch(&tile)?;
+        self.push_op(Op::Shaded(Box::new(ShadedOp {
+            paint: geometry.paint,
+            inv: geometry.inv,
+            kind_word: geometry.kind_word,
+            extend_bits: geometry.extend_bits,
+            geo0: geometry.geo0,
+            geo1: geometry.geo1,
+            // The quad is exactly the tile: the shader's texel arithmetic
+            // (`coverage.xy + p − dest.xy`) depends on it.
+            dest: [
+                tile.left as f32,
+                tile.top as f32,
+                (tile.left + tile.width.cast_signed()) as f32,
+                (tile.top + tile.height.cast_signed()) as f32,
+            ],
+            coverage_origin: Some([sx as f32, sy as f32]),
+            coverage_rect: [0.0; 4],
+            clip: [
+                resolved.rect.min.x,
+                resolved.rect.min.y,
+                resolved.rect.max.x,
+                resolved.rect.max.y,
+            ],
+            style,
+            mask,
+        })));
+        Ok(())
+    }
+
+    /// The glyph lane: rasterise (or find) the tile for this key and emit its quad.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
+    #[allow(clippy::too_many_arguments)] // one draw's parameters, threaded once
+    fn push_glyph(
+        &mut self,
+        outline: OutlineId,
+        to_device: &DeviceTransform,
+        rule: Rule,
+        color: quorra_scene::Color,
+        resolved: &ResolvedClip,
+        style: DrawStyle,
+        mask: Option<u32>,
+    ) -> Result<(), RenderError> {
+        let (ix, fx) = (to_device.e.floor(), to_device.e - to_device.e.floor());
+        let (iy, fy) = (to_device.f.floor(), to_device.f - to_device.f.floor());
+        let (phase, px, py) = match self.quantum {
+            Some(q) => {
+                let fq = f32::from(q);
+                let nx = (fx * fq).round() as u16 % q;
+                let ny = (fy * fq).round() as u16 % q;
+                (
+                    PhaseKey::Quantised(nx, ny),
+                    f32::from(nx) / fq,
+                    f32::from(ny) / fq,
+                )
+            }
+            None => (PhaseKey::Exact(fx.to_bits(), fy.to_bits()), fx, fy),
+        };
+        let key = GlyphKey {
+            outline: outline.0,
+            linear: [
+                to_device.a.to_bits(),
+                to_device.b.to_bits(),
+                to_device.c.to_bits(),
+                to_device.d.to_bits(),
+            ],
+            phase,
+        };
+        self.atlas_keys.insert(key);
+
+        let entry = if let Some(entry) = self.atlas.get(&key) {
+            Some(entry)
+        } else {
+            {
+                let stored = self
+                    .resources
+                    .outline(outline)
+                    .ok_or(RenderError::UnknownOutline { outline })?;
+                let tile_transform = DeviceTransform {
+                    e: px,
+                    f: py,
+                    ..*to_device
+                };
+                let polylines = raster::flatten(&stored.segments, tile_transform);
+                let Some((x0, y0, x1, y1)) = raster::polyline_bounds(&polylines) else {
+                    return Ok(());
+                };
+                let left = x0.floor() as i32;
+                let top = y0.floor() as i32;
+                let width = (x1.ceil() as i32 - left).max(0) as u32;
+                let height = (y1.ceil() as i32 - top).max(0) as u32;
+                if width == 0 || height == 0 {
+                    return Ok(());
+                }
+                self.charge(u64::from(width) * u64::from(height))?;
+                let tile = raster::fill_mask(&polylines, rule, left, top, width, height);
+                let inserted = self.atlas.insert(key, &tile);
+                if inserted.is_none() {
+                    // Atlas full: this tile draws uncached, and the device repacks
+                    // the atlas after the frame. Same pixels either way — one
+                    // rasteriser feeds both paths.
+                    self.atlas_pressure = true;
+                    let dest = Point::new(ix + tile.left as f32, iy + tile.top as f32);
+                    return self.push_scratch_quad(&tile, dest, color, resolved.rect, style, mask);
+                }
+                inserted
+            }
+        };
+        if let Some(entry) = entry {
+            let dest = Point::new(ix + entry.tile_left as f32, iy + entry.tile_top as f32);
+            let device_rect = Rect::new(
+                dest,
+                Point::new(dest.x + entry.width as f32, dest.y + entry.height as f32),
+            );
+            if device_rect.intersection(resolved.rect).is_empty() {
+                return Ok(());
+            }
+            self.push_quad_instance(
+                dest,
+                entry.width as f32,
+                entry.height as f32,
+                entry.x as f32,
+                entry.y as f32,
+                0.0, // source: atlas
+                color,
+                resolved.rect,
+                style,
+                mask,
+            );
+        }
+        Ok(())
+    }
+
+    /// The path lane: rasterise coverage for these polylines over the visible
+    /// region, multiply residue clips in, pack into scratch, emit the quad.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
+    fn push_coverage(
+        &mut self,
+        polylines: &[Polyline],
+        rule: Rule,
+        color: quorra_scene::Color,
+        resolved: &ResolvedClip,
+        mask: Option<u32>,
+    ) -> Result<(), RenderError> {
+        let style = self.style;
+        self.push_coverage_styled(polylines, rule, color, resolved, style, mask)
+    }
+
+    #[allow(clippy::too_many_arguments)] // one draw's parameters, threaded once
+    #[allow(clippy::cast_precision_loss)]
+    fn push_coverage_styled(
+        &mut self,
+        polylines: &[Polyline],
+        rule: Rule,
+        color: quorra_scene::Color,
+        resolved: &ResolvedClip,
+        style: DrawStyle,
+        mask: Option<u32>,
+    ) -> Result<(), RenderError> {
+        let Some(tile) = self.coverage_tile(polylines, rule, resolved)? else {
+            return Ok(());
+        };
+        let dest = Point::new(tile.left as f32, tile.top as f32);
+        self.push_scratch_quad(&tile, dest, color, resolved.rect, style, mask)
+    }
+
+    /// Rasterise the visible coverage of these polylines — shape ∩ clip ∩ target,
+    /// residue clips multiplied in — or `None` when nothing is visible.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
+    fn coverage_tile(
+        &mut self,
+        polylines: &[Polyline],
+        rule: Rule,
+        resolved: &ResolvedClip,
+    ) -> Result<Option<raster::CoverageMask>, RenderError> {
+        let Some((x0, y0, x1, y1)) = raster::polyline_bounds(polylines) else {
+            return Ok(None);
+        };
+        // The visible region: shape ∩ clip rectangle ∩ target.
+        let vx0 = x0.max(resolved.rect.min.x).max(0.0);
+        let vy0 = y0.max(resolved.rect.min.y).max(0.0);
+        let vx1 = x1.min(resolved.rect.max.x).min(self.viewport.width as f32);
+        let vy1 = y1.min(resolved.rect.max.y).min(self.viewport.height as f32);
+        if vx0 >= vx1 || vy0 >= vy1 {
+            return Ok(None);
+        }
+        let left = vx0.floor() as i32;
+        let top = vy0.floor() as i32;
+        let width = (vx1.ceil() as i32 - left).max(0) as u32;
+        let height = (vy1.ceil() as i32 - top).max(0) as u32;
+        if width == 0 || height == 0 {
+            return Ok(None);
+        }
+        self.charge(u64::from(width) * u64::from(height))?;
+        let mut tile = raster::fill_mask(polylines, rule, left, top, width, height);
+
+        // Residue links multiply in: coverage of clip ∧ shape, per pixel.
+        if let Some(product) = self.residue_product(resolved, left, top, width, height)? {
+            for (m, l) in tile.coverage.iter_mut().zip(&product.coverage) {
+                *m = ((u16::from(*m) * u16::from(*l) + 127) / 255) as u8;
+            }
+        }
+        Ok(Some(tile))
+    }
+
+    /// Pack into scratch, charging is the caller's; splits from `push_scratch_quad`
+    /// so residue planning can pack without emitting a quad.
+    fn pack_scratch(&mut self, tile: &raster::CoverageMask) -> Result<(u32, u32), RenderError> {
+        self.scratch
+            .pack(tile)
+            .ok_or(RenderError::FrameBudgetExceeded {
+                needed: self.spent,
+                budget: u64::from(self.scratch.width)
+                    .saturating_mul(u64::from(self.scratch.max_height)),
+            })
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::too_many_arguments)] // one draw's parameters, threaded once
+    fn push_scratch_quad(
+        &mut self,
+        tile: &raster::CoverageMask,
+        dest: Point,
+        color: quorra_scene::Color,
+        clip: Rect,
+        style: DrawStyle,
+        mask: Option<u32>,
+    ) -> Result<(), RenderError> {
+        let (sx, sy) = self.pack_scratch(tile)?;
+        self.push_quad_instance(
+            dest,
+            tile.width as f32,
+            tile.height as f32,
+            sx as f32,
+            sy as f32,
+            1.0, // source: scratch
+            color,
+            clip,
+            style,
+            mask,
+        );
+        Ok(())
+    }
+
+    fn charge(&mut self, bytes: u64) -> Result<(), RenderError> {
+        let needed = self.spent.saturating_add(bytes);
+        if needed > self.budget {
+            return Err(RenderError::FrameBudgetExceeded {
+                needed,
+                budget: self.budget,
+            });
+        }
+        self.spent = needed;
+        Ok(())
+    }
+
+    fn push_rect_instance(&mut self, rect: Rect, color: quorra_scene::Color, mask: Option<u32>) {
+        let premultiplied = [
+            color.r * color.a,
+            color.g * color.a,
+            color.b * color.a,
+            color.a,
+        ];
+        for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+            self.rect_instances.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in premultiplied {
+            self.rect_instances.extend_from_slice(&value.to_le_bytes());
+        }
+        let style = self.style;
+        self.note_batch(BatchKind::Rect, style, mask);
+    }
+
+    #[allow(clippy::too_many_arguments)] // one instance layout, one writer
+    fn push_quad_instance(
+        &mut self,
+        dest: Point,
+        width: f32,
+        height: f32,
+        tex_x: f32,
+        tex_y: f32,
+        source: f32,
+        color: quorra_scene::Color,
+        clip: Rect,
+        style: DrawStyle,
+        mask: Option<u32>,
+    ) {
+        let premultiplied = [
+            color.r * color.a,
+            color.g * color.a,
+            color.b * color.a,
+            color.a,
+        ];
+        let values = [
+            dest.x,
+            dest.y,
+            width,
+            height,
+            tex_x,
+            tex_y,
+            source,
+            0.0,
+            premultiplied[0],
+            premultiplied[1],
+            premultiplied[2],
+            premultiplied[3],
+            clip.min.x,
+            clip.min.y,
+            clip.max.x,
+            clip.max.y,
+        ];
+        for value in values {
+            self.quad_instances.extend_from_slice(&value.to_le_bytes());
+        }
+        self.note_batch(BatchKind::Quad, style, mask);
+    }
+
+    /// The plan currently under construction.
+    fn plan_mut(&mut self) -> &mut LayerPlan {
+        if self.current_plan == usize::MAX {
+            &mut self.root
+        } else {
+            &mut self.layers[self.current_plan]
+        }
+    }
+
+    fn push_op(&mut self, op: Op) {
+        self.plan_mut().ops.push(op);
+    }
+
+    /// Extend the current batch, or start a new one on any switch of lane, style or
+    /// mask — scene order is preserved by breaking batches, never by reordering.
+    #[allow(clippy::cast_possible_truncation, clippy::arithmetic_side_effects)]
+    fn note_batch(&mut self, kind: BatchKind, style: DrawStyle, mask: Option<u32>) {
+        let index = match kind {
+            BatchKind::Rect => (self.rect_instances.len() as u64 / RECT_INSTANCE_STRIDE) - 1,
+            BatchKind::Quad => (self.quad_instances.len() as u64 / QUAD_INSTANCE_STRIDE) - 1,
+        } as u32;
+        if let Some(Op::Draw(last)) = self.plan_mut().ops.last_mut()
+            && last.kind == kind
+            && last.style == style
+            && last.mask == mask
+            && last.first + last.count == index
+        {
+            last.count += 1;
+            return;
+        }
+        self.push_op(Op::Draw(Batch {
+            kind,
+            first: index,
+            count: 1,
+            style,
+            mask,
+        }));
+    }
+}
+
+/// §11.3.5's mode numbering for the composite shader: `BlendMode`'s declaration
+/// order, which follows the clause's own table.
+pub(crate) fn blend_word(mode: BlendMode) -> u32 {
+    match mode {
+        BlendMode::Normal => 0,
+        BlendMode::Multiply => 1,
+        BlendMode::Screen => 2,
+        BlendMode::Overlay => 3,
+        BlendMode::Darken => 4,
+        BlendMode::Lighten => 5,
+        BlendMode::ColorDodge => 6,
+        BlendMode::ColorBurn => 7,
+        BlendMode::HardLight => 8,
+        BlendMode::SoftLight => 9,
+        BlendMode::Difference => 10,
+        BlendMode::Exclusion => 11,
+        BlendMode::Hue => 12,
+        BlendMode::Saturation => 13,
+        BlendMode::Color => 14,
+        BlendMode::Luminosity => 15,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quorra_scene::{Affine, Color, Point, Rect, SceneBuilder};
+
+    use super::{BatchKind, encode};
+    use crate::atlas::AtlasStore;
+    use crate::error::RenderError;
+    use crate::resources::ResourceStore;
+    use crate::viewport::Viewport;
+
+    fn no_resources() -> ResourceStore {
+        ResourceStore::new(0)
+    }
+
+    fn empty_atlas() -> AtlasStore {
+        AtlasStore::new(1024, 1024)
+    }
+
+    fn scene_with_one_rect() -> quorra_scene::Scene {
+        let mut builder = SceneBuilder::new();
+        builder
+            .rect(
+                Rect::new(Point::new(1.0, 2.0), Point::new(3.0, 5.0)),
+                Affine::IDENTITY,
+                Color::new(1.0, 0.5, 0.0, 0.5),
+                None,
+                None,
+            )
+            .expect("valid input");
+        builder.finish()
+    }
+
+    /// One rect, identity viewport: one instance, one rect batch, premultiplied
+    /// colour at bytes 16..32.
+    #[test]
+    fn encodes_one_instance_with_premultiplied_color() {
+        let scene = scene_with_one_rect();
+        let viewport = Viewport::full(10, 10, Affine::IDENTITY);
+        let encoded = encode(
+            &scene,
+            &viewport,
+            u64::MAX,
+            4096,
+            &no_resources(),
+            &mut empty_atlas(),
+            Some(16),
+        )
+        .expect("within budget");
+        assert_eq!(encoded.commands, 1);
+        assert_eq!(encoded.rect_instances.len(), 32);
+        assert_eq!(encoded.root.ops.len(), 1);
+        assert!(matches!(
+            encoded.root.ops[0],
+            super::Op::Draw(super::Batch {
+                kind: BatchKind::Rect,
+                ..
+            })
+        ));
+        let read_f32 = |offset: usize| {
+            let bytes: [u8; 4] = encoded.rect_instances[offset..offset + 4]
+                .try_into()
+                .expect("in bounds");
+            f32::from_le_bytes(bytes)
+        };
+        assert!((read_f32(16) - 0.5).abs() < 1e-6);
+        assert!((read_f32(20) - 0.25).abs() < 1e-6);
+        assert!((read_f32(24) - 0.0).abs() < 1e-6);
+        assert!((read_f32(28) - 0.5).abs() < 1e-6);
+    }
+
+    /// An oblique rectangle no longer refuses: it takes the path lane and comes back
+    /// as a scratch quad.
+    #[test]
+    fn oblique_rect_takes_the_path_lane() {
+        let mut builder = SceneBuilder::new();
+        let shear = Affine {
+            a: 1.0,
+            b: 0.3,
+            c: 0.0,
+            d: 1.0,
+            e: 2.0,
+            f: 2.0,
+        };
+        builder
+            .rect(
+                Rect::new(Point::new(0.0, 0.0), Point::new(4.0, 4.0)),
+                shear,
+                Color::new(0.0, 0.0, 0.0, 1.0),
+                None,
+                None,
+            )
+            .expect("valid rect");
+        let scene = builder.finish();
+        let viewport = Viewport::full(16, 16, Affine::IDENTITY);
+        let encoded = encode(
+            &scene,
+            &viewport,
+            u64::MAX,
+            4096,
+            &no_resources(),
+            &mut empty_atlas(),
+            Some(16),
+        )
+        .expect("drawable since M5");
+        assert_eq!(encoded.root.ops.len(), 1);
+        assert!(matches!(
+            encoded.root.ops[0],
+            super::Op::Draw(super::Batch {
+                kind: BatchKind::Quad,
+                ..
+            })
+        ));
+        assert!(encoded.scratch.is_some());
+    }
+
+    /// The budget is checked before allocation, and the error names both numbers.
+    #[test]
+    fn budget_is_checked_before_allocation() {
+        let scene = scene_with_one_rect();
+        let viewport = Viewport::full(10, 10, Affine::IDENTITY);
+        match encode(
+            &scene,
+            &viewport,
+            16,
+            4096,
+            &no_resources(),
+            &mut empty_atlas(),
+            Some(16),
+        ) {
+            Err(RenderError::FrameBudgetExceeded { needed, budget }) => {
+                assert_eq!(needed, 96);
+                assert_eq!(budget, 16);
+            }
+            other => panic!("expected FrameBudgetExceeded, got {other:?}"),
+        }
+    }
+
+    /// A blank scene encodes to zero instances and zero batches, without error.
+    #[test]
+    fn blank_scene_encodes_to_nothing() {
+        let scene = SceneBuilder::new().finish();
+        let viewport = Viewport::full(10, 10, Affine::IDENTITY);
+        let encoded = encode(
+            &scene,
+            &viewport,
+            u64::MAX,
+            4096,
+            &no_resources(),
+            &mut empty_atlas(),
+            Some(16),
+        )
+        .expect("blank is legitimate");
+        assert_eq!(encoded.commands, 0);
+        assert!(encoded.root.ops.is_empty());
+        assert!(encoded.scratch.is_none());
+    }
+}

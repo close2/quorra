@@ -45,6 +45,9 @@ than quietly compromising.
 
 ### 1. Quality first — no shortcuts
 
+High-quality, best-practices code is extremely important to this project — it is the
+first principle on purpose, and it outranks getting a milestone done sooner.
+
 - No placeholder implementations, no `todo!()` left in merged code, no "we'll fix it
   later" paths. If something cannot be done properly now, it is not started now.
 - No silent error swallowing. Every error is typed, propagated, and handled somewhere
@@ -54,6 +57,27 @@ than quietly compromising.
 - `clippy::pedantic` clean. Warnings are errors in CI.
 - If a shortcut is genuinely the right call, it is documented as a deliberate decision
   with its cost written down — never taken silently.
+
+#### The quality bar, at file and function scale
+
+Principle 4's "each crate with one stated responsibility" applies fractally: **a file
+owns one responsibility too, and so does a function.** Concretely:
+
+- **A source file approaching ~500 lines is a smell that it holds two
+  responsibilities.** Rustdoc does not excuse it — a reader still has to hold the
+  whole file to review it. Split along the responsibility seam (errors, a subsystem's
+  state machine, a conversion boundary each deserve their own module), not along an
+  arbitrary line count. A file that is genuinely one irreducible thing at 600 lines
+  is fine *when the module comment says what that one thing is*.
+- **Functions stay small enough to review in one reading.** The clippy limits
+  (`too_many_lines`, `cognitive-complexity-threshold` in `clippy.toml`) are the
+  enforcement; an `#[allow]` with a reason is the documented exception, and orchestral
+  functions get split into named phases instead of allowed.
+- **Types live where their responsibility is, not where they were first needed.** An
+  error enum that serves a whole crate is its own module, not a tenant of whichever
+  file first returned it.
+- **Tests and shaders are code.** The same bar applies: a test file per concern, a
+  WGSL function per clause, invariants stated beside both.
 
 ### 2. Fast — including startup
 

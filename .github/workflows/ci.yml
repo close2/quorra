@@ -1,0 +1,47 @@
+# CI: warnings are errors, tests run on a real (software) Vulkan adapter, and the
+# perf gate runs in release with timestamp-query numbers (CLAUDE.md principle 2).
+#
+# The runner has no GPU; mesa's lavapipe provides a Vulkan adapter (llvmpipe), which
+# is exactly the arrangement the consuming project's CI relies on. The cross-adapter
+# gate degrades to a one-adapter note here and does its real work on developer
+# machines, where RADV is also present.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show # respects rust-toolchain.toml
+      - name: Install lavapipe (software Vulkan) and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers xvfb
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Clippy, all targets, warnings as errors
+        run: cargo clippy --workspace --all-targets
+      - name: Tests (unit, golden, byte-equality and refusal gates)
+        run: cargo test --workspace
+      - name: Perf gate (release, timestamp queries)
+        run: cargo test --release -p quorra-gpu --test perf_gate -- --nocapture
+      - name: Window smoke (surface path presents real frames under Xvfb)
+        run: xvfb-run -a cargo run -p quorra-gpu --example window_smoke
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-deny (licences, bans, advisories)
+        uses: EmbarkStudios/cargo-deny-action@v2

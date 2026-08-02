@@ -9,11 +9,13 @@
 //!
 //! # State
 //!
-//! **Skeleton.** The requirements are in `doc/RENDER_LIBRARY.md`, the order of work in
-//! `doc/PLAN.md`, and `doc/adr/0003` says what a module may contain before the milestone
-//! that fills it. Nothing renders yet, and nothing pretends to.
+//! **M1.** A device (headless and surface-attached), the three targets of the brief's
+//! §2.4, analytically-covered axis-aligned rectangles, timestamped and truthful
+//! frames, and the startup split of §7. The requirements are in
+//! `doc/RENDER_LIBRARY.md`, the order of work in `doc/PLAN.md`, and `doc/adr/0003`
+//! says what a module may contain before the milestone that fills it.
 //!
-//! # The shape of the API, once there is one
+//! # The shape of the API
 //!
 //! Two halves, and the split is enforced by the dependency graph rather than by review
 //! (`doc/adr/0001`):
@@ -25,18 +27,35 @@
 //! - [`gpu`] — the device, the pipelines, the atlas, and a frame that tells the truth about
 //!   itself.
 //!
-//! ```text
-//! let mut device = Device::headless(&Options::default())?;   // background thread welcome
-//! let outline = device.upload_outline(&segments)?;           // once; referenced thousands of times
+//! ```no_run
+//! use quorra::{Affine, Color, Device, Options, Point, Rect, SceneBuilder, Target, Viewport};
 //!
-//! let mut builder = SceneBuilder::new();                     // no device needed
-//! builder.fill(outline, transform, FillRule::NonZero, Paint::Solid(black),
-//!              None, None, BlendMode::Normal, Compose::SrcOver);
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut device = Device::headless(&Options::default())?; // background thread welcome
+//!
+//! let mut builder = SceneBuilder::new(); // no device needed
+//! builder.rect(
+//!     Rect::new(Point::new(10.0, 10.0), Point::new(90.5, 40.25)),
+//!     Affine::IDENTITY,
+//!     Color::new(0.0, 0.0, 0.0, 1.0),
+//!     None, // no clip
+//!     None, // no soft mask
+//! )?;
 //! let scene = builder.finish();
 //!
-//! let frame = device.render(&scene, &viewport, Target::Surface)?;
-//! for report in frame.reports() { /* what could not be drawn as asked */ }
+//! let viewport = Viewport::full(200, 100, Affine::IDENTITY);
+//! let frame = device.render(&scene, &viewport, Target::Readback)?;
+//! for report in frame.reports() {
+//!     // what could not be drawn as asked
+//! }
+//! let raster = frame.into_raster()?; // straight-alpha RGBA8
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! (M2 replaces the rectangle-only vocabulary with `fill`/`stroke` over uploaded
+//! outlines — the brief's §2.2 — at which point this example grows an
+//! `upload_outline` call.)
 //!
 //! # Two promises worth reading before the rest
 //!
@@ -59,5 +78,14 @@ pub use quorra_scene as scene;
 pub use quorra_gpu as gpu;
 
 pub use quorra_scene::{
-    BlendMode, ClipId, Compose, FillRule, ImageId, MaskId, MeshId, OutlineId, RampId, ResourceId,
+    Affine, BlendMode, ClipDef, ClipId, Color, Command, Compose, Cost, FillRule, GroupSpec,
+    ImageId, ImageSpec, LineCap, LineJoin, MAX_COORDINATE, MAX_GROUP_DEPTH, MaskId, MeshId,
+    MeshSpec, OutlineId, Paint, Point, RampId, Rect, ResourceId, Scene, SceneBuilder, SceneError,
+    Segment, Size, Stop, Stroke,
+};
+
+pub use quorra_gpu::{
+    Counters, DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_RESOURCE_BYTES, Device, DeviceError, Frame,
+    Limits, Options, Raster, RenderError, Report, ReportKind, ResourceProblem, StartupTimings,
+    SurfaceProblem, Target, TimingProvenance, Timings, Viewport,
 };

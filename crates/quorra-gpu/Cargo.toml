@@ -7,12 +7,21 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Nothing is declared yet, and that is deliberate rather than an oversight: no module in
-# this crate contains code (doc/adr/0003), so a dependency here would be a dependency
-# compiled for nobody. `wgpu`, `thiserror` and `pollster` are pinned and argued for in the
-# workspace manifest and in doc/adr/0002; M1 references them from here with
-# `dep.workspace = true` in the commit that first calls one.
+# Versions are pinned once, in the workspace manifest, and argued for there and in
+# doc/adr/0002.
 [dependencies]
+quorra-scene.workspace = true
+thiserror.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+
+[dev-dependencies]
+# PNG artefacts for failing golden tests: straight-alpha RGBA in, which is exactly what
+# a `Readback` frame hands back (§3 of the brief), so no conversion sits between a
+# failing test and the image a person looks at.
+png.workspace = true
+# The surface-path smoke test's window; see the workspace manifest.
+winit.workspace = true
 
 [lints]
 workspace = true

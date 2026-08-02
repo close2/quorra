@@ -1,44 +1,265 @@
-//! The glyph atlas.
-//!
-//! **Skeleton — M4 fills this** (`doc/adr/0003`).
+//! The glyph atlas: cached coverage tiles, keyed by what actually repeats.
 //!
 //! # The number that decides the design
 //!
-//! One dense page of ISO 32000-2 is **5 933 fills of 107 distinct outlines**, and today
-//! every one of the 5 933 is flattened again on every frame. The caller priced a coverage
-//! cache for its *CPU* backend and refused it, and the measurement transfers (its ADR 0131):
+//! One dense page of the caller's corpus is **5 933 fills of 107 distinct outlines**
+//! (§6.3 of the brief). A glyph's sub-pixel phase is an arbitrary float, so an
+//! exactly-correct cache never hits; quantised to 1/16 of a pixel it hit 5.0× on that
+//! page and left the caller's oracle unmoved, where 1/8 contradicted pages (their
+//! ADR 0131). The quantum is therefore §4.5's fifth decision — the one that is the
+//! caller's to make and ours to expose: [`crate::device::Options::glyph_quantum`],
+//! default 1/16, settable, and `None` switches quantisation off (exact-phase keying,
+//! which still caches exact repeats).
 //!
-//! | keying | reuse on that page | reuse on `tracemonkey.pdf` | oracle |
-//! |---|---|---|---|
-//! | exact position | 116 hits of 5 933 | **not once** | clean |
-//! | quantised to 1/8 pixel | — | — | **contradicts pages** |
-//! | quantised to 1/16 pixel | **5.0×** | 1.3× | clean |
+//! # Keying
 //!
-//! A glyph's sub-pixel phase is an arbitrary float, so an exactly-correct cache never hits.
-//! At 1/16 of a pixel it hits five times over on a dense page and the oracle's verdicts do
-//! not move. The caller refused it because `tiny-skia` provides no blitter for a cached
-//! coverage bitmap; **on a GPU the blitter is a textured quad, which is the natural
-//! primitive** — so the same number that stopped them is the reason we build it.
+//! `(outline, linear part bit-exact, quantised phase)`. The linear part is keyed by
+//! its f32 bit patterns rather than a bucket: every occurrence of a glyph at one font
+//! size carries the *identical* matrix, so exact bits hit exactly where reuse exists,
+//! and an arbitrary zoom animation simply misses (rasterising is the correct cost of
+//! new geometry). Recorded with the design in ADR 0009.
 //!
-//! # The contract
+//! # Storage, eviction, and honesty
 //!
-//! - Key on `(outline, scale bucket, sub-pixel phase)` with the **quantum settable and
-//!   documented** — §4.5's fifth decision, the one the caller wants to make and needs us to
-//!   expose. Default 1/16 if we like, but settable, and switchable off. **Quantising glyph
-//!   positions silently would change where the text sits**, and the oracle would contradict
-//!   pages with nobody able to say why.
-//! - An **R8 coverage atlas with eviction, sized from a budget the caller sets**, not from a
-//!   constant of ours.
-//! - **Report the count of distinct keys, not the hit rate** (`crate::frame::Counters`).
-//!
-//! # Two questions M4 answers with measurements
-//!
-//! - **§11.3: what does the atlas cost on a page it cannot help?** `tracemonkey.pdf` reuses
-//!   1.3×. A cache that is 5× on one page and a net loss on another is a decision, not a
-//!   feature — and the decision needs both numbers.
-//! - **Where the coverage is rasterised.** If the atlas is filled on the CPU by `tiny-skia`,
-//!   the glyphs come from *the same code that is the caller's correctness oracle*, which is
-//!   a correctness argument no other arrangement gets for free. Against it: a dependency, a
-//!   transfer per new glyph, and a CPU cost on the frame that first needs one. §6.3 offers
-//!   this as persuasive rather than prescriptive, so it is an ADR with a measurement, not a
-//!   preference.
+//! One R8 texture sized from [`crate::device::Options::atlas_budget`], shelf-packed.
+//! When a frame's tiles no longer fit, the atlas resets and repacks what *this* frame
+//! needs; tiles that still do not fit fall through to the scratch path (drawn
+//! uncached, correctly) rather than failing the frame. `Counters` reports
+//! `atlas_distinct_keys` — the count of distinct keys a frame asked for, deliberately
+//! not a hit rate (§6.3's lesson: a hit rate describes the lookups you made, never
+//! the ones you should have made).
+
+use std::collections::HashMap;
+
+use crate::raster::CoverageMask;
+
+/// The sub-pixel phase part of a key: quantised to `1/q` when a quantum is set,
+/// bit-exact otherwise. Two variants rather than a silently-exact quantum of 1, so
+/// "off" is visible in the type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum PhaseKey {
+    /// Numerator pair under the configured denominator.
+    Quantised(u16, u16),
+    /// Exact f32 bit patterns of the fractional translation.
+    Exact(u32, u32),
+}
+
+/// What repeats, made hashable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct GlyphKey {
+    pub outline: u32,
+    /// Bit patterns of the composed device linear part (a, b, c, d).
+    pub linear: [u32; 4],
+    pub phase: PhaseKey,
+}
+
+/// A resident tile: where it sits in the atlas, and how the tile's pixels relate to
+/// the quantised origin it was rasterised against.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AtlasEntry {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Tile origin relative to the (integer-translated) glyph origin.
+    pub tile_left: i32,
+    pub tile_top: i32,
+}
+
+/// One shelf of the packer: a horizontal strip of fixed height filling left to right.
+#[derive(Debug, Clone, Copy)]
+struct Shelf {
+    y: u32,
+    height: u32,
+    cursor: u32,
+}
+
+/// A pending pixel upload into the atlas texture, staged CPU-side until the device
+/// flushes it before the frame's passes.
+#[derive(Debug)]
+pub(crate) struct AtlasUpload {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// The CPU-side state of the atlas: the packer, the key table, and the uploads the
+/// next flush owes the texture. The `wgpu` texture itself lives on the device, which
+/// creates it lazily on the first frame that needs a glyph (startup rule, §7).
+#[derive(Debug)]
+pub(crate) struct AtlasStore {
+    width: u32,
+    height: u32,
+    shelves: Vec<Shelf>,
+    next_shelf_y: u32,
+    entries: HashMap<GlyphKey, AtlasEntry>,
+    pending: Vec<AtlasUpload>,
+    /// Bumped on every reset; the device recreates its bind group when it changes.
+    pub generation: u64,
+}
+
+impl AtlasStore {
+    /// An atlas sized from the byte budget: near-square (an R8 texel is one byte),
+    /// width capped at 2048 and both sides clamped to the device's texture limit.
+    pub(crate) fn new(budget_bytes: u64, max_dimension: u32) -> Self {
+        #[allow(clippy::cast_possible_truncation)] // isqrt of a u64 budget fits u32 here
+        let side = (budget_bytes.isqrt().max(1) as u32)
+            .min(2048)
+            .min(max_dimension.max(1));
+        let width = side;
+        // Width is at least 1 by the max(1) above, so the division is total.
+        #[allow(clippy::cast_possible_truncation, clippy::arithmetic_side_effects)]
+        let height = ((budget_bytes / u64::from(width)).max(1) as u32).min(max_dimension.max(1));
+        Self {
+            width,
+            height,
+            shelves: Vec::new(),
+            next_shelf_y: 0,
+            entries: HashMap::new(),
+            pending: Vec::new(),
+            generation: 0,
+        }
+    }
+
+    pub(crate) fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn get(&self, key: &GlyphKey) -> Option<AtlasEntry> {
+        self.entries.get(key).copied()
+    }
+
+    /// Take the uploads owed to the texture (the device flushes them each frame).
+    pub(crate) fn take_pending(&mut self) -> Vec<AtlasUpload> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Insert a rasterised tile under its key. `None` when the tile cannot fit even
+    /// in an empty atlas — the caller then draws it through the scratch path instead.
+    ///
+    /// On a full atlas this does **not** evict piecemeal: it fails, and the encoder
+    /// resets and repacks the frame's working set (`reset`), which keeps the packing
+    /// deterministic — the same scene always produces the same atlas layout (§4.6).
+    pub(crate) fn insert(&mut self, key: GlyphKey, mask: &CoverageMask) -> Option<AtlasEntry> {
+        let (x, y) = self.allocate(mask.width, mask.height)?;
+        let entry = AtlasEntry {
+            x,
+            y,
+            width: mask.width,
+            height: mask.height,
+            tile_left: mask.left,
+            tile_top: mask.top,
+        };
+        self.entries.insert(key, entry);
+        self.pending.push(AtlasUpload {
+            x,
+            y,
+            width: mask.width,
+            height: mask.height,
+            pixels: mask.coverage.clone(),
+        });
+        Some(entry)
+    }
+
+    /// Drop every entry and start packing afresh. Pending uploads die with the
+    /// layout they were packed for.
+    pub(crate) fn reset(&mut self) {
+        self.shelves.clear();
+        self.next_shelf_y = 0;
+        self.entries.clear();
+        self.pending.clear();
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    #[allow(clippy::arithmetic_side_effects)] // packer arithmetic is bounded by the texture dims
+    fn allocate(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+        if width == 0 || height == 0 || width > self.width {
+            return None;
+        }
+        // First shelf tall enough with room; heights are capped at 2× the request so
+        // a short tile cannot squat in a tall shelf forever.
+        for shelf in &mut self.shelves {
+            if shelf.height >= height
+                && shelf.height <= height.saturating_mul(2)
+                && shelf.cursor + width <= self.width
+            {
+                let position = (shelf.cursor, shelf.y);
+                shelf.cursor += width;
+                return Some(position);
+            }
+        }
+        if self.next_shelf_y + height <= self.height {
+            let opened = Shelf {
+                y: self.next_shelf_y,
+                height,
+                cursor: width,
+            };
+            self.next_shelf_y += height;
+            let placement = (0, opened.y);
+            self.shelves.push(opened);
+            return Some(placement);
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)] // test tile sizes are tiny and literal
+mod tests {
+    use super::{AtlasStore, GlyphKey, PhaseKey};
+    use crate::raster::CoverageMask;
+
+    fn key(outline: u32, phase: (u16, u16)) -> GlyphKey {
+        GlyphKey {
+            outline,
+            linear: [0, 0, 0, 0],
+            phase: PhaseKey::Quantised(phase.0, phase.1),
+        }
+    }
+
+    fn tile(width: u32, height: u32) -> CoverageMask {
+        CoverageMask {
+            left: 0,
+            top: 0,
+            width,
+            height,
+            coverage: vec![255; (width * height) as usize],
+        }
+    }
+
+    /// Insert, hit, and the pending upload carries the packed position.
+    #[test]
+    fn insert_then_hit() {
+        let mut atlas = AtlasStore::new(64 * 64, 4096);
+        let entry = atlas.insert(key(1, (0, 0)), &tile(10, 12)).expect("fits");
+        assert_eq!(
+            atlas.get(&key(1, (0, 0))).map(|e| (e.x, e.y)),
+            Some((entry.x, entry.y))
+        );
+        assert!(atlas.get(&key(2, (0, 0))).is_none());
+        let uploads = atlas.take_pending();
+        assert_eq!(uploads.len(), 1);
+        assert_eq!((uploads[0].width, uploads[0].height), (10, 12));
+    }
+
+    /// A tile wider than the atlas can never fit; a full atlas refuses without
+    /// panicking; a reset clears both entries and layout.
+    #[test]
+    fn overflow_refuses_and_reset_clears() {
+        let mut atlas = AtlasStore::new(16 * 16, 16);
+        assert!(atlas.insert(key(1, (0, 0)), &tile(64, 4)).is_none());
+        assert!(atlas.insert(key(2, (0, 0)), &tile(16, 16)).is_some());
+        assert!(atlas.insert(key(3, (0, 0)), &tile(16, 16)).is_none());
+        let generation = atlas.generation;
+        atlas.reset();
+        assert_eq!(atlas.entry_count(), 0);
+        assert!(atlas.generation > generation);
+        assert!(atlas.insert(key(3, (0, 0)), &tile(16, 16)).is_some());
+    }
+}

@@ -51,6 +51,13 @@ pollster = "0.4.0"
 # says a `Readback` target hands back, so no conversion sits between a failing test
 # and the image a person looks at.
 png = "0.18.1"
+
+# A real window for the surface-path smoke test (`examples/window_smoke.rs`), run
+# under Xvfb. winit is the safe route from a platform window to the
+# `raw-window-handle` traits `Device::for_surface` consumes — the alternative is an
+# `unsafe` borrow of a hand-rolled X11 handle, which principle 3 prices higher than a
+# dev-only dependency. Never a dependency of the library itself.
+winit = "0.30.12"
 criterion = "0.8.2"
 
 # Lints applied to every member via `[lints] workspace = true`.

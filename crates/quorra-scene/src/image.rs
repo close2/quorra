@@ -1,52 +1,85 @@
 //! Images: decoded pixels, and a filtering decision that is not ours.
 //!
-//! **Skeleton — M7 fills this** (`doc/adr/0003`).
+//! [`ImageSpec`] is real as of M2 because `Device::upload_image` validates it at
+//! upload time; the *drawing* of images — the image lane's quad, the alpha, the
+//! per-command filter — is M7's work (`doc/PLAN.md`).
 //!
-//! # The contract
+//! # The filtering decision (§4.5 of the brief, integration note 1 in `doc/PLAN.md`)
 //!
-//! Decoded **RGBA8, straight alpha, row-major, no padding**. Decoding, colour conversion
-//! and the choice of resampling all happen upstream; §4.5 lists two of those choices among
-//! the four decisions that are the caller's and not ours:
-//!
-//! | decision | clause | what we do |
-//! |---|---|---|
-//! | `/Interpolate` | §8.9.5.3 | honour it; do not choose a filter ourselves |
-//! | area averaging | a documented departure from §10.7.4 | honour it |
-//!
-//! **The flags are not flags.** In the caller's tree these are *methods taking the
-//! placement transform* — `is_smoothed(placement)` and `area_averaged(placement) ->
-//! Option<Image>` — because whether an image is smoothed depends on how far it is being
-//! scaled. So what must reach us is the **resolved** decision for the placement the
-//! command carries. An `ImageSpec` that carried `/Interpolate` instead would be us
-//! re-deciding the question, on less information than the caller had. This is integration
-//! note 1 in `doc/PLAN.md`, and it is settled before M2 freezes the API.
-//!
-//! # Planned signatures
-//!
-//! ```text
-//! pub struct ImageSpec<'a> {
-//!     pub width: u32,
-//!     pub height: u32,
-//!     /// Straight-alpha RGBA8, `width * height * 4` bytes, no row padding.
-//!     pub data: &'a [u8],
-//!     /// The resolved answer, not the flag it came from.
-//!     pub filter: Filter,
-//! }
-//!
-//! pub enum Filter {
-//!     /// Nearest neighbour: what §8.9.5.3 asks for when `/Interpolate` is false and the
-//!     /// image is being magnified.
-//!     Nearest,
-//!     /// Bilinear.
-//!     Smooth,
-//!     /// Already area-averaged by the caller for this placement; sample it directly.
-//!     Prepared,
-//! }
-//! ```
-//!
-//! # Refusals, not approximations
-//!
-//! A 60 000 × 60 000 image is a page that exists. §5 and principle 3 agree on the
-//! answer: check the allocation against a stated budget and return an error that names the
-//! limit. Downsampling it quietly to fit would be a plausible-looking wrong page, and
-//! deciding the filter is not ours anyway.
+//! ISO 32000-2 §8.9.5.3's `/Interpolate` and the caller's documented
+//! area-averaging departure from §10.7.4 are decisions settled upstream, and in the
+//! caller's tree they are *methods of the placement*, not flags of the image —
+//! `is_smoothed(placement)` depends on how large the image is drawn. What that means
+//! for this API: the uploaded resource carries **pixels only**, and the resolved
+//! filter for a given placement arrives on the image *command* (M7), which is the
+//! thing that knows its placement. An uploaded image is placement-independent, which
+//! is what lets one upload serve every zoom level.
+
+use std::sync::Arc;
+
+/// A decoded image as uploaded to a device: straight-alpha RGBA8, row-major, top row
+/// first, no padding (§3 of the brief) — the caller's own `Image` layout.
+///
+/// The samples sit behind an `Arc` because the caller already holds them behind one;
+/// an upload borrows the same allocation rather than copying it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageSpec {
+    /// Width in samples. Nonzero for a consistent spec.
+    pub width: u32,
+    /// Height in samples. Nonzero for a consistent spec.
+    pub height: u32,
+    /// `width × height × 4` bytes of straight-alpha RGBA8.
+    pub data: Arc<[u8]>,
+}
+
+impl ImageSpec {
+    /// Whether the dimensions and the buffer length agree, and neither dimension is
+    /// zero.
+    ///
+    /// Checked at upload: a mismatch means an indexing bug upstream, and a device that
+    /// trusted the dimensions would read past a short buffer or render garbage — the
+    /// caller's own `Image::is_consistent` guards the same boundary for the same
+    /// reason.
+    #[must_use]
+    pub fn is_consistent(&self) -> bool {
+        let expected = (self.width as usize)
+            .saturating_mul(self.height as usize)
+            .saturating_mul(4);
+        self.width > 0 && self.height > 0 && self.data.len() == expected
+    }
+
+    /// The bytes this image costs while resident, for the resource budget.
+    #[must_use]
+    pub fn byte_size(&self) -> u64 {
+        self.data.len() as u64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::ImageSpec;
+
+    /// Consistency is dimensions-times-four bytes exactly, and no zero dimension —
+    /// §4.7's boundary check, defined once.
+    #[test]
+    fn consistency_checks_dimensions_and_length() {
+        let good = ImageSpec {
+            width: 2,
+            height: 3,
+            data: Arc::from(vec![0_u8; 24].as_slice()),
+        };
+        assert!(good.is_consistent());
+        let short = ImageSpec {
+            data: Arc::from(vec![0_u8; 23].as_slice()),
+            ..good.clone()
+        };
+        assert!(!short.is_consistent());
+        let zero = ImageSpec {
+            width: 0,
+            ..good.clone()
+        };
+        assert!(!zero.is_consistent());
+    }
+}

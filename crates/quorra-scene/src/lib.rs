@@ -37,4 +37,13 @@ pub mod paint;
 pub mod scene;
 
 pub use blend::{BlendMode, Compose, FillRule};
+pub use geom::{Affine, Point, Rect, Segment, Size, axis_aligned_rect};
 pub use ids::{ClipId, ImageId, MaskId, MeshId, OutlineId, RampId, ResourceId};
+pub use image::ImageSpec;
+pub use mask::{MaskKind, Transfer};
+pub use mesh::MeshSpec;
+pub use paint::{Color, LineCap, LineJoin, Paint, ShadingKind, Stop, Stroke};
+pub use scene::{
+    ClipDef, Command, Cost, GroupSpec, ImageFilter, MAX_COORDINATE, MAX_GROUP_DEPTH, MaskDef,
+    Scene, SceneBuilder, SceneError,
+};

@@ -1,7 +1,5 @@
 //! Colours, paints and stroke parameters.
 //!
-//! **Skeleton — M2 fills this, M7 the shading half** (`doc/adr/0003`).
-//!
 //! # The contract
 //!
 //! - **Colours reaching us are already device RGB.** Colour management happens upstream:
@@ -12,51 +10,296 @@
 //!   library cannot be used at all.*
 //! - **Straight alpha at the boundary, premultiplied internally.** Converting once at the
 //!   boundary is cheaper than converting per comparison, and it is what PNG and the
-//!   caller's harness expect.
-//! - **Stroke widths are given, not derived.** §8.4.3.2 with §10.7.5 makes a `0 w` line
-//!   one device pixel, and the caller resolves that into `Stroke::device_width` before we
-//!   see it. `tiny-skia` happened to do the right thing, so the rule went unwritten and
-//!   **every zero-width line was invisible on the GPU for fifteen sessions**. We take the
-//!   width we are given.
+//!   caller's harness expect. [`Color`] is the boundary form; premultiplication is the
+//!   device's business and happens on the device's side of the line.
+//! - **Stroke widths are given, not derived.** ISO 32000-2 §8.4.3.2 with §10.7.5 makes a
+//!   `0 w` line one device pixel, and the caller resolves that into its
+//!   `Stroke::device_width` before we see it. `tiny-skia` happened to do the right
+//!   thing, so the rule went unwritten and **every zero-width line was invisible on the
+//!   GPU for fifteen sessions**. We take the width we are given, which is therefore
+//!   always positive.
 //! - **Dashing is already done.** The caller dashes its own paths, including zero-length
 //!   dashes whose caps face along the path — Skia's dasher loses that direction and paints
 //!   them upright, and on a diagonal dotted line the two answers cover different pixels.
-//!   What we must not do is undo it, so a stroke that reaches us has no dash array at all.
+//!   What we must not do is undo it, so [`Stroke`] has no dash array at all, and that
+//!   absence is load-bearing.
 //! - **Degenerate subpaths are already split.** §8.5.3.2 makes a zero-length subpath a dot
 //!   under round caps and *nothing* under butt or square; three libraries gave three
 //!   answers and none was the standard's. We draw what we are given.
 //!
-//! # Planned signatures
+//! # State
 //!
-//! ```text
-//! /// Straight alpha, device RGB, 0..=1 per component.
-//! pub struct Color { pub r: f32, pub g: f32, pub b: f32, pub a: f32 }
-//!
-//! pub enum Paint {
-//!     Solid(Color),
-//!     /// §8.7.4.5.2 axial, .3 radial, .4 function-based: a ramp plus a mapping.
-//!     Shading { ramp: RampId, kind: ShadingKind },
-//!     /// §8.7.4.5.5-.7, pre-rasterised by the caller and shared between its backends.
-//!     Mesh(MeshId),
-//! }
-//!
-//! pub struct Stroke {
-//!     /// Already resolved to device space by the caller (§4.5).
-//!     pub width: f32,
-//!     pub cap: LineCap,
-//!     pub join: LineJoin,
-//!     pub miter_limit: f32,
-//!     // No dash array, and that absence is load-bearing: see above.
-//! }
-//!
-//! pub enum LineCap  { Butt, Round, Square }        // §8.4.3.3
-//! pub enum LineJoin { Miter, Round, Bevel }        // §8.4.3.4
-//! ```
-//!
-//! # Open until M7
-//!
-//! Whether `ShadingKind` carries the shading's own geometry (the axis, the two circles,
-//! the domain and the `/Extend` pair) or whether a device resolves it at upload time
-//! beside the ramp. The second is fewer bytes per command and one more resource; the
-//! first keeps a scene independent of a device for one more thing. It is a measurement,
-//! and it belongs in an ADR.
+//! Complete as of M7: solid colours, the axial and radial shadings of ISO 32000-2
+//! §8.7.4.5.2/.3 over an uploaded ramp, and the caller's pre-rasterised meshes. The
+//! caller's function-based shadings arrive *sampled* (its display list holds a grid,
+//! not a function) and map to images on this side — integration note 9 in
+//! `doc/PLAN.md`.
+
+use crate::scene::MAX_COORDINATE;
+
+/// A colour in device RGB with straight (non-premultiplied) alpha, each component
+/// nominally in `0..=1`.
+///
+/// Device RGB because colour management happened upstream and must not happen again
+/// (§3 of the brief); straight alpha because that is the boundary convention — the
+/// device premultiplies once, internally, on its own side of the line.
+///
+/// The fields are public and unvalidated: a `Color` is a plain value, and the range and
+/// finiteness checks live at the scene boundary ([`crate::scene::SceneBuilder`]), which
+/// is where §4.7's loud refusal belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Color {
+    /// Red, `0..=1`.
+    pub r: f32,
+    /// Green, `0..=1`.
+    pub g: f32,
+    /// Blue, `0..=1`.
+    pub b: f32,
+    /// Straight alpha, `0..=1`; `1` is opaque.
+    pub a: f32,
+}
+
+impl Color {
+    /// A colour from its four components.
+    #[must_use]
+    pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+
+    /// Whether every component is finite and within `0..=1`.
+    ///
+    /// This is the validity test the scene boundary applies; it lives here so that the
+    /// definition of a valid colour is written exactly once.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        let in_range = |v: f32| v.is_finite() && (0.0..=1.0).contains(&v);
+        in_range(self.r) && in_range(self.g) && in_range(self.b) && in_range(self.a)
+    }
+}
+
+/// The geometry of a ramp-based shading, in the shading's **own** coordinate space —
+/// [`Paint::Shading`]'s `transform` carries it into the scene's space, and the
+/// viewport carries the scene to the device (a scene stays viewport-free, §2.3).
+///
+/// The shading space is deliberately independent of the shaded command's transform:
+/// ISO 32000-2 §8.7.4.3's shading matrix anchors a shading to the page, not to the
+/// path being filled, so two paths filled with one shading sweep continuously across
+/// both.
+///
+/// The decision deferred from M2 — geometry on the paint versus resolved at upload —
+/// lands on the paint: a ramp uploaded once serves any number of placements, which
+/// is the §2.2 economy, and the geometry is six floats plus the transform
+/// (integration note 9 records it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShadingKind {
+    /// ISO 32000-2 §8.7.4.5.2 (PDF type 2): colour varies along a line.
+    Axial {
+        /// Where the ramp's first colour sits.
+        start: crate::geom::Point,
+        /// Where its last colour sits.
+        end: crate::geom::Point,
+        /// Whether the shading continues beyond each end. Where it does not,
+        /// nothing is painted there at all — a band, not a wash.
+        extend: (bool, bool),
+    },
+    /// §8.7.4.5.3 (PDF type 3): colour varies between two circles.
+    Radial {
+        /// Centre of the circle carrying the ramp's first colour.
+        start: crate::geom::Point,
+        /// Its radius.
+        start_radius: f32,
+        /// Centre of the circle carrying the ramp's last colour.
+        end: crate::geom::Point,
+        /// Its radius.
+        end_radius: f32,
+        /// Whether the shading continues beyond each circle.
+        extend: (bool, bool),
+    },
+}
+
+impl ShadingKind {
+    /// Whether every number is finite and within the scene's coordinate bound, and
+    /// radii are non-negative.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        let ok = |v: f32| v.is_finite() && v.abs() <= MAX_COORDINATE;
+        match self {
+            Self::Axial { start, end, .. } => ok(start.x) && ok(start.y) && ok(end.x) && ok(end.y),
+            Self::Radial {
+                start,
+                start_radius,
+                end,
+                end_radius,
+                ..
+            } => {
+                ok(start.x)
+                    && ok(start.y)
+                    && ok(end.x)
+                    && ok(end.y)
+                    && ok(start_radius)
+                    && ok(end_radius)
+                    && start_radius >= 0.0
+                    && end_radius >= 0.0
+            }
+        }
+    }
+}
+
+/// How a fill or stroke is painted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Paint {
+    /// A single uniform colour.
+    Solid(Color),
+    /// §8.7.4.5.2/.3: a ramp uploaded once, swept by the kind's geometry.
+    Shading {
+        /// The uploaded colour ramp.
+        ramp: crate::ids::RampId,
+        /// The sweep, in the shading's own space.
+        kind: ShadingKind,
+        /// Shading space → scene space (§8.7.4.3's shading matrix). Deliberately
+        /// **not** the command's transform: a shading is anchored to the page, so
+        /// the same paint sweeps continuously across differently-placed shapes.
+        transform: crate::geom::Affine,
+    },
+    /// §8.7.4.5.5–.7, pre-rasterised by the caller and shared between its backends
+    /// (integration note 5): sampled at absolute device pixels.
+    Mesh(crate::ids::MeshId),
+}
+
+impl Paint {
+    /// Whether the paint's values are valid at the scene boundary.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        match self {
+            Self::Solid(color) => color.is_valid(),
+            Self::Shading {
+                kind, transform, ..
+            } => kind.is_valid() && transform.is_finite(),
+            Self::Mesh(_) => true,
+        }
+    }
+}
+
+/// One stop of a colour ramp, for the axial, radial and function-based shadings of
+/// ISO 32000-2 §8.7.4.5 (drawn from M7; validated at upload from M2).
+///
+/// Stops reach `Device::upload_ramp` in ascending `offset` order spanning `0..=1`,
+/// matching the caller's own `Ramp` — colour and position resolved upstream so the two
+/// backends cannot disagree about them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stop {
+    /// Position along the ramp, `0..=1`, ascending across the slice.
+    pub offset: f32,
+    /// The colour at this position.
+    pub color: Color,
+}
+
+/// Treatment of open subpath ends, ISO 32000-2 §8.4.3.3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineCap {
+    /// Terminates exactly at the endpoint (line cap style 0).
+    #[default]
+    Butt,
+    /// A semicircle of diameter equal to the line width (style 1).
+    Round,
+    /// A square extending half the line width past the endpoint (style 2).
+    Square,
+}
+
+/// Treatment of segment joins, ISO 32000-2 §8.4.3.4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineJoin {
+    /// Outer edges extended to meet, subject to the miter limit (line join style 0).
+    #[default]
+    Miter,
+    /// An arc of diameter equal to the line width (style 1).
+    Round,
+    /// The outer corner cut off with a straight edge (style 2).
+    Bevel,
+}
+
+/// Parameters of a stroke, with the decisions that are the caller's already taken
+/// (§4.5 of the brief): the width is resolved (a PDF `0 w` arrived here as one device
+/// pixel's width), dashing already happened, and degenerate subpaths were pre-split.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stroke {
+    /// The resolved width, in **device pixels**. Always positive: zero was resolved
+    /// upstream per ISO 32000-2 §8.4.3.2 with §10.7.5, and the caller resolves per
+    /// placement — which is also why the width is device-space: expansion happens on
+    /// the flattened device geometry (caps, joins and miters are all the device's
+    /// business). The stated consequence: a scene reused at a different zoom must
+    /// restate its strokes, which a caller interpreting per render does anyway.
+    pub width: f32,
+    /// Treatment of open subpath ends.
+    pub cap: LineCap,
+    /// Treatment of segment joins.
+    pub join: LineJoin,
+    /// Ratio at which a miter join becomes a bevel, ISO 32000-2 §8.4.3.5. At least 1.
+    pub miter_limit: f32,
+    // No dash array, and that absence is load-bearing: see the module docs.
+}
+
+impl Stroke {
+    /// Whether the stroke's numbers are valid at the scene boundary: a finite positive
+    /// width no larger than [`MAX_COORDINATE`], and a finite miter limit of at least 1
+    /// (ISO 32000-2 §8.4.3.5 defines the limit as a ratio ≥ 1).
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        self.width.is_finite()
+            && self.width > 0.0
+            && self.width <= MAX_COORDINATE
+            && self.miter_limit.is_finite()
+            && self.miter_limit >= 1.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Color, LineCap, LineJoin, Stroke};
+
+    /// The boundary's definition of a valid colour: finite, and inside the unit range
+    /// on every component. Out-of-range and NaN are refused, not clamped — clamping
+    /// would be a silent repair of data §4.7 says to refuse loudly.
+    #[test]
+    fn validity_is_finite_and_in_unit_range() {
+        assert!(Color::new(0.0, 0.5, 1.0, 1.0).is_valid());
+        assert!(!Color::new(-0.01, 0.0, 0.0, 1.0).is_valid());
+        assert!(!Color::new(0.0, 1.01, 0.0, 1.0).is_valid());
+        assert!(!Color::new(0.0, 0.0, f32::NAN, 1.0).is_valid());
+        assert!(!Color::new(0.0, 0.0, 0.0, f32::INFINITY).is_valid());
+    }
+
+    /// A stroke's width is positive by contract — zero was resolved upstream — and its
+    /// miter limit is a ratio of at least one, per §8.4.3.5.
+    #[test]
+    fn stroke_validity_pins_the_resolved_width_contract() {
+        let valid = Stroke {
+            width: 1.5,
+            cap: LineCap::Round,
+            join: LineJoin::Miter,
+            miter_limit: 10.0,
+        };
+        assert!(valid.is_valid());
+        assert!(
+            !Stroke {
+                width: 0.0,
+                ..valid
+            }
+            .is_valid()
+        );
+        assert!(
+            !Stroke {
+                width: f32::NAN,
+                ..valid
+            }
+            .is_valid()
+        );
+        assert!(
+            !Stroke {
+                miter_limit: 0.5,
+                ..valid
+            }
+            .is_valid()
+        );
+    }
+}

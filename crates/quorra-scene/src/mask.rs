@@ -1,57 +1,88 @@
 //! Soft masks: a rendered group reduced by a stated rule.
 //!
-//! **Skeleton — M6 fills this** (`doc/adr/0003`).
-//!
 //! # The contract
 //!
 //! A soft mask is not an alpha texture. ISO 32000-2 §11.5 makes it a **transparency
-//! group, rendered at device resolution**, reduced to mask values by one of two rules:
+//! group, rendered at device resolution**, reduced to mask values by one of two
+//! rules:
 //!
 //! - **Alpha** (§11.5.2): the group's alpha, its colours ignored.
-//! - **Luminosity** (§11.5.3): the group composited onto *a fully opaque backdrop of a
-//!   specified colour*, then the luminosity of the result. The backdrop colour is the
-//!   mask's own, defaulting to black — which is what makes the area outside a mask group's
-//!   marks mask everything away.
+//! - **Luminosity** (§11.5.3): the group composited onto *a fully opaque backdrop of
+//!   a specified colour*, then the luminosity of the result. The backdrop colour is
+//!   the mask's own, resolved upstream (the caller's default is black — which is what
+//!   makes the area outside a mask group's marks mask everything away).
 //!
-//! Then optionally §11.6.5.1's `/TR`, which reaches us as a **256-entry lookup table**
-//! rather than a function: a mask value is one byte, so the table holds every value the
-//! function can be asked about, and sampling it is exact.
+//! Then optionally §11.6.5.1's `/TR`, which reaches us as a **256-entry lookup
+//! table** rather than a function: a mask value is one byte, so the table holds every
+//! value the function can be asked about, and sampling it is exact.
 //!
-//! # Why this is a specification item and not an optimisation
+//! # Why the reduction is a conformance item
 //!
-//! Today's Vello-based backend renders each mask group to its own texture, **reads it
-//! back to the CPU**, converts it with the caller's `SoftMask::value`, and uploads it
-//! again as an alpha layer — per mask, per frame. §4.2 asks for the reduction to happen on
-//! the device instead.
-//!
-//! The catch is the reason this is M6 work rather than a later performance pass:
-//! `SoftMask::value` is shared by both of the caller's backends *on purpose*, so that what
-//! the pixels mean is decided once. Moving the reduction onto the device makes our shader a
-//! second implementation of that function, and it must agree with theirs **to the byte**.
-//! The conformance test for exactly that ships with the shader, not after it.
-//!
-//! # Planned signatures
-//!
-//! ```text
-//! pub enum MaskKind {
-//!     /// §11.5.2.
-//!     Alpha,
-//!     /// §11.5.3. The backdrop defaults to black at the caller, not here — a default
-//!     /// here would be a second place the rule lives.
-//!     Luminosity { backdrop: Color },
-//! }
-//!
-//! /// §11.6.5.1's `/TR`, sampled exactly: index by the mask byte, take the value.
-//! pub struct Transfer(pub [u8; 256]);
-//!
-//! // Built through the same SceneBuilder as everything else (§4.2), which is what makes
-//! // a mask group able to contain a group, an image or a mask of its own:
-//! //   let id = builder.mask(MaskKind::Luminosity { backdrop }, |b| { … });
-//! ```
-//!
-//! # Open until M6
-//!
-//! Whether the transfer table belongs on the mask or on the *use* of the mask. §11.6.5.1
-//! attaches `/TR` to the soft-mask dictionary, which argues for the mask; a device that
-//! caches a reduced mask would rather key the cache without it. The clause wins unless a
-//! measurement is large enough to justify an ADR arguing otherwise.
+//! The caller's `SoftMask::value` is shared by both of its backends *on purpose*, so
+//! that what the pixels mean is decided once. Our device-side reduction
+//! (`quorra-gpu`'s `reduce.wgsl`) is a second implementation of that function and
+//! must agree with it **to the byte** — the conformance test ships with the shader
+//! (M6), not after it. The clause's order is the order: composite onto the opaque
+//! backdrop *first*, then take the luminosity of the result; the other order is a
+//! different number wherever the group is partly transparent, and it produces a
+//! plausible picture.
+
+use crate::paint::Color;
+
+/// Which of §11.5's two rules turns the rendered mask group into mask values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MaskKind {
+    /// §11.5.2: the group's alpha; colours ignored.
+    Alpha,
+    /// §11.5.3: source-over onto this fully opaque backdrop, then the luminosity of
+    /// the result. The backdrop arrives resolved (the default-black rule is applied
+    /// upstream, once — a default here would be a second place the rule lives).
+    Luminosity {
+        /// §11.6.5.1's `/BC`, resolved to device RGB; its alpha is ignored (the
+        /// clause makes the backdrop fully opaque).
+        backdrop: Color,
+    },
+}
+
+/// §11.6.5.1's `/TR`, sampled exactly: index by the derived mask byte, take the
+/// value. The caller samples its `Transfer` onto these 256 entries (integration
+/// note 3 in `doc/PLAN.md`); both endpoints are included by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transfer(pub [u8; 256]);
+
+impl Transfer {
+    /// The identity table: every byte maps to itself, the meaning of an absent `/TR`.
+    #[must_use]
+    pub fn identity() -> Self {
+        let mut table = [0_u8; 256];
+        for (i, slot) in table.iter_mut().enumerate() {
+            // The index of a 256-element array is exactly a byte.
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                *slot = i as u8;
+            }
+        }
+        Self(table)
+    }
+
+    /// The mask value for a derived alpha or luminosity byte.
+    #[must_use]
+    pub fn apply(&self, value: u8) -> u8 {
+        self.0[usize::from(value)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Transfer;
+
+    /// The identity table is the identity at both endpoints and in between —
+    /// §11.6.5.1's sampling is inclusive of both ends (integration note 3).
+    #[test]
+    fn identity_is_identity_at_both_endpoints() {
+        let transfer = Transfer::identity();
+        assert_eq!(transfer.apply(0), 0);
+        assert_eq!(transfer.apply(128), 128);
+        assert_eq!(transfer.apply(255), 255);
+    }
+}
