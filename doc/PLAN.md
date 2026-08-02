@@ -15,15 +15,14 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
-**M9 is in progress, and the hard half is behind us** (2026-08-02): the adapter
-over quorra exists in the caller's tree (`crates/render-quorra`), passes their
-cross-backend suite at the Vello backend's own thresholds, matches the CPU oracle
-on the real specification pages at the Vello backend's own distance (better on
-one), and wins the trait-level frame race at scale 1.0. The full record — including
-the two integration refinements it forced on this side and the two adapter defects
-the caller's instruments caught — is in the M9 section; what remains is the
-viewer-ui wiring, the corpus run, the window session, and the CI-reachability
-decision.
+**M9 is done — the swap happened** (2026-08-03): `render-quorra` in the caller's
+tree implements their `Rasterizer` over this library and passes their cross-backend
+and real-page suites at the Vello backend's own thresholds; the viewer's window now
+presents through quorra's surface tier (no readback, −205 lines of host machinery),
+verified under Xvfb with real key presses on ISO 32000-2 itself. The full record —
+the integration refinements it forced here, the two adapter defects the caller's
+instruments caught, and the two owner-level follow-ups (corpus sweep, CI
+reachability) — is in the M9 section.
 
 **M8 is done** (2026-08-02): the rest of the performance contract, decided by
 measurement. **Damage is honoured exactly** (ADR 0012): a valid `Viewport::damage`
@@ -781,10 +780,22 @@ quantum's cost is pinned as its own envelope. **Perf at the trait boundary** (pa
 6, fastest of 12): 4.4 ms vs CPU 4.9 / Vello 6.9 at scale 1.0; 10.4 ms vs CPU 6.1 /
 Vello 11.6 at window scale — both GPU backends readback-bound exactly as §11.1
 measured, which is why the remaining work is the part that escapes the trait.
-**Remaining:** wiring `viewer-ui`'s render path to the adapter (the `Presented`
-tier, where quorra's 0.3–1.1 ms texture frames live); a corpus-scale comparison run;
-the Xvfb window session; and a decision with the project owner on how their CI
-reaches this tree (the workspace now carries a relative path dependency).
+**Done** (2026-08-03): the swap itself landed. `render-quorra` grew the tier-2
+`QuorraPresenter` — quorra's device owns the window's surface, and one call draws
+the page, the selection, the sidebar and the modal card (all display lists through
+the same translation the headless gates exercise) and presents, with no readback
+anywhere. To make one scene carry several lists at their own placements, the
+adapter bakes each list's target transform into its commands and leaves the
+viewport at identity. `viewer-ui`'s render path moved onto the presenter
+(−205 lines net: the RenderContext, intermediate texture, blitter and banding
+machinery all left with the backend that needed them); the CPU backend keeps its
+oracle and fallback roles, the fallback now presenting through the same quorra
+surface as an image. **Verified under Xvfb with real key presses**: the ISO
+32000-2 cover (images, chrome) and Page-Down navigation to the dense table of
+contents, zero fallback notes. Two follow-ups remain with the owner: a
+corpus-scale quorra-vs-oracle sweep (the 1 794-page oracle itself judges the CPU
+backend by design, so this is an additional gate, not a missing one), and how the
+viewer's CI reaches this tree (the workspace carries a relative path dependency).
 
 ## What we must build ourselves, and when
 
