@@ -21,8 +21,9 @@ and real-page suites at the Vello backend's own thresholds; the viewer's window 
 presents through quorra's surface tier (no readback, −205 lines of host machinery),
 verified under Xvfb with real key presses on ISO 32000-2 itself. The full record —
 the integration refinements it forced here, the two adapter defects the caller's
-instruments caught, and the two owner-level follow-ups (corpus sweep, CI
-reachability) — is in the M9 section.
+instruments caught, and the one owner-level follow-up (the corpus sweep) — is in
+the M9 section. The library's home is https://github.com/close2/quorra, and the
+viewer consumes it from there.
 
 **M8 is done** (2026-08-02): the rest of the performance contract, decided by
 measurement. **Damage is honoured exactly** (ADR 0012): a valid `Viewport::damage`
@@ -792,10 +793,13 @@ machinery all left with the backend that needed them); the CPU backend keeps its
 oracle and fallback roles, the fallback now presenting through the same quorra
 surface as an image. **Verified under Xvfb with real key presses**: the ISO
 32000-2 cover (images, chrome) and Page-Down navigation to the dense table of
-contents, zero fallback notes. Two follow-ups remain with the owner: a
+contents, zero fallback notes. One follow-up remains with the owner: a
 corpus-scale quorra-vs-oracle sweep (the 1 794-page oracle itself judges the CPU
-backend by design, so this is an additional gate, not a missing one), and how the
-viewer's CI reaches this tree (the workspace carries a relative path dependency).
+backend by design, so this is an additional gate, not a missing one). The
+CI-reachability question closed on 2026-08-03: this library lives at
+https://github.com/close2/quorra, and the viewer consumes it as a git dependency —
+revision pinned by its Cargo.lock, source named in its deny.toml, with a
+documented `[patch]` route for developing against a local checkout.
 
 ## What we must build ourselves, and when
 
