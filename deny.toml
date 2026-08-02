@@ -1,0 +1,65 @@
+# Supply-chain policy, enforced by `cargo deny check` in CI.
+#
+# This library never sees a PDF byte — its trust boundary is described in
+# RENDER_LIBRARY.md §9 — but it is linked into a process that does, and a dependency
+# of ours is a dependency of that process. Every addition should be a decision, not a
+# convenience.
+
+[advisories]
+version = 2
+yanked = "deny"
+# An accepted advisory is recorded here with a comment explaining why it does not
+# apply, so that the exception is reviewable rather than invisible. Empty is the
+# correct state; it is not a placeholder.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licences only. This project is MIT, and so is everything it links: a
+# file-level copyleft such as MPL-2.0 would be compatible but is not needed by
+# anything in the graph, and leaving it out keeps the answer to "what may I do with a
+# build of this?" a single sentence.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+    # Public-domain dedication, so strictly more permissive than the rest of this
+    # list. Reached via hexf-parse, a hex-float parser used by naga.
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Two versions of the same crate usually means a dependency needs updating; it also
+# inflates compile time and binary size. Warn rather than deny, because a transitive
+# duplicate is often outside our control in the short term.
+multiple-versions = "warn"
+wildcards = "deny"
+
+# Crates that must never appear in the tree, with the reason recorded.
+deny = [
+    # The nine non-goals of RENDER_LIBRARY.md §9, as far as a dependency can express
+    # them. Each of these would be this library doing a job its caller has already
+    # done, and doing it a second time is how two implementations of one decision get
+    # into a process (§4.5).
+    { crate = "rustybuzz", reason = "no shaping: PDF glyphs arrive pre-positioned (§9)" },
+    { crate = "harfbuzz-sys", reason = "as rustybuzz, and adds a C dependency" },
+    { crate = "swash", reason = "no font loading or shaping: we are handed outlines (§9)" },
+    { crate = "lcms2", reason = "no colour management: we are handed device RGB (§3, §9)" },
+    { crate = "lcms2-sys", reason = "as lcms2" },
+    { crate = "moxcms", reason = "as lcms2, in pure Rust" },
+    { crate = "qcms", reason = "as lcms2" },
+    # Not a non-goal but a boundary: the scene model is ours, and a second 2D scene
+    # model in the graph would make "which primitive does this map to?" a question
+    # again. §1.2 exists to keep that question closed.
+    { crate = "vello", reason = "this library replaces it; see doc/RENDER_LIBRARY.md §0" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

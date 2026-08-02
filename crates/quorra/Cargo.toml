@@ -1,0 +1,21 @@
+[package]
+name = "quorra"
+description = "A GPU renderer for documents: ISO 32000-2 clause 11 natively, on wgpu."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["pdf", "renderer", "gpu", "wgpu", "2d"]
+categories = ["graphics", "rendering"]
+
+# The facade: this is the one crate a caller names. It contains no code of its own and
+# must not acquire any — a decision that lives here would live in neither of the crates
+# that implement it.
+[dependencies]
+quorra-scene.workspace = true
+quorra-gpu.workspace = true
+
+[lints]
+workspace = true

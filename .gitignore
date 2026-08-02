@@ -1,0 +1,23 @@
+/target
+**/*.rs.bk
+*.profraw
+
+# Rendered artefacts from the conformance and comparison harnesses: PNGs, diffs and
+# heatmaps are regenerated on demand from committed scenes, so they are output rather
+# than source. A comparison that matters is pinned by a *scene* plus a stated
+# expectation, never by a stray image on a developer's disk.
+/target/conformance
+/artefacts
+
+# Persisted pipeline caches (RENDER_LIBRARY.md §7). Driver-specific binary blobs; a
+# stale one must never be a build input.
+/pipeline-cache
+
+# Claude Code local settings (per-user, not shared).
+.claude/settings.local.json
+
+# Per-user cargo configuration. This tree is shared through a group, and the users who
+# build it have different `target-dir` settings for that reason; a committed absolute
+# path would be wrong for everyone but its author. The one in this checkout explains
+# itself.
+/.cargo/config.toml

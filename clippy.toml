@@ -1,0 +1,19 @@
+# Kept in step with `rust-version` in the workspace manifest, so Clippy will not
+# suggest constructs newer than the pinned toolchain.
+msrv = "1.97"
+
+# Any type large enough to be worth passing by reference should be passed by
+# reference; the default (128 bytes) is generous for a renderer whose hot loops pass
+# geometry and paint structures.
+trivial-copy-size-limit = 16
+
+# A function this complex is a review problem, not a style problem. A rasteriser has
+# genuinely irreducible cases — a blend-mode dispatch, a tile walk — and those get an
+# explicit `#[allow]` with a comment naming the reason, which is the point: the
+# exception becomes visible in review.
+cognitive-complexity-threshold = 20
+
+# `.unwrap()` in tests is fine and idiomatic; the workspace lints deny it elsewhere.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

@@ -1,0 +1,18 @@
+[package]
+name = "quorra-scene"
+description = "What is to be drawn: the device-independent scene model of the quorra document renderer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# **There are deliberately no dependencies here, and `wgpu` in particular is not one.**
+# `RENDER_LIBRARY.md` §2.3 requires that building a scene needs no device; ADR 0001
+# makes that a fact about the dependency graph rather than a promise in a doc comment.
+# Adding a GPU dependency to this crate would delete the guarantee, so it is a change
+# that needs the ADR rewritten first.
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+# Pinned so that every checkout and every CI run builds with the same compiler.
+# An exact version rather than "stable": a floating channel means a toolchain
+# upgrade can change build results — and, for a renderer, can change generated
+# floating-point code — without any commit in this repository. Bumping this is a
+# reviewed change like any other, and a bump is re-run against the byte-equality
+# gates (RENDER_LIBRARY.md §4.6) before it lands.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

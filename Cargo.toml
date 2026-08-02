@@ -1,0 +1,96 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/example/quorra"
+
+# Dependency versions are pinned once here and referenced as `dep.workspace = true`
+# from member crates, so a version appears in exactly one place in the tree.
+[workspace.dependencies]
+# Internal. Each carries an explicit version as well as a path: a bare path
+# dependency is a wildcard requirement, which the ban policy in deny.toml rejects, and
+# which would also prevent publishing these crates.
+quorra-scene = { path = "crates/quorra-scene", version = "0.1.0" }
+quorra-gpu = { path = "crates/quorra-gpu", version = "0.1.0" }
+
+# Error handling. Every error this library returns is typed and names what failed —
+# RENDER_LIBRARY.md §5 asks for "an `Err` that names what overflowed", which is a
+# requirement on the *variants*, not on the crate that derives them.
+thiserror = "2.0.19"
+
+# The GPU abstraction. Chosen rather than raw Vulkan for the reason ADR 0002 of the
+# consuming project gives for its own stack: this library must run on the machines its
+# caller runs on, and one Vulkan backend would exclude every other platform.
+#
+# 30.0.0 is the current stable line. Its MSRV is 1.87.0, comfortably below this
+# workspace's 1.97 pin, and it builds on the pinned toolchain — verified before the
+# version was written down here, not assumed.
+#
+# Default features are taken for now: `vulkan`, `gles`, `dx12`, `metal`, `webgpu` and
+# `wgsl` are all on by default in 30.0.0, and the off-target backends compile to
+# nothing. Trimming them is a startup-cost decision (§7) and needs the measurement
+# first; a comment claiming a saving nobody measured is exactly what CLAUDE.md
+# principle 2 forbids.
+wgpu = "30.0.0"
+
+# Minimal `block_on`. wgpu's device setup is async while this library's interface is
+# synchronous, and pulling in an async runtime for two awaits would violate the
+# startup rules in CLAUDE.md. §2.1 additionally requires that device creation can be
+# driven from a background thread, which is a thread, not a runtime.
+pollster = "0.4.0"
+
+# Development-only. Cargo has no `workspace.dev-dependencies`; these are declared
+# here and referenced from a member's `[dev-dependencies]` with `workspace = true`.
+#
+# PNG encoding for conformance artefacts. Straight-alpha RGBA in, which is what §3
+# says a `Readback` target hands back, so no conversion sits between a failing test
+# and the image a person looks at.
+png = "0.18.1"
+criterion = "0.8.2"
+
+# Lints applied to every member via `[lints] workspace = true`.
+#
+# `unsafe_code` is deliberately NOT set here. It is declared per crate at the top of
+# each `lib.rs`, so a reader sees a crate's safety posture in the crate itself rather
+# than having to consult this file. See CLAUDE.md principle 3.
+[workspace.lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Every panicking path must be a deliberate, documented decision.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+# A renderer's arithmetic runs on numbers derived from a document, and a page with a
+# 1e30 coordinate in it is a page that exists. §4.7 requires those to be refused
+# loudly rather than turned into NaN geometry, which starts here.
+arithmetic_side_effects = "warn"
+cast_possible_truncation = "warn"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+# Documentation quality.
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+# NOTE, deliberately different from the consuming viewer, which sets `panic = "abort"`:
+# a library must not choose the panic strategy of the binary that links it, and a host
+# that wants to catch a panic at its own boundary has to be able to. The viewer's own
+# `abort` setting still applies to the final binary.
+
+# Benchmarks and profiling need symbols with release-grade optimisation.
+[profile.bench]
+inherits = "release"
+debug = true
