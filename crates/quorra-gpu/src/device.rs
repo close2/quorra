@@ -1341,7 +1341,7 @@ impl Device {
                 return Err(RenderError::UnknownRamp { ramp: RampId(id) });
             };
             let samples = sample_ramp(&stored.stops);
-            let pair = self.rgba_texture("quorra ramp", 256, 1, &samples);
+            let pair = self.rgba_texture("quorra ramp", RAMP_RESOLUTION, 1, &samples);
             bytes = bytes.saturating_add(samples.len() as u64);
             self.ramp_textures.insert(id, pair);
         }
@@ -1626,17 +1626,29 @@ impl Device {
     }
 }
 
-/// Sample a validated ramp to 256 straight-RGBA8 texels, on the CPU (ADR 0011).
+/// Texels per sampled ramp. 4096 rather than the 256 first chosen: a ramp with
+/// *hard* stop boundaries (a banded shading) has its boundaries snapped to this
+/// grid, and a page-spanning axis divided by 510 was a visible ~3.5 px band
+/// displacement on a real page (the corpus's `issue10572.pdf`). Divided by 8190
+/// it is under an eighth of a pixel on the same page, for 16 KiB per resident
+/// ramp — priced against the resource budget like everything else.
+pub(crate) const RAMP_RESOLUTION: u32 = 4096;
+
+/// Sample a validated ramp to [`RAMP_RESOLUTION`] straight-RGBA8 texels, on the
+/// CPU (ADR 0011).
 ///
-/// The shader indexes the result with `textureLoad` at `round(t·255)`, so the
-/// sweep's colour arithmetic is this function's — deterministic across adapters —
-/// rather than the driver's texture filtering.
+/// The shader indexes the result with `textureLoad` at `round(t·(N−1))`, reading
+/// N from the texture itself, so the sweep's colour arithmetic is this
+/// function's — deterministic across adapters — rather than the driver's
+/// texture filtering.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // round of 0..=255
-#[allow(clippy::cast_precision_loss)] // i ≤ 255
+#[allow(clippy::cast_precision_loss)] // i < RAMP_RESOLUTION, far below 2^24
 fn sample_ramp(stops: &[Stop]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1024);
-    for i in 0..256_u32 {
-        let color = ramp_color_at(stops, i as f32 / 255.0);
+    let entries = RAMP_RESOLUTION as usize;
+    let mut out = Vec::with_capacity(entries.saturating_mul(4));
+    let last = (RAMP_RESOLUTION.saturating_sub(1)) as f32;
+    for i in 0..RAMP_RESOLUTION {
+        let color = ramp_color_at(stops, i as f32 / last);
         for component in [color.r, color.g, color.b, color.a] {
             // Components were validated into 0..=1 at upload.
             out.push((component * 255.0).round() as u8);

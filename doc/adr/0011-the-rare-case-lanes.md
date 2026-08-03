@@ -32,8 +32,12 @@ been measured.
   the hardware sampler** (clamp-to-edge): its interpolation precision is the
   driver's, the one place a §4.5 decision buys hardware variance; tests bound it
   with tolerance instead of hiding it.
-- **Ramps are pre-sampled on the CPU to 256 straight-RGBA8 texels** at first use;
-  the shader indexes with `textureLoad` at `round(t·255)`. The sweep's colour
+- **Ramps are pre-sampled on the CPU to straight-RGBA8 texels** at first use;
+  the shader indexes with `textureLoad` at `round(t·(N−1))`, reading N from the
+  texture. (Amended 2026-08-03: N rose from 256 to 4096 — a *banded* ramp's hard
+  stop boundary snaps to this grid, and 1/510 of a page-spanning axis was a
+  visible ~3.5 px band displacement on the corpus's `issue10572.pdf`; 1/8190 is
+  under an eighth of a pixel there, for 16 KiB per resident ramp.) The sweep's colour
   arithmetic is ours and deterministic; the driver never filters a ramp. The sweep
   parameter itself implements §8.7.4.5.2 (axial projection) and §8.7.4.5.3 (radial
   quadratic, larger root with non-negative radius) in shading space, so shears and
@@ -52,7 +56,7 @@ been measured.
   of ADR 0007's fast path. Meshes sample at absolute device pixels from their
   uploaded anchor; a zoom re-uploads them, which is the caller's documented cost.
 - **GPU forms are lazy.** Upload keeps the validated CPU copy (M2); the texture (and
-  the ramp's 256-texel sampling) is created on the first frame that draws the
+  the ramp's sampling) is created on the first frame that draws the
   resource, so startup and pages without images pay nothing (§7). `release` drops
   the GPU form with the CPU copy.
 

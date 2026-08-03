@@ -4,7 +4,7 @@
 // The sweep parameter t is computed in the *shading's own space*: the fragment's
 // device position maps back through the inverse of the command × viewport transform
 // carried in the params, so a sheared or rotated placement sweeps correctly. The
-// ramp was sampled to 256 straight-RGBA texels on the CPU at upload (deterministic);
+// ramp was sampled to straight-RGBA texels on the CPU at upload (deterministic);
 // t indexes it with textureLoad — no sampler, no filtering, adapter-invariant.
 //
 // Coverage comes either from the frame's scratch (a rasterised fill/stroke shape,
@@ -32,7 +32,7 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
-// The ramp (256x1) for axial/radial, or the mesh raster.
+// The ramp (RAMP_RESOLUTION x 1) for axial/radial, or the mesh raster.
 @group(0) @binding(1) var paint_tex: texture_2d<f32>;
 @group(0) @binding(2) var scratch_tex: texture_2d<f32>;
 @group(0) @binding(3) var soft_mask_tex: texture_2d<f32>;
@@ -170,8 +170,11 @@ fn paint_at(p: vec2f) -> vec4f {
     if t < 0.0 {
         return vec4f(0.0, 0.0, 0.0, -1.0);
     }
-    // 256 texels sampled on the CPU: index by rounding, exactly.
-    let index = i32(round(t * 255.0));
+    // The ramp was sampled on the CPU to the texture's own width (4096 texels —
+    // fine enough that a banded shading's hard boundary sits within an eighth
+    // of a pixel on a page-spanning axis): index by rounding, exactly.
+    let entries = f32(textureDimensions(paint_tex).x - 1u);
+    let index = i32(round(t * entries));
     return textureLoad(paint_tex, vec2i(index, 0), 0);
 }
 
