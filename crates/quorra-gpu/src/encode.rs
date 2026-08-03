@@ -553,7 +553,11 @@ pub(crate) fn encode(
         atlas,
         quantum,
         clips: ClipResolver::new(scene.clips().len()),
-        scratch: ScratchPacker::new(2048.min(max_dimension), max_dimension),
+        // The scratch sheet spans the full device dimension both ways: its *byte*
+        // cost is charged tile by tile against the frame budget, so the dimension
+        // is capacity, not commitment — and a 2048-texel width refused real pages
+        // whose coverage was well inside the budget (QUORRA_FEEDBACK.md §3).
+        scratch: ScratchPacker::new(max_dimension, max_dimension),
         rect_instances: Vec::new(),
         quad_instances: Vec::new(),
         current_plan: usize::MAX,
@@ -1528,12 +1532,13 @@ impl Encoder<'_> {
     /// Pack into scratch, charging is the caller's; splits from `push_scratch_quad`
     /// so residue planning can pack without emitting a quad.
     fn pack_scratch(&mut self, tile: &raster::CoverageMask) -> Result<(u32, u32), RenderError> {
+        // Its own refusal, not the frame budget's: this one is about texture
+        // capacity, and a message whose arithmetic contradicts itself costs the
+        // reader the diagnosis (QUORRA_FEEDBACK.md §3 was exactly that report).
         self.scratch
             .pack(tile)
-            .ok_or(RenderError::FrameBudgetExceeded {
-                needed: self.spent,
-                budget: u64::from(self.scratch.width)
-                    .saturating_mul(u64::from(self.scratch.max_height)),
+            .ok_or(RenderError::ScratchExhausted {
+                limit: self.scratch.max_height,
             })
     }
 

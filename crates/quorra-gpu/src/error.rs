@@ -176,6 +176,17 @@ pub enum RenderError {
         /// Index of the offending rectangle in `Viewport::damage`.
         index: usize,
     },
+    /// The frame's rasterised coverage tiles outgrew the scratch image, which the
+    /// device dimension bounds on each side. Distinct from the byte budget on
+    /// purpose: the two run out independently, and a refusal that names the wrong
+    /// one costs the reader the diagnosis.
+    #[error(
+        "the frame's rasterised coverage outgrew the {limit}x{limit} scratch image this adapter allows"
+    )]
+    ScratchExhausted {
+        /// The device's per-side texture limit, which bounds the scratch sheet.
+        limit: u32,
+    },
     /// The frame's scene-derived allocations would exceed the stated budget.
     #[error("frame needs {needed} bytes of instance data, over the stated budget of {budget}")]
     FrameBudgetExceeded {

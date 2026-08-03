@@ -15,6 +15,23 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**The corpus feedback is answered** (2026-08-03): the viewer measured the swapped
+backend against its 974-document corpus and wrote up what came back
+(`pdf-viewer/doc/QUORRA_FEEDBACK.md`); everything actionable landed the same day.
+On this side: the frame's scratch sheet now spans the full device dimension —
+capacity, not commitment, since bytes stay budget-charged per tile — and its
+exhaustion is its own `RenderError::ScratchExhausted` naming the real limit,
+replacing a refusal whose arithmetic contradicted itself (six real pages refused
+under a 2048-wide sheet now draw; the corpus's one pathological page still
+refuses, truthfully). On the adapter's side: §10.7.4's degenerate fills draw
+through the viewer's shared split; the `Arc`-pinned caches gained LRU eviction to
+half the resource budget (533 refusals at 4× scale became zero);
+anisotropically-transformed strokes outline in path space instead of taking one
+scalar width (three corpus pages moved from "differs in shape" to agreement); and
+an empty mesh raster draws nothing, as both sibling backends and pdf.js's own fix
+for the defective document do. Corpus after: **910 of 957 agree, 46 differ (29 at
+the antialiasing floor), 1 refused** — from 900/50/7.
+
 **M9 is done — the swap happened** (2026-08-03): `render-quorra` in the caller's
 tree implements their `Rasterizer` over this library and passes their cross-backend
 and real-page suites at the Vello backend's own thresholds; the viewer's window now
