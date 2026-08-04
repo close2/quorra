@@ -76,6 +76,11 @@ pub(crate) enum Kind {
     Reduce,
     /// Root layer to target, unchanged (`blit.wgsl`).
     Blit,
+    /// Outline triangles accumulating a winding number (`winding.wgsl` `fs_winding`;
+    /// additive, ADR 0016). The GPU coverage lane's first pass.
+    Winding,
+    /// Winding to coverage under a fill rule (`winding.wgsl` `fs_resolve`; REPLACE).
+    WindingResolve,
 }
 
 /// Everything shared by every pipeline: parsed shaders and the bind-group layouts.
@@ -87,6 +92,7 @@ struct Base {
     composite_shader: wgpu::ShaderModule,
     reduce_shader: wgpu::ShaderModule,
     blit_shader: wgpu::ShaderModule,
+    winding_shader: wgpu::ShaderModule,
     globals_layout: wgpu::BindGroupLayout,
     /// Group 1 of both lanes: atlas, scratch, soft mask.
     textures_layout: wgpu::BindGroupLayout,
@@ -100,12 +106,16 @@ struct Base {
     reduce_layout: wgpu::BindGroupLayout,
     /// Blit pass: src.
     blit_layout: wgpu::BindGroupLayout,
+    /// Winding and resolve passes: the sheet's globals, read by both stages.
+    winding_layout: wgpu::BindGroupLayout,
     lane_layout: wgpu::PipelineLayout,
     image_pipe_layout: wgpu::PipelineLayout,
     shading_pipe_layout: wgpu::PipelineLayout,
     composite_pipe_layout: wgpu::PipelineLayout,
     reduce_pipe_layout: wgpu::PipelineLayout,
     blit_pipe_layout: wgpu::PipelineLayout,
+    winding_pipe_layout: wgpu::PipelineLayout,
+    resolve_pipe_layout: wgpu::PipelineLayout,
 }
 
 /// The bind-group layouts alone, grouped so [`PipelineStore::base`] stays a
@@ -118,6 +128,7 @@ struct BindLayouts {
     composite: wgpu::BindGroupLayout,
     reduce: wgpu::BindGroupLayout,
     blit: wgpu::BindGroupLayout,
+    winding: wgpu::BindGroupLayout,
 }
 
 struct StoreState {
@@ -255,6 +266,12 @@ impl PipelineStore {
         Self::base(&self.device, &mut state).reduce_layout.clone()
     }
 
+    /// The winding sheet's globals layout, shared by both passes of the GPU lane.
+    pub(crate) fn winding_layout(&self) -> wgpu::BindGroupLayout {
+        let mut state = self.lock();
+        Self::base(&self.device, &mut state).winding_layout.clone()
+    }
+
     /// The blit pass's bind-group layout.
     pub(crate) fn blit_layout(&self) -> wgpu::BindGroupLayout {
         let mut state = self.lock();
@@ -317,6 +334,9 @@ impl PipelineStore {
             let composite_pipe_layout = pipe_layout("quorra composite", &[&layouts.composite]);
             let reduce_pipe_layout = pipe_layout("quorra reduce", &[&layouts.reduce]);
             let blit_pipe_layout = pipe_layout("quorra blit", &[&layouts.blit]);
+            let winding_pipe_layout = pipe_layout("quorra winding", &[&layouts.winding]);
+            let resolve_pipe_layout =
+                pipe_layout("quorra winding resolve", &[&layouts.winding, &layouts.blit]);
 
             Base {
                 rect_shader: module("quorra rect", include_str!("shaders/rect.wgsl")),
@@ -329,6 +349,7 @@ impl PipelineStore {
                 ),
                 reduce_shader: module("quorra reduce", include_str!("shaders/reduce.wgsl")),
                 blit_shader: module("quorra blit", include_str!("shaders/blit.wgsl")),
+                winding_shader: module("quorra winding", include_str!("shaders/winding.wgsl")),
                 globals_layout: layouts.globals,
                 textures_layout: layouts.textures,
                 image_layout: layouts.image,
@@ -336,12 +357,15 @@ impl PipelineStore {
                 composite_layout: layouts.composite,
                 reduce_layout: layouts.reduce,
                 blit_layout: layouts.blit,
+                winding_layout: layouts.winding,
                 lane_layout,
                 image_pipe_layout,
                 shading_pipe_layout,
                 composite_pipe_layout,
                 reduce_pipe_layout,
                 blit_pipe_layout,
+                winding_pipe_layout,
+                resolve_pipe_layout,
             }
         })
     }
@@ -442,6 +466,11 @@ impl PipelineStore {
                 ],
             ),
             blit: make("quorra blit", &[texture_entry(0)]),
+            // Both stages read it: the vertex stage for the sheet's size, the resolve
+            // fragment for the fill rule and the sample grid.
+            // 32 bytes: the sheet size, this draw's sample offset, and the channel
+            // mask it accumulates into.
+            winding: make("quorra winding", &[uniform_entry(0, 32, quad_uniform)]),
         }
     }
 
@@ -458,9 +487,15 @@ impl PipelineStore {
             label: &'a str,
             shader: &'a wgpu::ShaderModule,
             layout: &'a wgpu::PipelineLayout,
+            /// The vertex entry point. Every lane shares `vs_main`; the winding pass
+            /// has two stages of its own in one module.
+            vertex: &'a str,
             entry: &'a str,
             blend: Option<wgpu::BlendState>,
             buffer: Option<(u64, &'a [wgpu::VertexAttribute])>,
+            /// How the buffer advances. The lanes draw one quad per instance; the
+            /// winding pass draws real triangles, one vertex at a time.
+            step: wgpu::VertexStepMode,
             /// Four-corner strip quads; `false` for the full-screen triangle passes.
             strip: bool,
         }
@@ -482,6 +517,9 @@ impl PipelineStore {
         let add = both(wgpu::BlendFactor::One, wgpu::BlendFactor::One);
 
         let rect_attributes = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
+        let resolve_attributes = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x2];
+        let winding_attributes =
+            wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
         let cover_attributes = wgpu::vertex_attr_array![
             0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
             3 => Float32x4, 4 => Float32x4
@@ -491,6 +529,7 @@ impl PipelineStore {
                 label: "quorra rect",
                 shader: &base.rect_shader,
                 layout: &base.lane_layout,
+                vertex: "vs_main",
                 entry: if kind == Kind::RectErase {
                     "fs_shape"
                 } else {
@@ -502,12 +541,14 @@ impl PipelineStore {
                     _ => over,
                 }),
                 buffer: Some((crate::encode::RECT_INSTANCE_STRIDE, &rect_attributes)),
+                step: wgpu::VertexStepMode::Instance,
                 strip: true,
             },
             Kind::CoverOver | Kind::CoverErase | Kind::CoverAdd => Spec {
                 label: "quorra coverage",
                 shader: &base.cover_shader,
                 layout: &base.lane_layout,
+                vertex: "vs_main",
                 entry: if kind == Kind::CoverErase {
                     "fs_shape"
                 } else {
@@ -519,12 +560,14 @@ impl PipelineStore {
                     _ => over,
                 }),
                 buffer: Some((crate::encode::QUAD_INSTANCE_STRIDE, &cover_attributes)),
+                step: wgpu::VertexStepMode::Instance,
                 strip: true,
             },
             Kind::ImageOver | Kind::ImageErase | Kind::ImageAdd => Spec {
                 label: "quorra image",
                 shader: &base.image_shader,
                 layout: &base.image_pipe_layout,
+                vertex: "vs_main",
                 entry: if kind == Kind::ImageErase {
                     "fs_shape"
                 } else {
@@ -536,12 +579,14 @@ impl PipelineStore {
                     _ => over,
                 }),
                 buffer: None,
+                step: wgpu::VertexStepMode::Instance,
                 strip: true,
             },
             Kind::ShadedOver | Kind::ShadedErase | Kind::ShadedAdd => Spec {
                 label: "quorra shading",
                 shader: &base.shading_shader,
                 layout: &base.shading_pipe_layout,
+                vertex: "vs_main",
                 entry: if kind == Kind::ShadedErase {
                     "fs_shape"
                 } else {
@@ -553,34 +598,67 @@ impl PipelineStore {
                     _ => over,
                 }),
                 buffer: None,
+                step: wgpu::VertexStepMode::Instance,
                 strip: true,
             },
             Kind::Composite => Spec {
                 label: "quorra composite",
                 shader: &base.composite_shader,
                 layout: &base.composite_pipe_layout,
+                vertex: "vs_main",
                 entry: "fs_main",
                 blend: None, // REPLACE: the shader computes §11.3.6 wholly itself
                 buffer: None,
+                step: wgpu::VertexStepMode::Instance,
                 strip: false,
             },
             Kind::Reduce => Spec {
                 label: "quorra reduce",
                 shader: &base.reduce_shader,
                 layout: &base.reduce_pipe_layout,
+                vertex: "vs_main",
                 entry: "fs_main",
                 blend: None,
                 buffer: None,
+                step: wgpu::VertexStepMode::Instance,
                 strip: false,
             },
             Kind::Blit => Spec {
                 label: "quorra blit",
                 shader: &base.blit_shader,
                 layout: &base.blit_pipe_layout,
+                vertex: "vs_main",
                 entry: "fs_main",
                 blend: None,
                 buffer: None,
+                step: wgpu::VertexStepMode::Instance,
                 strip: false,
+            },
+            // Additive, and that is the whole mechanism: what lands in the sheet is
+            // the sum of every triangle's ±1, which is the winding number (ADR 0016).
+            Kind::Winding => Spec {
+                label: "quorra winding",
+                shader: &base.winding_shader,
+                layout: &base.winding_pipe_layout,
+                vertex: "vs_winding",
+                entry: "fs_winding",
+                blend: Some(add),
+                buffer: Some((crate::outline::WindingVertex::STRIDE, &winding_attributes)),
+                step: wgpu::VertexStepMode::Vertex,
+                strip: false,
+            },
+            // Additive as well, for a different reason: each pass carries four of the
+            // frame's samples and the sheet sums the groups.
+            Kind::WindingResolve => Spec {
+                label: "quorra winding resolve",
+                shader: &base.winding_shader,
+                layout: &base.resolve_pipe_layout,
+                vertex: "vs_resolve",
+                entry: "fs_resolve",
+                blend: Some(add),
+                buffer: Some((crate::winding::TILE_STRIDE, &resolve_attributes)),
+                step: wgpu::VertexStepMode::Instance,
+                strip: true,
             },
         };
         let buffers: Vec<Option<wgpu::VertexBufferLayout<'_>>> = spec
@@ -588,7 +666,7 @@ impl PipelineStore {
             .map(|(stride, attributes)| {
                 vec![Some(wgpu::VertexBufferLayout {
                     array_stride: stride,
-                    step_mode: wgpu::VertexStepMode::Instance,
+                    step_mode: spec.step,
                     attributes,
                 })]
             })
@@ -599,7 +677,7 @@ impl PipelineStore {
                 layout: Some(spec.layout),
                 vertex: wgpu::VertexState {
                     module: spec.shader,
-                    entry_point: Some("vs_main"),
+                    entry_point: Some(spec.vertex),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     buffers: &buffers,
                 },

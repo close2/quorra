@@ -40,6 +40,7 @@ mod encode;
 pub mod error;
 pub mod frame;
 pub mod mask;
+mod outline;
 pub mod pipeline;
 mod raster;
 mod readback;
@@ -50,6 +51,7 @@ mod surface;
 pub mod target;
 mod timing;
 pub mod viewport;
+mod winding;
 
 pub use device::{Device, Limits};
 pub use error::{DeviceError, RenderError, ResourceProblem, SurfaceProblem};

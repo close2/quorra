@@ -354,6 +354,15 @@ impl Device {
         })
     }
 
+    /// The pipeline cache, for the passes that live in modules of their own.
+    ///
+    /// Reached only by `winding.rs`'s tests until the encoder routes fills to the GPU
+    /// lane; the `allow` goes with the same commit that adds the caller (ADR 0016).
+    #[allow(dead_code)]
+    pub(crate) fn pipeline_store(&self) -> &PipelineStore {
+        &self.pipelines
+    }
+
     /// The adapter's name, type and backend — for reports and golden-file metadata.
     #[must_use]
     pub fn description(&self) -> &str {

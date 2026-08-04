@@ -15,6 +15,32 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**Coverage can come from the GPU, and the lane is proven but not yet reachable**
+(2026-08-05, ADR 0016): Evan Wallace's method — one triangle per outline segment
+fanned from an anchor, accumulated with additive blending so that what lands at a
+sample *is* §8.5.3.3's winding number, plus a Loop-Blinn control triangle per curve
+whose orientation alone decides whether the bulge is added or bitten out. Cubics
+become quadratics **once, at upload**, so no step in the lane knows the device scale:
+that is the answer to the thing the cull uncovered, where a zoom gesture makes every
+cached tile cold on every frame. Signed accumulation rather than his parity trick,
+because parity is even-odd only and §8.5.3.3.2's non-zero is PDF's default; samples in
+an `rgba16float` texel's channels rather than packed into a byte's bits, so sample
+count costs time and not memory; and the sample grid stated in our own code rather
+than taken from the driver, so ADR 0006's cross-adapter identity survives.
+
+**What is landed is the lane and its proof** — geometry (`outline.rs`), shaders
+(`shaders/winding.wgsl`), pipelines, and the frame pass (`winding.rs`), exercised end
+to end on a real device: an aligned square solid inside and empty outside, a
+half-covered column reading exactly 128 as the 4×4 grid derives, and nested same-wound
+squares filling under one rule and hollowing under the other. **The encoder does not
+route anything to it yet**, and the three things wiring it needs are named in ADR 0016:
+a scratch reservation without bytes, the frame budget pricing the winding texture
+(`Sheet::device_bytes` is written and uncalled), and residue clips, which still
+multiply into a coverage mask on the CPU. Until then the `allow(dead_code)` markers
+name the commit that deletes them. The number that decides *when* a caller should
+choose this lane — the magnification at which it overtakes the CPU one — cannot be
+measured until the encoder can reach it, and no one should guess it in the meantime.
+
 **A frame costs what it shows, not what the page holds** (2026-08-04): the caller
 zoomed, and found that a frame got *more* expensive the further in a person went —
 the encoder flattened all 5 933 commands of a page for a window displaying 24 of
