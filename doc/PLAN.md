@@ -15,6 +15,26 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**Feedback §7 is answered — a refusal costs the surface nothing** (2026-08-04): the
+viewer reproduced a permanent wedge (every acquire a 1-second `Timeout`, only a
+resize recovering) whose cause was a budget refusal *after* the swapchain acquire —
+the dropped, never-presented texture leaves an acquire semaphore no submission waits
+on, and enough of those exhaust the swapchain. Three changes, one hardening: the
+compositor's internal textures are now priced straight after encode, before the
+target is bound, so a refused frame acquires nothing (`Options::max_frame_bytes`'s
+"before anything is allocated" is now true of the acquire too, and
+`tests/m1.rs::frame_budget_refusal_precedes_target_binding` pins the ordering
+through the headless `NoSurface`-vs-`FrameBudgetExceeded` distinction); `Timeout`
+now sets `needs_reconfigure` exactly as `Outdated` does, so the wedge is at worst
+one bad frame; `Device::invalidate_surface()` is the host's explicit lever
+(`NoSurface` on a headless device — a caller bug refused by name); and a frame that
+fails *after* its texture was acquired (`run_frame`, the one remaining post-acquire
+early return) now invalidates the surface on its way out, bounding that path at one
+lost frame too. `FrameBudgetExceeded`'s message no longer claims "instance data"
+when what overflowed was internal textures — it names scene-derived bytes, which is
+what the shared budget prices. Awaiting the viewer's re-run of their one-drag
+reproduction on a real surface; every headless-provable piece is gated.
+
 **The corpus feedback is answered** (2026-08-03): the viewer measured the swapped
 backend against its 974-document corpus and wrote up what came back
 (`pdf-viewer/doc/QUORRA_FEEDBACK.md`); everything actionable landed the same day.

@@ -16,8 +16,9 @@ pub(crate) struct SurfaceState {
     alpha_mode: wgpu::CompositeAlphaMode,
     /// The size the surface is currently configured for, if any.
     configured: Option<(u32, u32)>,
-    /// Set when the surface reported itself suboptimal or outdated; forces a
-    /// reconfigure on the next frame.
+    /// Set when the surface reported itself suboptimal, outdated or timed out, or
+    /// when [`SurfaceState::invalidate`] was called; forces a reconfigure — a fresh
+    /// swapchain — on the next frame.
     needs_reconfigure: bool,
 }
 
@@ -70,6 +71,16 @@ impl SurfaceState {
         })
     }
 
+    /// Force a reconfigure before the next acquire, replacing the swapchain.
+    ///
+    /// Called when the presentation stack may hold state a retry cannot clear: a
+    /// frame that failed after its texture was acquired (the drop leaves an acquire
+    /// semaphore no submission will wait on), or a host asking through
+    /// [`Device::invalidate_surface`](crate::device::Device::invalidate_surface).
+    pub(crate) fn invalidate(&mut self) {
+        self.needs_reconfigure = true;
+    }
+
     /// Configure (when the size changed or the surface asked for it) and acquire the
     /// next texture.
     pub(crate) fn acquire(
@@ -103,9 +114,17 @@ impl SurfaceState {
                 self.needs_reconfigure = true;
                 Ok(texture)
             }
-            wgpu::CurrentSurfaceTexture::Timeout => Err(RenderError::SurfaceUnavailable {
-                reason: SurfaceProblem::Timeout,
-            }),
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                // A timeout can mean a swapchain whose images are all stuck behind
+                // acquire semaphores nothing will ever signal — a state a retry
+                // alone never leaves (the viewer observed exactly this: every
+                // subsequent acquire timing out, permanently). Reconfiguring
+                // replaces the swapchain, which is the one recovery wgpu offers.
+                self.needs_reconfigure = true;
+                Err(RenderError::SurfaceUnavailable {
+                    reason: SurfaceProblem::Timeout,
+                })
+            }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.needs_reconfigure = true;
                 Err(RenderError::SurfaceUnavailable {

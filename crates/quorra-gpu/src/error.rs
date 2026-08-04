@@ -126,7 +126,10 @@ pub enum ResourceProblem {
 /// Why the surface could not provide a texture for this frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceProblem {
-    /// Acquiring the next frame timed out; skip and try again.
+    /// Acquiring the next frame timed out; the next render reconfigures the surface,
+    /// so trying again is the fix. (Reconfigured rather than merely retried because a
+    /// timeout can mean a swapchain wedged behind unsignalled acquire semaphores — a
+    /// state a retry alone never leaves.)
     Timeout,
     /// The surface no longer matches the window; the next render reconfigures it, so
     /// trying again is the fix.
@@ -187,8 +190,11 @@ pub enum RenderError {
         /// The device's per-side texture limit, which bounds the scratch sheet.
         limit: u32,
     },
-    /// The frame's scene-derived allocations would exceed the stated budget.
-    #[error("frame needs {needed} bytes of instance data, over the stated budget of {budget}")]
+    /// The frame's scene-derived allocations would exceed the stated budget. Raised
+    /// for instance data (at encode) and for the compositor's internal textures
+    /// (before the target is bound) alike; the message names the bytes, not their
+    /// lane, because the budget they share is one number.
+    #[error("frame needs {needed} scene-derived bytes, over the stated budget of {budget}")]
     FrameBudgetExceeded {
         /// Bytes the scene would need.
         needed: u64,
@@ -196,8 +202,9 @@ pub enum RenderError {
         /// ([`Options::max_frame_bytes`](crate::device::Options::max_frame_bytes)).
         budget: u64,
     },
-    /// `Target::Surface` on a device constructed with
-    /// [`Device::headless`](crate::device::Device::headless).
+    /// `Target::Surface` or
+    /// [`Device::invalidate_surface`](crate::device::Device::invalidate_surface) on a
+    /// device constructed with [`Device::headless`](crate::device::Device::headless).
     #[error(
         "this device is headless; construct it with Device::for_surface to render to a surface"
     )]

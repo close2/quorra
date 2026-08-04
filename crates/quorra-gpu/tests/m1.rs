@@ -40,7 +40,7 @@
 )]
 
 use quorra_gpu::{Device, Options, RenderError, Target, TimingProvenance, Viewport};
-use quorra_scene::{Affine, Color, Point, Rect, Scene, SceneBuilder};
+use quorra_scene::{Affine, BlendMode, Color, GroupSpec, Point, Rect, Scene, SceneBuilder};
 
 /// Every Vulkan adapter on this machine, by name. The determinism promises quoted in
 /// the module docs are made for Vulkan adapters (RADV and lavapipe are what the
@@ -556,6 +556,66 @@ fn refusals_name_what_they_refuse() {
     assert!(matches!(
         device.render(&scene, &non_finite, Target::Readback),
         Err(RenderError::NonFiniteViewportTransform)
+    ));
+}
+
+/// A refused frame costs the target nothing (the viewer's feedback §7: a budget
+/// refusal after the swapchain acquire wedged the surface permanently). Provable
+/// headlessly through ordering: on a headless device a `Surface` target refuses as
+/// `NoSurface` *at binding* — so a frame over the internal-texture budget refusing
+/// as `FrameBudgetExceeded` instead proves the pricing ran before the target was
+/// bound, which for a real surface is before any texture is acquired.
+#[test]
+fn frame_budget_refusal_precedes_target_binding() {
+    let adapter = &vulkan_adapters()[0];
+    // One group at 64×64 needs two ping-pong pairs: 2 plans × 2 × 64 × 64 × 4 =
+    // 65536 internal bytes. A 32 KiB budget admits the scene's few hundred
+    // instance bytes through encode and refuses on the internal textures.
+    let budget = 32 * 1024;
+    let mut device = Device::headless(&Options {
+        adapter: Some(adapter.clone()),
+        max_frame_bytes: budget,
+        ..Options::default()
+    })
+    .unwrap();
+    let mut builder = SceneBuilder::new();
+    builder
+        .group(
+            GroupSpec {
+                alpha: 1.0,
+                blend: BlendMode::Normal,
+                clip: None,
+                knockout: false,
+                mask: None,
+            },
+            |body| {
+                body.rect(
+                    Rect::new(Point::new(0.0, 0.0), Point::new(8.0, 8.0)),
+                    Affine::IDENTITY,
+                    Color::new(0.0, 0.0, 0.0, 1.0),
+                    None,
+                    None,
+                )
+            },
+        )
+        .unwrap();
+    let scene = builder.finish();
+    match device.render(
+        &scene,
+        &Viewport::full(64, 64, Affine::IDENTITY),
+        Target::Surface,
+    ) {
+        Err(RenderError::FrameBudgetExceeded { needed, budget: b }) => {
+            assert_eq!(b, budget);
+            assert_eq!(needed, 2 * 2 * 64 * 64 * 4, "two plans, one pair each");
+        }
+        other => panic!("expected FrameBudgetExceeded before NoSurface, got {other:?}"),
+    }
+    // The host's explicit reconfigure lever exists — and on a headless device it is
+    // a caller bug refused by name, not a no-op.
+    assert!(matches!(
+        device.invalidate_surface(),
+        Err(RenderError::NoSurface)
     ));
 }
 

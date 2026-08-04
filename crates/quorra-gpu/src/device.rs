@@ -94,7 +94,8 @@ pub struct Options {
     pub adapter: Option<String>,
     /// The per-frame budget for scene-derived allocations, in bytes. Exceeding it is
     /// a [`RenderError::FrameBudgetExceeded`] naming both numbers, before anything is
-    /// allocated.
+    /// allocated — including, for a [`Target::Surface`] frame, before the swapchain
+    /// texture is acquired, so a refusal costs the surface nothing.
     pub max_frame_bytes: u64,
     /// The budget for resident resources (outlines, images, ramps, meshes), in bytes.
     /// Exceeding it is a [`DeviceError::ResourceBudgetExceeded`] naming all three
@@ -534,6 +535,29 @@ impl Device {
         }
     }
 
+    /// Force the surface to be reconfigured — a fresh swapchain — before the next
+    /// [`Target::Surface`] frame.
+    ///
+    /// The host's lever for a presentation stack it suspects is wedged: the surface
+    /// itself reports [`SurfaceProblem`](crate::error::SurfaceProblem)s and asks for
+    /// its own reconfiguration where it can tell, but a host that knows better —
+    /// after a run of refusals, or a compositor event this library cannot see — need
+    /// not wait for that or fake a resize. Costs nothing until the next surface
+    /// frame, which pays one reconfigure.
+    ///
+    /// # Errors
+    ///
+    /// [`RenderError::NoSurface`] on a device constructed with
+    /// [`Device::headless`] — asking to invalidate a surface that cannot exist is a
+    /// caller bug, and hiding it would hide the defect.
+    pub fn invalidate_surface(&mut self) -> Result<(), RenderError> {
+        let Some(surface) = self.surface.as_mut() else {
+            return Err(RenderError::NoSurface);
+        };
+        surface.invalidate();
+        Ok(())
+    }
+
     /// Render one frame of `scene` at `viewport` into `target`.
     ///
     /// The scene is not consumed and carries no target knowledge: the same scene
@@ -576,6 +600,23 @@ impl Device {
             return Self::zero_size_frame(viewport, &into, &encoded, encode_time, reports);
         }
 
+        // Price the compositor's internal textures while nothing of the frame
+        // exists yet (§5: count then allocate; the refusal names both numbers).
+        // Before the target is bound on purpose: a `Surface` refusal must cost no
+        // swapchain acquire, because a texture acquired and then dropped unpresented
+        // leaves the swapchain a semaphore no submission will ever wait on — the
+        // viewer measured that as every later acquire timing out, permanently.
+        // A patched frame renders through the root pair even when flat.
+        let patches = matches!(&damage, DamagePlan::Patch { rects, .. } if !rects.is_empty());
+        let internal_bytes =
+            compose::internal_texture_bytes(&encoded, viewport.width, viewport.height, patches);
+        if internal_bytes > self.limits.max_frame_bytes {
+            return Err(RenderError::FrameBudgetExceeded {
+                needed: internal_bytes,
+                budget: self.limits.max_frame_bytes,
+            });
+        }
+
         // Phase 2: allocate (sized by phase 1) and schedule uploads — including
         // the device-resident form of any image, ramp or mesh drawn for the first
         // time this frame.
@@ -587,23 +628,16 @@ impl Device {
         let upload_time = upload.time.saturating_add(paint_time);
         let upload_bytes = upload.bytes.saturating_add(paint_bytes);
 
-        // Bind the target, and price the compositor's internal textures before any
-        // of them exist (§5: count then allocate; the refusal names both numbers).
-        // A patched frame renders through the root pair even when flat.
+        // Every refusal a scene can earn has been taken; bind the target last, so
+        // the acquire happens only for a frame that will run.
         let bound = self.bind_target(&into, viewport)?;
-        let patches = matches!(&damage, DamagePlan::Patch { rects, .. } if !rects.is_empty());
-        let internal_bytes =
-            compose::internal_texture_bytes(&encoded, viewport.width, viewport.height, patches);
-        if internal_bytes > self.limits.max_frame_bytes {
-            return Err(RenderError::FrameBudgetExceeded {
-                needed: internal_bytes,
-                budget: self.limits.max_frame_bytes,
-            });
-        }
 
         let query = self.make_pass_query();
         let (execute_wall, mut phases) =
-            self.run_frame(&encoded, &bound, upload, query.as_ref(), &damage)?;
+            match self.run_frame(&encoded, &bound, upload, query.as_ref(), &damage) {
+                Ok(ran) => ran,
+                Err(error) => return Err(self.abandon_frame(bound, error)),
+            };
 
         // Present before reading instrumentation back: the person sees the frame at
         // the earliest moment, the numbers arrive a map later.
@@ -1048,6 +1082,23 @@ impl Device {
             *bytes =
                 bytes.saturating_add(u64::from(tile.width).saturating_mul(u64::from(tile.height)));
         }
+    }
+
+    /// Give up a bound target after a failure, and pass the error through.
+    ///
+    /// Dropping an acquired-but-unpresented swapchain texture leaves the swapchain
+    /// an acquire semaphore no submission will ever wait on, and enough of those
+    /// exhaust it — every later acquire times out. Invalidating the surface here
+    /// bounds the damage of a post-acquire failure at one lost frame: the next
+    /// frame reconfigures, which replaces the swapchain.
+    fn abandon_frame(&mut self, bound: Bound<'_>, error: RenderError) -> RenderError {
+        if matches!(bound, Bound::Acquired(_)) {
+            drop(bound);
+            if let Some(surface) = self.surface.as_mut() {
+                surface.invalidate();
+            }
+        }
+        error
     }
 
     /// Bind the frame's target, validating a caller texture against its contract.
