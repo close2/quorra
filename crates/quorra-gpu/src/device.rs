@@ -638,6 +638,7 @@ impl Device {
                 atlas_entries: u32::try_from(self.atlas.entry_count()).unwrap_or(u32::MAX),
                 atlas_distinct_keys: encoded.atlas_distinct_keys,
                 segments: encoded.segments,
+                commands_culled: encoded.commands_culled,
                 bytes_uploaded: upload_bytes,
                 ..Counters::default()
             },

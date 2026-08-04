@@ -15,6 +15,26 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A frame costs what it shows, not what the page holds** (2026-08-04): the caller
+zoomed, and found that a frame got *more* expensive the further in a person went —
+the encoder flattened all 5 933 commands of a page for a window displaying 24 of
+them. ADR 0012's recorded lever is now taken (ADR 0015): a command whose device
+bounds, inflated by two pixels for the glyph lane's quantised phase and the coverage
+lanes' `floor`/`ceil`, miss `clip ∩ target` is rejected before its geometry is built,
+and `Counters::commands_culled` reports how many. A **zoom gesture** — 1× to 20×
+over 24 frames, no cached tile helping any of them — went from a worst frame of
+**156 ms of encode to 9.3 ms**; a page with nothing off the target pays about 6–10%
+more encode for the test, which is written down rather than hidden. Two things it
+deliberately does not do: a group is not culled as a unit, and damage still is not a
+cull. **What the cull uncovered is the next question**: at 20× the residual 6.8 ms is
+30 glyph tiles of ~290 px rasterised again on every frame, because past
+`MAX_GLYPH_DIM` a glyph never enters the atlas — a probe raising that constant takes
+the same frame to 0.25 ms. That is an atlas *policy* question (what a large tile may
+cost against the budget, whether a gesture's key churn can be kept from thrashing
+it), not the GPU-coverage question of ADR 0008, and it wants its own ADR and its own
+measurement. `examples/zoom.rs` is the harness; `tests/cull.rs` and a
+deterministic count gate in `tests/perf_gate.rs` hold the behaviour.
+
 **Feedback §8 is answered — bring-up is measured per step, and its largest step can
 start before there is a window** (2026-08-04): the caller's owner decided that page
 one goes to the graphics device, which put our bring-up on their time-to-first-page

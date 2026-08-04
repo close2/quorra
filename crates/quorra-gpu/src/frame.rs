@@ -139,6 +139,14 @@ pub struct Counters {
     pub tiles: u32,
     /// Path segments processed (M5; 0 until then).
     pub segments: u32,
+    /// Commands rejected for reaching no pixel of the target — outside it, or clipped
+    /// to nothing — before any geometry was built for them (ADR 0015).
+    ///
+    /// The instrument that says how much of a frame the page did not need: at 20×
+    /// magnification a viewer hands over a whole page for a window showing a
+    /// fortieth of it, and this counts what that costs nothing. A frame drawing
+    /// everything it was given reports zero; it is not an error either way.
+    pub commands_culled: u32,
     /// Bytes scheduled for CPU→GPU transfer this frame.
     pub bytes_uploaded: u64,
 }

@@ -87,3 +87,51 @@ fn dense_page_at_window_scale_stays_under_the_gate() {
         }
     }
 }
+
+/// The zoom gate, and it counts rather than times (ADR 0015).
+///
+/// A viewer at 20× hands over a whole page for a window showing a fortieth of it; the
+/// encoder must reject what cannot reach the target instead of flattening it. The
+/// assertion is on `commands_culled`, which is a deterministic function of the scene
+/// and the viewport — no wall clock, so a loaded CI runner cannot make it flake, and
+/// a lane that stops culling fails the build even on a machine too slow to time.
+///
+/// The count is exact rather than approximate, and it is arithmetic rather than an
+/// observation: at 20× the window spans 59.55 × 84.2 page units about (580, 565), so
+/// it holds rectangle columns 38–41 and rows 34–39 — 24 of the 5 933 — and 5 909 are
+/// outside by far more than the two device pixels the encoder inflates a command's
+/// bounds by (0.1 page units here). The number moves only if the scene or the
+/// viewport moves.
+#[test]
+fn a_zoomed_page_culls_what_it_cannot_reach() {
+    let mut device = Device::headless(&Options::default()).expect("some adapter must exist");
+    device.wait_until_warm();
+    let scene = dense_scene();
+
+    let whole_page = Viewport::full(1191, 1684, Affine::IDENTITY);
+    let drawn = device
+        .render(&scene, &whole_page, Target::Readback)
+        .expect("the dense page is within every budget");
+    assert_eq!(
+        drawn.counters().commands_culled,
+        0,
+        "at 1x the whole page is on the target, so nothing may be culled"
+    );
+
+    // 20x about the page's middle, as `examples/zoom.rs` measures it.
+    let zoomed = Affine::translate(-580.0, -565.0)
+        .then(Affine::scale(20.0, 20.0))
+        .then(Affine::translate(1191.0 / 2.0, 1684.0 / 2.0));
+    let drawn = device
+        .render(
+            &scene,
+            &Viewport::full(1191, 1684, zoomed),
+            Target::Readback,
+        )
+        .expect("the dense page is within every budget");
+    assert_eq!(
+        drawn.counters().commands_culled,
+        5_909,
+        "at 20x, 24 of the 5 933 rectangles reach the window and the rest must not be built"
+    );
+}

@@ -256,6 +256,8 @@ pub(crate) struct Encoded {
     pub distinct_outlines: u32,
     pub atlas_distinct_keys: u32,
     pub segments: u32,
+    /// Commands the walk rejected for reaching no pixel of the target.
+    pub commands_culled: u32,
     /// Set when a glyph tile no longer fit the atlas and fell through to scratch:
     /// the device resets the atlas after the frame so the next frame repacks fresh.
     pub atlas_pressure: bool,
@@ -463,6 +465,17 @@ fn apply(t: &DeviceTransform, p: Point) -> Point {
     Point::new(t.a * p.x + t.c * p.y + t.e, t.b * p.x + t.d * p.y + t.f)
 }
 
+/// How far a lane may mark outside the device bounds a cull is tested against.
+///
+/// Two device pixels, and each one is a real mechanism rather than a safety margin:
+/// the glyph lane rasterises at a *quantised* sub-pixel phase, which moves a tile by
+/// under one pixel from the transform its bounds were taken from
+/// ([`Encoder::push_glyph`]); and every coverage tile expands to whole pixels by
+/// `floor`/`ceil`, which reaches under one pixel further again. Flattening adds
+/// nothing to this — a flattened point lies on the curve, which lies inside the
+/// control hull [`outline_device_bounds`] measures.
+const CULL_MARGIN: f32 = 2.0;
+
 /// The composed-transform bounding box of an outline's control points — a bound on
 /// the curve itself, by the convex-hull property of Béziers.
 fn outline_device_bounds(
@@ -492,10 +505,30 @@ fn outline_device_bounds(
     bounds
 }
 
+/// The target's own pixel rectangle — what a command has to reach to draw anything.
+///
+/// Its corners are integers, and that is load-bearing rather than incidental: an
+/// edge landing exactly on a pixel boundary contributes full coverage to the pixel
+/// inside it and none to the pixel outside, so a rectangle *clipped* to this
+/// rectangle covers every pixel it covered before. That is why the analytic lane may
+/// intersect its geometry with the target and not merely test against it, while a
+/// clip at a fractional coordinate — a real edge, which must antialias — is the
+/// intersection ADR 0007 already reasons about.
+#[allow(clippy::cast_precision_loss)] // viewport extents are far below f32's exact range
+fn target_rect(viewport: &Viewport<'_>) -> Rect {
+    Rect::new(
+        Point::new(0.0, 0.0),
+        Point::new(viewport.width as f32, viewport.height as f32),
+    )
+}
+
 /// The encoder's working state for one frame walk.
 struct Encoder<'a> {
     scene: &'a Scene,
     viewport: &'a Viewport<'a>,
+    /// [`target_rect`] of `viewport`, computed once: every command is tested against
+    /// it before its geometry is built.
+    visible: Rect,
     resources: &'a ResourceStore,
     atlas: &'a mut AtlasStore,
     quantum: Option<u16>,
@@ -519,6 +552,8 @@ struct Encoder<'a> {
     used_ramps: HashSet<u32>,
     used_meshes: HashSet<u32>,
     segments: u64,
+    /// Commands that could reach no pixel of the target, and so were never built.
+    culled: u32,
     atlas_pressure: bool,
 }
 
@@ -549,6 +584,7 @@ pub(crate) fn encode(
     let mut encoder = Encoder {
         scene,
         viewport,
+        visible: target_rect(viewport),
         resources,
         atlas,
         quantum,
@@ -573,6 +609,7 @@ pub(crate) fn encode(
         used_ramps: HashSet::new(),
         used_meshes: HashSet::new(),
         segments: 0,
+        culled: 0,
         atlas_pressure: false,
     };
 
@@ -611,6 +648,7 @@ pub(crate) fn encode(
         distinct_outlines: u32::try_from(encoder.distinct_outlines.len()).unwrap_or(u32::MAX),
         atlas_distinct_keys: u32::try_from(encoder.atlas_keys.len()).unwrap_or(u32::MAX),
         segments: u32::try_from(encoder.segments).unwrap_or(u32::MAX),
+        commands_culled: encoder.culled,
         atlas_pressure: encoder.atlas_pressure,
     })
 }
@@ -707,6 +745,55 @@ impl Encoder<'_> {
         }
     }
 
+    /// Whether a command with these device bounds can mark no pixel, and so need
+    /// never be built.
+    ///
+    /// Every lane already draws into `bounds ∩ clip ∩ target` and no further —
+    /// `coverage_tile`, `encode_rect` and `encode_image` each intersect exactly those
+    /// three. Testing it *before* the geometry exists is what makes a frame cost what
+    /// it shows rather than what the page holds: at 20× magnification a page hands
+    /// the encoder thousands of commands for a window that displays tens of them, and
+    /// flattening the rest cost 9.35 ms of a 14.4 ms frame (ADR 0015).
+    ///
+    /// **Not §5's forbidden silence.** The test establishes that the command had no
+    /// pixel to mark, so the frame is byte-for-byte the one that would have built the
+    /// command and thrown it away — nothing is approximated and nothing is dropped
+    /// that would have shown. [`Counters::commands_culled`] reports how often it
+    /// fired, so the saving is measured rather than assumed.
+    ///
+    /// [`Counters::commands_culled`]: crate::frame::Counters::commands_culled
+    /// **What it costs when it wins nothing**, since it runs once per command on the
+    /// hottest walk there is: a page with nothing outside the target encodes 6% slower
+    /// (5 933 commands, 0.76 → 0.81 ms; ADR 0015's table). Writing the same test on
+    /// scalars instead of through [`Rect::intersection`] measured the same 6%, so the
+    /// clear construction is the one that stays.
+    fn culled(&mut self, bounds: (f32, f32, f32, f32), clip: &ResolvedClip) -> bool {
+        let (x0, y0, x1, y1) = bounds;
+        let reach = Rect::new(
+            Point::new(x0 - CULL_MARGIN, y0 - CULL_MARGIN),
+            Point::new(x1 + CULL_MARGIN, y1 + CULL_MARGIN),
+        );
+        if reach
+            .intersection(clip.rect)
+            .intersection(self.visible)
+            .is_empty()
+        {
+            self.note_culled();
+            return true;
+        }
+        false
+    }
+
+    /// Record a command that reaches no pixel of the target.
+    ///
+    /// Its own method because two lanes decide visibility differently and both must
+    /// count: the coverage lanes test bounds inflated by [`CULL_MARGIN`], while the
+    /// analytic rectangle and image lanes intersect exactly the region they draw and
+    /// so need no margin at all.
+    fn note_culled(&mut self) {
+        self.culled = self.culled.saturating_add(1);
+    }
+
     /// The stroke arm: expansion via the path lane, non-Normal blends through an
     /// implicit child (as in `encode_fill`).
     #[allow(clippy::too_many_arguments)] // one command's fields, destructured once
@@ -722,6 +809,24 @@ impl Encoder<'_> {
         mask: Option<MaskId>,
     ) -> Result<(), RenderError> {
         let mask = self.use_mask(mask)?;
+        let stored = self
+            .resources
+            .outline(outline)
+            .ok_or(RenderError::UnknownOutline { outline })?;
+        let to_device = compose(transform, self.viewport);
+        let resolved = self.resolve_clip(clip)?;
+        // Visibility before the blend wrap, so a stroke outside the target costs
+        // neither its expansion nor the implicit group §11.3.5 would put it in. The
+        // outline's hull grows by the stroke's own reach: the width is device-space
+        // (§4.5 resolved it per placement), a miter join may carry a corner half the
+        // width times the limit away from it (§8.4.3.5), and a cap extends half the
+        // width — which a limit of at least 1 already covers.
+        let reach = stroke.width * 0.5 * stroke.miter_limit;
+        if let Some((x0, y0, x1, y1)) = outline_device_bounds(&stored.segments, &to_device)
+            && self.culled((x0 - reach, y0 - reach, x1 + reach, y1 + reach), &resolved)
+        {
+            return Ok(());
+        }
         if blend != BlendMode::Normal {
             // §11.3.5 for a single element: an implicit one-element group.
             let child = self.plan_child(|encoder| {
@@ -747,14 +852,8 @@ impl Encoder<'_> {
             }));
             return Ok(());
         }
-        let stored = self
-            .resources
-            .outline(outline)
-            .ok_or(RenderError::UnknownOutline { outline })?;
         self.distinct_outlines.insert(outline.0);
         self.segments = self.segments.saturating_add(stored.segments.len() as u64);
-        let resolved = self.resolve_clip(clip)?;
-        let to_device = compose(transform, self.viewport);
         // Flatten under the full transform, then expand: the width arrived
         // resolved (§4.5), so our job is caps, joins and miters only.
         let polylines = raster::flatten(&stored.segments, to_device);
@@ -936,22 +1035,42 @@ impl Encoder<'_> {
                 Point::new(p0.x.min(p1.x), p0.y.min(p1.y)),
                 Point::new(p0.x.max(p1.x), p0.y.max(p1.y)),
             )
-            .intersection(resolved.rect);
+            .intersection(resolved.rect)
+            // And with the target, which costs no pixel any coverage: `target_rect`
+            // has integer corners, so an edge it introduces falls exactly on a pixel
+            // boundary. This is the analytic lane's whole cull — the region it draws
+            // decides it, with no margin, because nothing here rounds outwards.
+            .intersection(self.visible);
             if device_rect.is_empty() {
-                return Ok(()); // clipped to nothing: draws nothing, legitimately
+                // Clipped to nothing or off the target: draws nothing, legitimately.
+                self.note_culled();
+                return Ok(());
             }
             self.push_rect_instance(device_rect, color, mask);
             return Ok(());
         }
         // Oblique transform or residue clip: the rectangle is a polygon and
         // takes the path lane, exactly.
+        let corners = [
+            apply(&to_device, rect.min),
+            apply(&to_device, Point::new(rect.max.x, rect.min.y)),
+            apply(&to_device, rect.max),
+            apply(&to_device, Point::new(rect.min.x, rect.max.y)),
+        ];
+        let bounds = corners.iter().fold(
+            (
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ),
+            |(x0, y0, x1, y1), p| (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y)),
+        );
+        if self.culled(bounds, &resolved) {
+            return Ok(());
+        }
         let polylines = vec![Polyline {
-            points: vec![
-                apply(&to_device, rect.min),
-                apply(&to_device, Point::new(rect.max.x, rect.min.y)),
-                apply(&to_device, rect.max),
-                apply(&to_device, Point::new(rect.min.x, rect.max.y)),
-            ],
+            points: corners.to_vec(),
             closed: true,
         }];
         self.push_coverage(&polylines, Rule::NonZero, color, &resolved, mask)
@@ -973,6 +1092,22 @@ impl Encoder<'_> {
         mask: Option<MaskId>,
     ) -> Result<(), RenderError> {
         let mask = self.use_mask(mask)?;
+        let stored = self
+            .resources
+            .outline(outline)
+            .ok_or(RenderError::UnknownOutline { outline })?;
+        let to_device = compose(transform, self.viewport);
+        let resolved = self.resolve_clip(clip)?;
+        let bounds = outline_device_bounds(&stored.segments, &to_device);
+        // A *solid* fill's visibility follows from its outline alone, so it is decided
+        // here — before the implicit group a non-Normal blend would otherwise wrap it
+        // in, which is the expensive half of an off-screen blended fill. A shaded fill
+        // waits until `shaded_geometry` has resolved its paint: an unknown ramp or mesh
+        // id must refuse by name wherever the fill happens to land, and a refusal that
+        // depended on the viewport would be a worse defect than the work it saved.
+        if matches!(paint, Paint::Solid(_)) && bounds.is_none_or(|b| self.culled(b, &resolved)) {
+            return Ok(());
+        }
         if blend != BlendMode::Normal && self.style == DrawStyle::Over {
             // §11.3.5 for a single element: an implicit one-element group. (Inside a
             // knockout group the element composites with the transparent initial
@@ -1006,21 +1141,14 @@ impl Encoder<'_> {
         } else {
             self.style
         };
-        let stored = self
-            .resources
-            .outline(outline)
-            .ok_or(RenderError::UnknownOutline { outline })?;
         self.distinct_outlines.insert(outline.0);
         self.segments = self.segments.saturating_add(stored.segments.len() as u64);
-        let resolved = self.resolve_clip(clip)?;
-        let to_device = compose(transform, self.viewport);
         let rule = match rule {
             FillRule::NonZero => Rule::NonZero,
             FillRule::EvenOdd => Rule::EvenOdd,
         };
         if let Paint::Solid(color) = paint {
-            let Some((bx0, by0, bx1, by1)) = outline_device_bounds(&stored.segments, &to_device)
-            else {
+            let Some((bx0, by0, bx1, by1)) = bounds else {
                 return Ok(()); // no geometry: draws nothing
             };
             if resolved.residues.is_none()
@@ -1038,6 +1166,11 @@ impl Encoder<'_> {
         let Some(geometry) = self.shaded_geometry(paint)? else {
             return Ok(());
         };
+        // The paint is resolved, so the fill may now be dropped for being out of
+        // sight — the half of the solid lane's test that had to wait.
+        if bounds.is_none_or(|b| self.culled(b, &resolved)) {
+            return Ok(());
+        }
         if resolved.residues.is_none()
             && transform_preserves_axes(&to_device)
             && let Some(rect) = stored.rect_hint
@@ -1135,7 +1268,10 @@ impl Encoder<'_> {
             .min(resolved.rect.max.y)
             .min(self.viewport.height as f32);
         if vx0 >= vx1 || vy0 >= vy1 {
-            return Ok(()); // clipped to nothing: draws nothing, legitimately
+            // Clipped to nothing or off the target: draws nothing, legitimately.
+            // Exact, like the analytic rectangle lane — this *is* the region drawn.
+            self.note_culled();
+            return Ok(());
         }
         let left = vx0.floor() as i32;
         let top = vy0.floor() as i32;
