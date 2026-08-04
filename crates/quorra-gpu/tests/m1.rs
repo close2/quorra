@@ -650,18 +650,81 @@ fn unhonoured_damage_is_reported_not_silent() {
     );
 }
 
-/// §7's startup contract: the split is reported, the device is eventually warm, and
-/// the warm duration then appears.
+/// §7's startup contract: every step that can regress on its own is reported on its
+/// own, the device is eventually warm, and the warm duration then appears.
+///
+/// The split (four blocking numbers where M1 reported two) answers the caller's
+/// feedback §8.1: its `adapter_enumeration` measured instance creation, surface
+/// creation and adapter selection at once — three steps with three causes, so a
+/// regression in any of them was unattributable.
 #[test]
-fn startup_reports_its_three_phases() {
+fn startup_reports_every_step_separately() {
     let adapter = &vulkan_adapters()[0];
     let device = device_for(adapter);
     let startup = device.startup();
-    assert!(startup.adapter_enumeration > std::time::Duration::ZERO);
+    assert!(startup.instance_creation.unwrap() > std::time::Duration::ZERO);
+    assert!(startup.adapter_selection > std::time::Duration::ZERO);
     assert!(startup.device_creation > std::time::Duration::ZERO);
+    // Headless: the surface step does not happen, and zero is the true answer.
+    assert_eq!(startup.surface_creation, std::time::Duration::ZERO);
+    assert_eq!(
+        startup.blocking_total(),
+        startup.instance_creation.unwrap()
+            + startup.surface_creation
+            + startup.adapter_selection
+            + startup.device_creation,
+        "blocking_total is the four blocking steps and nothing else"
+    );
+
     device.wait_until_warm();
     assert!(device.is_warm());
-    assert!(device.startup().pipeline_compilation.is_some());
+    let warm = device.startup();
+    assert!(warm.pipeline_compilation.is_some());
+    assert!(
+        warm.blocking_total() == startup.blocking_total(),
+        "compiling in the background may not change what construction blocked for"
+    );
+}
+
+/// The startup lever of feedback §8.2: an instance is made before there is a window,
+/// and the device built on it does not claim to have made it.
+#[test]
+fn a_supplied_instance_is_used_and_not_claimed_as_ours() {
+    let adapter = &vulkan_adapters()[0];
+    // What a host would create on a thread at `main`'s first line and hand over.
+    let instance = quorra_gpu::create_instance();
+    let device = Device::headless_with_instance(
+        &instance,
+        &Options {
+            adapter: Some(adapter.clone()),
+            ..Options::default()
+        },
+    )
+    .expect("the hoisted instance yields the same device");
+    let startup = device.startup();
+    assert!(
+        startup.instance_creation.is_none(),
+        "a step this constructor did not perform must not be reported as zero cost"
+    );
+    assert!(startup.adapter_selection > std::time::Duration::ZERO);
+    assert!(startup.device_creation > std::time::Duration::ZERO);
+    assert_eq!(
+        startup.blocking_total(),
+        startup.adapter_selection + startup.device_creation
+    );
+
+    // And it is a working device, not merely a constructed one.
+    let mut device = device;
+    assert_eq!(
+        device
+            .render(&golden_scene(), &golden_viewport(), Target::Readback)
+            .unwrap()
+            .into_raster()
+            .unwrap()
+            .into_pixels(),
+        render_golden(&mut device_for(adapter)),
+        "an instance's provenance cannot change a pixel"
+    );
 }
 
 /// The timing provenance is never ambiguous: with timestamp queries the per-pass

@@ -39,89 +39,12 @@ use crate::pipeline::{PipelineStore, WARM_FORMAT};
 use crate::readback;
 use crate::report::{Report, ReportKind};
 use crate::resources::ResourceStore;
+use crate::startup::{self, Options, PreSteps, StartupTimings};
 use crate::surface::SurfaceState;
 use crate::target::Target;
 pub(crate) use crate::timing::PassQuery;
 use crate::timing::{self, TimestampSupport};
 use crate::viewport::Viewport;
-
-/// The default per-frame budget for scene-derived allocations, in bytes.
-///
-/// A stated number rather than an implicit one, because a GPU buffer sized from
-/// document-derived arithmetic is a decompression bomb with a different name
-/// (CLAUDE.md principle 3). 256 MiB of instance data is roughly eight million
-/// rectangle commands — beyond any real page by orders of magnitude, while still
-/// refusing runaway input long before an allocator does.
-pub const DEFAULT_MAX_FRAME_BYTES: u64 = 256 * 1024 * 1024;
-
-/// The default budget for resident resources — outlines, images, ramps, meshes — in
-/// bytes.
-///
-/// The same principle as [`DEFAULT_MAX_FRAME_BYTES`], at resource scope: §4.7's
-/// 60 000×60 000 image arrives from real files by way of a correct interpreter, and
-/// its 14.4 GB of RGBA8 must be a refusal naming this number, never an allocation
-/// attempt. 512 MiB holds every page of every corpus document the brief quotes with
-/// room to spare, and the caller can raise it deliberately.
-pub const DEFAULT_MAX_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
-
-/// The default glyph-atlas budget, in bytes (an R8 texel is one byte).
-///
-/// 8 MiB holds roughly two thousand 64×64 tiles — far beyond the 107 distinct
-/// outlines of the brief's dense page at several phases each — while staying an
-/// afterthought next to a single 1191×1684 target. §6.3: the atlas is sized from a
-/// budget the caller sets, never from a constant of ours alone; this is only the
-/// default.
-pub const DEFAULT_ATLAS_BUDGET: u64 = 8 * 1024 * 1024;
-
-/// The default sub-pixel quantum of the glyph cache: 1/16 of a pixel.
-///
-/// §4.5's fifth decision, measured by the caller (its ADR 0131): 1/16 reused 5.0× on
-/// a dense page and left its oracle's verdicts unmoved; 1/8 contradicted pages.
-pub const DEFAULT_GLYPH_QUANTUM: u16 = 16;
-
-/// Construction options.
-///
-/// M4 adds the glyph-cache quantum and the atlas budget here — the fifth decision of
-/// §4.5, the one that is the caller's to make and ours to expose. M8 revisits the
-/// pipeline-cache blob (see `doc/PLAN.md`).
-#[derive(Debug, Clone)]
-pub struct Options {
-    /// Select the adapter by case-insensitive substring of its name — `"llvmpipe"`
-    /// picks the software rasteriser, `"radv"` the Radeon Vulkan driver. `None` asks
-    /// wgpu for the highest-performance adapter it can find. Ties among matches are
-    /// broken by name order, so the same request on the same machine picks the same
-    /// adapter (§4.6's spirit applied to setup).
-    pub adapter: Option<String>,
-    /// The per-frame budget for scene-derived allocations, in bytes. Exceeding it is
-    /// a [`RenderError::FrameBudgetExceeded`] naming both numbers, before anything is
-    /// allocated — including, for a [`Target::Surface`] frame, before the swapchain
-    /// texture is acquired, so a refusal costs the surface nothing.
-    pub max_frame_bytes: u64,
-    /// The budget for resident resources (outlines, images, ramps, meshes), in bytes.
-    /// Exceeding it is a [`DeviceError::ResourceBudgetExceeded`] naming all three
-    /// numbers, before anything is stored.
-    pub max_resource_bytes: u64,
-    /// The glyph atlas budget, in bytes ([`DEFAULT_ATLAS_BUDGET`]).
-    pub atlas_budget: u64,
-    /// The sub-pixel quantum of the glyph cache, as a denominator: `Some(16)` keys
-    /// glyph tiles at 1/16-pixel phases; `None` switches quantisation **off** (exact
-    /// phase keying — correct everywhere, and it almost never hits, which is the
-    /// caller's own measurement). Quantising moves rendered text by at most half a
-    /// quantum, which is why this is exposed rather than chosen silently (§4.5).
-    pub glyph_quantum: Option<u16>,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            adapter: None,
-            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
-            max_resource_bytes: DEFAULT_MAX_RESOURCE_BYTES,
-            atlas_budget: DEFAULT_ATLAS_BUDGET,
-            glyph_quantum: Some(DEFAULT_GLYPH_QUANTUM),
-        }
-    }
-}
 
 /// What this adapter can actually do, discoverable before any frame (§5 of the brief:
 /// a limit that must exist is discoverable, through this and `Scene::cost`).
@@ -133,20 +56,6 @@ pub struct Limits {
     pub max_frame_bytes: u64,
     /// The resident-resource budget, as configured.
     pub max_resource_bytes: u64,
-}
-
-/// What startup cost, split into the three phases §7 names, so a regression can be
-/// attributed rather than argued about. Gated in CI from the commit that first
-/// produced it.
-#[derive(Debug, Clone, Copy)]
-pub struct StartupTimings {
-    /// Instance creation and adapter enumeration/selection.
-    pub adapter_enumeration: Duration,
-    /// `request_device`: getting a queue on the chosen adapter.
-    pub device_creation: Duration,
-    /// Compiling the warm pipeline set, on the background thread. `None` while that
-    /// is still in flight — poll [`Device::is_warm`], or read this again later.
-    pub pipeline_compilation: Option<Duration>,
 }
 
 /// The rendering device: an adapter, a queue, and the pipelines a scene needs.
@@ -174,8 +83,19 @@ pub struct Device {
     glyph_quantum: Option<u16>,
     timestamps: Option<TimestampSupport>,
     surface: Option<SurfaceState>,
-    startup_adapter_enumeration: Duration,
-    startup_device_creation: Duration,
+    /// The blocking startup steps, each measured on its own (§7, and the caller's
+    /// feedback §8.1: one number that measured three could not be attributed).
+    startup: StartupSteps,
+}
+
+/// What the four blocking steps of construction cost, in the order they happen.
+#[derive(Debug, Clone, Copy)]
+struct StartupSteps {
+    /// `None` when the instance was the caller's, not ours to time.
+    instance_creation: Option<Duration>,
+    surface_creation: Duration,
+    adapter_selection: Duration,
+    device_creation: Duration,
 }
 
 /// What a render pass draws into for one frame.
@@ -241,8 +161,29 @@ impl Device {
     /// adapter refuses a device.
     pub fn headless(options: &Options) -> Result<Self, DeviceError> {
         let started = Instant::now();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        Self::build(&instance, None, options, started)
+        let instance = startup::create_instance();
+        let pre = PreSteps {
+            instance_creation: Some(started.elapsed()),
+            surface_creation: Duration::ZERO,
+        };
+        Self::build(&instance, None, pre, options)
+    }
+
+    /// A headless device on an instance the caller already has.
+    ///
+    /// The hoisting entry point of [`startup::create_instance`] without a window:
+    /// useful when a host makes one instance early and builds both its offscreen and
+    /// its windowed devices from it. [`StartupTimings::instance_creation`] is `None`
+    /// on the result, because that step was not this constructor's.
+    ///
+    /// # Errors
+    ///
+    /// As [`Device::headless`].
+    pub fn headless_with_instance(
+        instance: &wgpu::Instance,
+        options: &Options,
+    ) -> Result<Self, DeviceError> {
+        Self::build(instance, None, PreSteps::BORROWED_INSTANCE, options)
     }
 
     /// A device that presents to a window. `raw-window-handle` and nothing more
@@ -260,11 +201,52 @@ impl Device {
         options: &Options,
     ) -> Result<Self, DeviceError> {
         let started = Instant::now();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = startup::create_instance();
+        let instance_creation = started.elapsed();
+        Self::on_surface(&instance, Some(instance_creation), window, options)
+    }
+
+    /// A device that presents to a window, on an instance the caller made earlier.
+    ///
+    /// **The startup lever**: an instance needs no window, no surface and no event
+    /// loop, so [`startup::create_instance`] can run on a thread started at `main`'s
+    /// first line while the document is read and the window opened, and this
+    /// constructor takes the result. The caller measured about 20 ms of a 145 ms
+    /// launch in that overlap (their feedback §8.2). What cannot be hoisted, and is
+    /// not claimed: `request_adapter` takes the surface as `compatible_surface`, so
+    /// adapter selection is genuinely downstream of the window.
+    ///
+    /// [`StartupTimings::instance_creation`] is `None` on the result — the host that
+    /// made the instance is the one that can time it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Device::for_surface`].
+    pub fn for_surface_with_instance(
+        instance: &wgpu::Instance,
+        window: impl Into<wgpu::SurfaceTarget<'static>>,
+        options: &Options,
+    ) -> Result<Self, DeviceError> {
+        Self::on_surface(instance, None, window, options)
+    }
+
+    /// The shared body of the two surface constructors: create the surface, then
+    /// build, keeping each step's cost separate.
+    fn on_surface(
+        instance: &wgpu::Instance,
+        instance_creation: Option<Duration>,
+        window: impl Into<wgpu::SurfaceTarget<'static>>,
+        options: &Options,
+    ) -> Result<Self, DeviceError> {
+        let started = Instant::now();
         let surface = instance
             .create_surface(window)
             .map_err(|source| DeviceError::SurfaceCreation { source })?;
-        Self::build(&instance, Some(surface), options, started)
+        let pre = PreSteps {
+            instance_creation,
+            surface_creation: started.elapsed(),
+        };
+        Self::build(instance, Some(surface), pre, options)
     }
 
     /// The names of every adapter wgpu can see on this machine, for choosing an
@@ -272,7 +254,7 @@ impl Device {
     /// which renders on all of them (§4.6, §11.4).
     #[must_use]
     pub fn adapter_names() -> Vec<String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = startup::create_instance();
         pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
             .iter()
             .map(|adapter| adapter.get_info().name)
@@ -282,11 +264,12 @@ impl Device {
     fn build(
         instance: &wgpu::Instance,
         surface: Option<wgpu::Surface<'static>>,
+        pre: PreSteps,
         options: &Options,
-        started: Instant,
     ) -> Result<Self, DeviceError> {
-        let adapter = Self::select_adapter(instance, surface.as_ref(), options)?;
-        let startup_adapter_enumeration = started.elapsed();
+        let adapter_started = Instant::now();
+        let adapter = startup::select_adapter(instance, surface.as_ref(), options)?;
+        let adapter_selection = adapter_started.elapsed();
 
         let info = adapter.get_info();
         let description = format!("{} ({:?}, {:?})", info.name, info.device_type, info.backend);
@@ -314,7 +297,7 @@ impl Device {
             adapter: info.name.clone(),
             source,
         })?;
-        let startup_device_creation = device_started.elapsed();
+        let device_creation = device_started.elapsed();
 
         let timestamps = required_features
             .contains(wgpu::Features::TIMESTAMP_QUERY)
@@ -362,52 +345,13 @@ impl Device {
             glyph_quantum: options.glyph_quantum,
             timestamps,
             surface: surface_state,
-            startup_adapter_enumeration,
-            startup_device_creation,
+            startup: StartupSteps {
+                instance_creation: pre.instance_creation,
+                surface_creation: pre.surface_creation,
+                adapter_selection,
+                device_creation,
+            },
         })
-    }
-
-    fn select_adapter(
-        instance: &wgpu::Instance,
-        surface: Option<&wgpu::Surface<'static>>,
-        options: &Options,
-    ) -> Result<wgpu::Adapter, DeviceError> {
-        match &options.adapter {
-            Some(pattern) => {
-                let adapters =
-                    pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
-                let available: Vec<String> = adapters.iter().map(|a| a.get_info().name).collect();
-                let needle = pattern.to_lowercase();
-                let mut matches: Vec<wgpu::Adapter> = adapters
-                    .into_iter()
-                    .filter(|a| a.get_info().name.to_lowercase().contains(&needle))
-                    .collect();
-                matches.sort_by_key(|a| a.get_info().name);
-                matches
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| DeviceError::NoAdapter {
-                        requested: Some(pattern.clone()),
-                        available,
-                    })
-            }
-            None => pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: surface,
-                ..Default::default()
-            }))
-            .map_err(|_| {
-                let available =
-                    pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
-                        .iter()
-                        .map(|a| a.get_info().name)
-                        .collect();
-                DeviceError::NoAdapter {
-                    requested: None,
-                    available,
-                }
-            }),
-        }
     }
 
     /// The adapter's name, type and backend — for reports and golden-file metadata.
@@ -524,13 +468,16 @@ impl Device {
         self.pipelines.wait_until_warm();
     }
 
-    /// What startup cost, split three ways (§7). `pipeline_compilation` is `None`
-    /// until the background warm-up finishes.
+    /// What startup cost, one number per step that can regress on its own (§7).
+    /// `pipeline_compilation` is `None` until the background warm-up finishes, and
+    /// `instance_creation` is `None` when the instance was the caller's.
     #[must_use]
     pub fn startup(&self) -> StartupTimings {
         StartupTimings {
-            adapter_enumeration: self.startup_adapter_enumeration,
-            device_creation: self.startup_device_creation,
+            instance_creation: self.startup.instance_creation,
+            surface_creation: self.startup.surface_creation,
+            adapter_selection: self.startup.adapter_selection,
+            device_creation: self.startup.device_creation,
             pipeline_compilation: self.pipelines.warm_duration(),
         }
     }

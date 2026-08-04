@@ -87,5 +87,5 @@ pub use quorra_scene::{
 pub use quorra_gpu::{
     Counters, DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_RESOURCE_BYTES, Device, DeviceError, Frame,
     Limits, Options, Raster, RenderError, Report, ReportKind, ResourceProblem, StartupTimings,
-    SurfaceProblem, Target, TimingProvenance, Timings, Viewport,
+    SurfaceProblem, Target, TimingProvenance, Timings, Viewport, create_instance,
 };

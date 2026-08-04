@@ -398,10 +398,19 @@ fn main() {
         device.wait_until_warm();
         let startup = device.startup();
         println!("\n== {} ==", device.description());
+        // This example builds a device per adapter in one process, which is right
+        // for frame timing and wrong for the instance number: the second device
+        // finds the driver loader warm and reads a fraction of the true cost.
+        // `examples/startup.rs` measures bring-up one configuration per process,
+        // and is where the startup numbers in `doc/PLAN.md` come from (ADR 0014).
         println!(
-            "startup: adapter {:.2} ms, device {:.2} ms, warm pipelines {:.2} ms",
-            milliseconds(startup.adapter_enumeration),
+            "startup (frame harness; see examples/startup.rs for bring-up): \
+             instance {:.2} ms, adapter {:.2} ms, device {:.2} ms \
+             (blocking {:.2} ms), warm pipelines {:.2} ms",
+            startup.instance_creation.map_or(f64::NAN, milliseconds),
+            milliseconds(startup.adapter_selection),
             milliseconds(startup.device_creation),
+            milliseconds(startup.blocking_total()),
             startup.pipeline_compilation.map_or(f64::NAN, milliseconds),
         );
         println!(

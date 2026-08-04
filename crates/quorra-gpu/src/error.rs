@@ -199,7 +199,7 @@ pub enum RenderError {
         /// Bytes the scene would need.
         needed: u64,
         /// The configured budget
-        /// ([`Options::max_frame_bytes`](crate::device::Options::max_frame_bytes)).
+        /// ([`Options::max_frame_bytes`](crate::startup::Options::max_frame_bytes)).
         budget: u64,
     },
     /// `Target::Surface` or

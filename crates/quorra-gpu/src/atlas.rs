@@ -7,7 +7,7 @@
 //! exactly-correct cache never hits; quantised to 1/16 of a pixel it hit 5.0× on that
 //! page and left the caller's oracle unmoved, where 1/8 contradicted pages (their
 //! ADR 0131). The quantum is therefore §4.5's fifth decision — the one that is the
-//! caller's to make and ours to expose: [`crate::device::Options::glyph_quantum`],
+//! caller's to make and ours to expose: [`crate::startup::Options::glyph_quantum`],
 //! default 1/16, settable, and `None` switches quantisation off (exact-phase keying,
 //! which still caches exact repeats).
 //!
@@ -21,7 +21,7 @@
 //!
 //! # Storage, eviction, and honesty
 //!
-//! One R8 texture sized from [`crate::device::Options::atlas_budget`], shelf-packed.
+//! One R8 texture sized from [`crate::startup::Options::atlas_budget`], shelf-packed.
 //! When a frame's tiles no longer fit, the atlas resets and repacks what *this* frame
 //! needs; tiles that still do not fit fall through to the scratch path (drawn
 //! uncached, correctly) rather than failing the frame. `Counters` reports

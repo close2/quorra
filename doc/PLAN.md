@@ -15,6 +15,27 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**Feedback §8 is answered — bring-up is measured per step, and its largest step can
+start before there is a window** (2026-08-04): the caller's owner decided that page
+one goes to the graphics device, which put our bring-up on their time-to-first-page
+— 45.1 ms of a 144.6 ms launch, 31% of it — and their §8 asked for the two things
+that makes necessary. Both landed (ADR 0014). **`StartupTimings` is five numbers
+instead of three**: `instance_creation`, `surface_creation`, `adapter_selection`,
+`device_creation`, `pipeline_compilation`, plus `blocking_total()` over the four the
+constructor actually waits for. The field it replaces, `adapter_enumeration`, named
+one step and measured three, so nothing that moved inside it could be attributed —
+which is now the tree's own worked example of the instrumentation rule about counts
+versus rates. **`startup::create_instance()` plus `Device::headless_with_instance`
+and `Device::for_surface_with_instance`** let a host build the instance on a thread
+at `main`'s first line, in parallel with reading its document: measured headless on
+RADV here, instance creation is ~80% of what bring-up blocks for (22.9–29.8 ms of
+29.4–36.1 ms), and hoisting it leaves **5.1–9.2 ms** to pay after the window exists.
+`instance_creation` is then `None` rather than zero — the step happened, on someone
+else's clock, and a struct for attribution may not claim otherwise. The backend knob
+§8.3 talks a host out of is **not** added, and ADR 0014 records the caller's
+measurement that says why. `examples/startup.rs` is the measurement, one
+configuration per process by design.
+
 **Feedback §7 is answered — a refusal costs the surface nothing** (2026-08-04): the
 viewer reproduced a permanent wedge (every acquire a 1-second `Timeout`, only a
 resize recovering) whose cause was a budget refusal *after* the swapchain acquire —
@@ -205,7 +226,10 @@ in for glyphs until M4) at 1191×1684, phases from timestamp queries:
 | llvmpipe | 0.035 ms | 2.59 ms | 4.26 ms | 8.07 ms | 2.98 ms |
 
 Startup on RADV: adapter enumeration 22.8 ms, device creation 15.4 ms, warm pipeline
-compilation 2.65 ms (off the critical path; `headless` returns before it).
+compilation 2.65 ms (off the critical path; `headless` returns before it). That first
+figure is the pre-split one — instance creation plus adapter selection, and mostly the
+driver loader; ADR 0014 re-attributes it and the "Where we are" entry above carries
+the current numbers.
 
 Three honest caveats: rectangles are not glyphs (no atlas, no clip states); the encode
 translates our own scene rather than the caller's display list; and the caller's
