@@ -15,6 +15,36 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A frame is charged for what it allocates, and a CPU-lane frame allocates no winding
+texture** (2026-08-05): the caller's 974-document corpus gate went from one refusal to
+six the moment its lock moved onto the per-frame coverage lane, and all five new ones
+said the same thing — `frame needs N scene-derived bytes, over the stated budget of
+268435456`, with `N` between 280 MB and 1.2 GB, for pages that had drawn one revision
+earlier. The budget had not moved; what a frame is charged had. ADR 0016's lane prices
+its winding texture at encode from the extent of the **scratch** sheet, which both
+lanes share: `Sheet::width` and `height` are filled in on every frame that packs a
+tile, including one the GPU lane never ran, so a CPU-lane frame was charged
+`max_target_size × rows × 8` bytes of `rgba16float` for a texture `upload_scratch`
+creates only `if !winding.is_empty()`. A pre-flight that refuses what the allocation
+would have drawn is principle 6's failure with the sign flipped — a page that draws,
+refused — and it cost five real documents. The condition now lives in
+`Sheet::device_bytes`, which is the one place both the charge and the allocation read,
+so the two cannot drift apart again; `tests/coverage_lanes.rs` holds the pair, because
+the point is that the charge still stands where the texture is real.
+
+**Found on the way there and deliberately not fixed here: the sheet is committed at the
+device's maximum dimension wide, not at what it uses.** `ScratchPacker::finish` pads
+every row to 16 384 and `upload_scratch` creates and uploads a texture that size, so
+those same five pages move 34, 39, 69, 81 and 143 MB of R8 per frame for between 28 KB
+and 99 MB of tile area — `issue14497.pdf` is a 6 512 × 2 383 sheet carrying three tiles
+and 28 KB of coverage. The comment at the packer's construction says the dimension is
+"capacity, not commitment"; `finish` makes it commitment. Worse, the frame budget does
+not see it: it charges each tile's own area, so the largest scene-derived allocation a
+page makes is the one number nobody counts, which is the reverse of what principle 3
+asks. Narrowing the sheet to its used width, charging the sheet rather than the tiles,
+or both — that is its own change with its own measurement, and it is the next thing to
+do here.
+
 **Coverage can come from the GPU, and a caller can now ask for it** (2026-08-05,
 ADR 0016): Evan Wallace's method — one triangle per outline segment fanned from an
 anchor, accumulated with additive blending so that what lands at a sample *is*

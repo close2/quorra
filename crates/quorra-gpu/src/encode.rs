@@ -654,8 +654,10 @@ pub(crate) fn encode(
     // The sheet's extent is only known once every tile has been placed, so the GPU
     // lane learns it here rather than carrying a guess: its triangles are already in
     // sheet coordinates, and what was missing was how large the sheet turned out to
-    // be. Then the whole thing is charged — scene-derived arithmetic, priced where
-    // nothing has been allocated yet, against the same one number (principle 3).
+    // be. Then the lane's own cost is charged — scene-derived arithmetic, priced where
+    // nothing has been allocated yet, against the same one number (principle 3). A
+    // frame whose sheet holds no GPU tiles is charged nothing here, because it
+    // allocates nothing there: `Sheet::device_bytes` states that condition once.
     let mut winding = std::mem::take(&mut encoder.winding);
     let scratch = std::mem::replace(&mut encoder.scratch, ScratchPacker::new(1, 1)).finish();
     if let Some(sheet) = scratch.as_ref() {

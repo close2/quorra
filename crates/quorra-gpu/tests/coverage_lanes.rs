@@ -24,7 +24,7 @@
     clippy::arithmetic_side_effects
 )]
 
-use quorra_gpu::{Coverage, Device, Options, Target, Viewport};
+use quorra_gpu::{Coverage, Device, Options, RenderError, Target, Viewport};
 use quorra_scene::{
     Affine, BlendMode, Color, Compose, FillRule, LineCap, LineJoin, Paint, Point, Scene,
     SceneBuilder, Segment, Stroke,
@@ -480,4 +480,99 @@ fn the_lane_can_change_between_frames_on_one_device() {
         "the fixture is one the two lanes answer differently, so the test can tell them \
          apart at all"
     );
+}
+
+/// The side of the target `wide_blob` is drawn at.
+const WIDE: u32 = 240;
+
+/// `blob`'s curve, scaled past `MAX_GLYPH_DIM` — so no atlas stands in front of it and
+/// its coverage lands on the frame's scratch sheet under either lane, which is the
+/// only condition under which the sheet has an extent to be charged for at all.
+fn wide_blob(device: &mut Device) -> Scene {
+    let outline = device
+        .upload_outline(&[
+            Segment::MoveTo(Point::new(20.0, 20.0)),
+            Segment::CubicTo {
+                c1: Point::new(220.0, 4.0),
+                c2: Point::new(236.0, 160.0),
+                to: Point::new(120.0, 220.0),
+            },
+            Segment::CubicTo {
+                c1: Point::new(40.0, 236.0),
+                c2: Point::new(4.0, 120.0),
+                to: Point::new(20.0, 20.0),
+            },
+            Segment::Close,
+        ])
+        .unwrap();
+    let mut builder = SceneBuilder::new();
+    builder
+        .fill(
+            outline,
+            Affine::IDENTITY,
+            FillRule::NonZero,
+            black(),
+            None,
+            BlendMode::Normal,
+            Compose::SrcOver,
+            None,
+        )
+        .unwrap();
+    builder.finish()
+}
+
+/// A CPU-lane frame is charged nothing for the winding texture, because none is made
+/// for it — and the same frame on the GPU lane is charged, because there one is.
+///
+/// Both lanes pack into one scratch sheet, so the sheet's extent is filled in on every
+/// frame that packs a tile, including one the GPU lane never ran. Pricing the winding
+/// texture from that extent charges a CPU-lane frame `max_target_size × rows × 8`
+/// bytes it does not allocate: five pages of the caller's 974-document corpus were
+/// refused that way, claiming between 268 MB and 1.2 GB against a 256 MiB budget for a
+/// texture no frame of theirs created. The pair below is what says the condition is a
+/// condition rather than a deletion — the charge still stands where the texture does.
+///
+/// The budget is eight rows of that texture. The sheet is the device's maximum
+/// dimension wide (capacity, so that wide coverage is not refused for the shape of the
+/// packing) and the texture is `rgba16float`, so a row costs `max_target_size × 8` and
+/// eight rows admit this fixture's ~50 KB of real coverage many times over while
+/// refusing anything priced against a sheet 200 rows deep.
+#[test]
+fn only_the_lane_that_makes_the_winding_texture_pays_for_it() {
+    let dimension = u64::from(device_with(Coverage::Cpu).limits().max_target_size);
+    let budget = dimension * 8 * 8;
+    let mut device = Device::headless(&Options {
+        adapter: Some("llvmpipe".into()),
+        max_frame_bytes: budget,
+        ..Options::default()
+    })
+    .expect("llvmpipe is present wherever this suite runs");
+    device.wait_until_warm();
+    let scene = wide_blob(&mut device);
+    let viewport = Viewport::full(WIDE, WIDE, Affine::IDENTITY);
+
+    let drawn = device
+        .render(&scene, &viewport, Target::Readback)
+        .expect("the CPU lane allocates no winding texture, so it is charged for none")
+        .into_raster()
+        .unwrap()
+        .into_pixels();
+    assert_eq!(
+        drawn[((WIDE / 2 * WIDE + WIDE / 2) * 4 + 3) as usize],
+        255,
+        "and the frame that was not refused drew the blob, rather than nothing"
+    );
+
+    device.set_coverage(Coverage::Gpu);
+    match device.render(&scene, &viewport, Target::Readback) {
+        Err(RenderError::FrameBudgetExceeded { needed, budget: b }) => {
+            assert_eq!(b, budget);
+            assert!(
+                needed > budget,
+                "the GPU lane does make the texture, and pays the eight bytes a texel \
+                 for it: {needed} against {budget}"
+            );
+        }
+        other => panic!("expected the GPU lane to be charged for its texture, got {other:?}"),
+    }
 }

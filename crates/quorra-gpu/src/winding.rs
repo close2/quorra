@@ -73,8 +73,24 @@ impl Sheet {
     /// plus the vertex and instance buffers. Counted before anything is allocated,
     /// because a buffer sized from document-derived arithmetic is exactly what
     /// principle 3 says to check first.
+    ///
+    /// **A sheet with no tiles costs nothing, whatever extent it carries**, and that
+    /// condition lives here rather than at either caller. The extent is the *scratch*
+    /// sheet's, which both lanes share: `width` and `height` are filled in from it on
+    /// every frame that packs a tile, including one the GPU lane never ran. Pricing
+    /// the winding texture from that extent charges a CPU-lane frame for a texture
+    /// [`render_into`] is never asked to make — the frame is refused for bytes nobody
+    /// would have allocated, which is principle 6's failure with the sign flipped:
+    /// a page that draws, refused. Five real corpus pages were, at up to 1.2 GB
+    /// claimed against a 256 MiB budget for an empty sheet 16 384 texels wide.
     #[allow(clippy::cast_possible_truncation)] // lengths of Vecs this frame just built
     pub(crate) fn device_bytes(&self) -> u64 {
+        // Not merely an optimisation of the arithmetic below: `is_empty` is exactly the
+        // condition `Device::upload_scratch` allocates under, and saying it once is what
+        // stops the pre-flight and the allocation from disagreeing again.
+        if self.is_empty() {
+            return 0;
+        }
         // Saturating throughout: the number this returns is *checked against* a budget,
         // so a sheet too large to size must come back too large rather than wrap to
         // something affordable. That is principle 3's rule about allocations derived
@@ -677,6 +693,40 @@ mod tests {
         assert!(
             sum.abs() < 1e-5,
             "the grid is balanced about the centre: {sum}"
+        );
+    }
+
+    /// A sheet with no tiles costs nothing, however large the extent it carries.
+    ///
+    /// The extent is the scratch sheet's and arrives on every frame that packs a tile,
+    /// so this is the ordinary shape of a CPU-lane frame — not an edge case. Charging
+    /// it `width × height × 8` for an `rgba16float` texture nothing asks for is what
+    /// refused five real pages; `tests/coverage_lanes.rs` holds the same invariant end
+    /// to end.
+    #[test]
+    fn a_sheet_with_no_tiles_costs_nothing_however_large_its_extent() {
+        let empty = Sheet {
+            width: 16384,
+            height: 8760,
+            ..Sheet::default()
+        };
+        assert!(empty.is_empty());
+        assert_eq!(empty.device_bytes(), 0);
+
+        // And the extent is priced in full the moment a tile makes the texture real:
+        // one triangle of eight floats a vertex, plus the texture, plus the tile.
+        let one_tile = Sheet {
+            vertices: vec![0.0; 3 * 8],
+            tiles: vec![Tile {
+                rect: [0.0, 0.0, 4.0, 4.0],
+                even_odd: false,
+            }],
+            width: 64,
+            height: 4,
+        };
+        assert_eq!(
+            one_tile.device_bytes(),
+            64 * 4 * 8 + 3 * crate::outline::WindingVertex::STRIDE + super::TILE_STRIDE
         );
     }
 }
