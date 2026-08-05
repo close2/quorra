@@ -122,6 +122,20 @@ they were found rather than designed:
   largest sheet a frame has needed, took the same frame to 1.9 ms. It is still charged
   to every frame that uses it: what a frame *needs* is what a budget is about, not what
   happens to be resident.
+
+  **Grown and never shrunk is a coordinate obligation, and it was missed.** Once the
+  texture can be larger than the sheet, clip space no longer spans the sheet, and
+  `vs_winding` — which divides by the sheet's size — writes every pixel `held ÷ sheet`
+  times too far down, while `fs_resolve` goes on reading sheet coordinates as texels.
+  The two passes then disagree about where a pixel *is*, and a tile resolves whatever
+  coverage the stretch happened to put under it: the caller saw a page zoomed past
+  1000% and brought back drawing one glyph's coverage under another glyph's quad — the
+  right place, the right size, the wrong letter (`QUORRA_FEEDBACK.md` §11). A viewport
+  of the sheet's extent at the target's origin is the fix, and the invariant it holds
+  is stated where the texture is grown: **the sheet is the top-left of this texture**.
+  Costed nothing, and `tests/frame_independence.rs` is what keeps it true — a frame
+  drawn on a device that has drawn a larger one must equal the same frame drawn on a
+  device that has drawn nothing.
 - **The conversion tolerance is relative to the outline, not absolute.** An absolute
   1e-4 gave a 14-unit glyph the allowance of a 600-unit page border — 32 quadratics per
   cubic where 4 are inside a thousandth of the glyph.

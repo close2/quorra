@@ -29,6 +29,12 @@
 
 struct Globals {
     // The winding sheet's size in pixels, for the NDC mapping.
+    //
+    // The sheet, not the attachment: the winding target is kept between frames and is
+    // at least as large as any sheet it has held, so the two are equal only by
+    // accident. The host sets a viewport of exactly this size at the target's origin,
+    // which is what makes a pixel of the sheet the same pixel in both passes — see
+    // `winding::accumulate`.
     sheet_size: vec2f,
     // Where this draw's sample sits inside the pixel, in pixels, relative to its
     // centre. The ordered grid lives on the CPU (`outline::sample_offsets`), because

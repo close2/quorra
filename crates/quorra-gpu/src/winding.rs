@@ -189,6 +189,7 @@ pub(crate) fn render_into(
             &winding_pipeline,
             &buffers,
             group,
+            extent,
         );
         resolve(
             &mut encoder,
@@ -211,6 +212,12 @@ pub(crate) fn render_into(
 /// pay an allocation each time it crosses a size it has already seen — and the bytes
 /// are still charged to every frame that uses them, because what the frame *needs* is
 /// what a budget is about, not what happens to be resident.
+///
+/// **The frame's sheet is the top-left of it**, whatever the rest of it is. Growing and
+/// never shrinking is what makes that a thing to state rather than a tautology: a
+/// smaller frame after a larger one gets a texture with room to spare, and `fs_resolve`
+/// reads sheet coordinates as texels of this texture. [`accumulate`]'s viewport is what
+/// puts them there; `tests/frame_independence.rs` is what keeps them there.
 #[derive(Debug, Default)]
 pub(crate) struct WindingTexture {
     held: Option<(wgpu::Extent3d, wgpu::Texture, wgpu::TextureView)>,
@@ -260,12 +267,18 @@ impl WindingTexture {
 }
 
 /// One round's winding pass: clear, then one draw per sample of the group.
+///
+/// `sheet` is the extent this frame's sheet occupies, which is **not** the attachment's
+/// size: [`WindingTexture`] is kept between frames and is at least as large as any sheet
+/// it has held. See the viewport below for what that costs if it is forgotten.
+#[allow(clippy::cast_precision_loss)] // an extent bounded by the adapter's texture limit
 fn accumulate(
     encoder: &mut wgpu::CommandEncoder,
     winding_view: &wgpu::TextureView,
     pipeline: &wgpu::RenderPipeline,
     buffers: &Buffers,
     group: &Group,
+    sheet: wgpu::Extent3d,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("quorra winding"),
@@ -285,6 +298,19 @@ fn accumulate(
         occlusion_query_set: None,
         multiview_mask: None,
     });
+    // **The sheet is the top-left of this texture, not the whole of it.** `vs_winding`
+    // divides by the *sheet* size to reach clip space, and clip space spans whatever is
+    // attached — so with a texture kept from a taller frame, and no viewport, every
+    // sheet pixel would be written `held / sheet` times further down than the resolve
+    // pass reads it. The viewport is what makes the two agree, and it makes them agree
+    // without either shader learning the size of a texture that is nobody's business
+    // but this module's.
+    //
+    // Forgetting it is the caller's `QUORRA_FEEDBACK.md` §11: a page zoomed past 1000%
+    // and back drew one glyph's coverage under another glyph's quad — the right place,
+    // the right size, the wrong letter — because the resolve read the sheet's
+    // coordinates out of a texture the winding pass had stretched over a larger one.
+    pass.set_viewport(0.0, 0.0, sheet.width as f32, sheet.height as f32, 0.0, 1.0);
     pass.set_pipeline(pipeline);
     pass.set_vertex_buffer(0, buffers.vertices.slice(..));
     for bind_group in &group.samples {
