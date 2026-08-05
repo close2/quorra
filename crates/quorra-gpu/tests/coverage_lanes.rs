@@ -434,3 +434,50 @@ fn one_sheet_carries_both_producers() {
     assert_eq!(alpha(&gpu, 33, 36), 255, "and the GPU lane's tile is there");
     assert_eq!(alpha(&gpu, 24, 6), 0, "with nothing between them");
 }
+
+/// The lane is chosen per frame, on one device, and each frame is the frame that lane
+/// draws — no state carried from the last one, no cache invalidated by the switch.
+///
+/// This is what makes the choice a caller's to make at all: the crossover is a
+/// magnification, and a session in which a person zooms crosses it. A device that
+/// could only be told once would have to be told before the zoom existed.
+#[test]
+fn the_lane_can_change_between_frames_on_one_device() {
+    let mut device = Device::headless(&Options {
+        adapter: Some("llvmpipe".into()),
+        ..Options::default()
+    })
+    .expect("llvmpipe is present wherever this suite runs");
+    device.wait_until_warm();
+    let scene = blob(&mut device);
+    let viewport = Viewport::full(SIZE, SIZE, Affine::IDENTITY);
+
+    // Alternate, twice each way, and keep what every frame drew.
+    let mut frames = Vec::new();
+    for lane in [Coverage::Cpu, Coverage::Gpu, Coverage::Cpu, Coverage::Gpu] {
+        device.set_coverage(lane);
+        assert_eq!(device.coverage(), lane);
+        frames.push(
+            device
+                .render(&scene, &viewport, Target::Readback)
+                .expect("either lane draws this scene")
+                .into_raster()
+                .unwrap()
+                .into_pixels(),
+        );
+    }
+
+    assert_eq!(
+        frames[0], frames[2],
+        "the CPU lane draws what it drew before, after a frame of the other lane"
+    );
+    assert_eq!(
+        frames[1], frames[3],
+        "and so does the GPU lane — neither leaves state in the other's way"
+    );
+    assert_ne!(
+        frames[0], frames[1],
+        "the fixture is one the two lanes answer differently, so the test can tell them \
+         apart at all"
+    );
+}

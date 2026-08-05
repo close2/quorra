@@ -28,12 +28,15 @@ is even-odd only and §8.5.3.3.2's non-zero is PDF's default; samples in an
 costs time and not memory; and the sample grid stated in our own code rather than taken
 from the driver, so ADR 0006's cross-adapter identity survives.
 
-`Options::coverage` selects it, and **the crossover is measured**: on the dense page at
-1191×1684, RADV, the CPU lane wins at 1× (1.1 ms against 15.2) and at 4×, and the GPU
-lane wins from somewhere before 20× (**1.9 ms against 12.5**, with encode 32× cheaper)
-and stays won at 100×. The shape is what the designs predict — an atlas that pays per
-pixel rasterised against triangles that pay per curve described — so the default stays
-`Coverage::Cpu` and the choice belongs to a caller that knows its magnification. Two
+`Options::coverage` sets the default and `Device::set_coverage` changes it **per
+frame**, because the crossover is a magnification and a session in which a person zooms
+crosses it. Measured on the dense page at 1191×1684, RADV, wall per frame: the CPU lane
+holds 0.44–1.05 ms from 1× to 8×, then costs 4.4 ms at 12× and 12.1 ms at 20×; the GPU
+lane costs 11.3 ms at 1× and 1.6–2.1 ms everywhere from 8× up. **The crossover is
+between 8× and 12× and it is a cliff, not a curve** — it is `MAX_GLYPH_DIM`, where
+glyphs stop entering the atlas — so the threshold a caller wants is
+`128 ÷ its text height` rather than a fitted constant, which for 10–12 point body text
+is a magnification of about ten. Two
 findings the measurement forced: **the winding texture is kept between frames** (ADR
 0012's deferred pool, now with the measurement it asked for — per-frame allocation and
 zero-init was 10.7 ms of a 15 ms frame), and the conversion tolerance is relative to

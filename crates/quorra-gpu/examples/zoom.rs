@@ -149,7 +149,7 @@ fn main() {
     );
     println!("held at one magnification (fastest of five, after a warm-up frame)");
     println!("  zoom   encode      execute     upload      wall      culled  segments");
-    for magnification in [1.0_f32, 4.0, 20.0, 100.0] {
+    for magnification in [1.0_f32, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 20.0, 100.0] {
         frame(&mut device, &scene, &texture, magnification);
         let mut best = (Duration::MAX, Duration::MAX, Duration::MAX);
         let mut best_upload = Duration::MAX;

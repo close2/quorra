@@ -91,23 +91,26 @@ even-odd, which is what proves the sign survived accumulation.
 ## The crossover, measured
 
 `examples/zoom.rs` (`cargo run --release -p quorra-gpu --example zoom -- gpu`), RADV,
-the dense 5 933-fill page at 1191×1684. Encode and wall, best of five, machine under
-light load:
+the dense 5 933-fill page at 1191×1684. Wall clock per frame in milliseconds, best of
+five, quiet machine:
 
-| magnification | CPU encode / wall | GPU encode / wall |
-|---|---|---|
-| 1× | **0.85 / 1.12 ms** | 4.9 / 15.2 ms |
-| 4× | **0.34 / 0.54 ms** | 0.63 / 2.5 ms |
-| 20× | 8.4 / 12.5 ms | **0.26 / 1.9 ms** |
-| 100× | 3.9 / 7.4 ms | **0.25 / 2.2 ms** |
+| magnification | 1× | 2× | 4× | 6× | 8× | 12× | 16× | 20× | 100× |
+|---|---|---|---|---|---|---|---|---|---|
+| CPU lane | 1.05 | 0.67 | 0.50 | 0.46 | **0.44** | 4.4 | 4.5 | 12.1 | 5.9 |
+| GPU lane | 11.3 | 4.2 | 2.3 | 2.1 | 1.71 | **1.66** | 2.06 | 1.58 | 1.90 |
 
-**The crossover is between 4× and 20×**, and the shape of it is what the two designs
-predict: the CPU lane has an atlas and pays per *pixel rasterised*, so it wins while
-glyphs are small and reused; the GPU lane has no atlas and pays per *triangle*, so it
-wins as soon as a glyph is large enough to cost more to fill than to describe. At 20×
-the GPU lane is **6.6× faster on the wall clock** and its encode is 32× cheaper; at 1×
-it is 13× slower, which is why `Coverage::Cpu` remains the default and why the choice
-belongs to a caller that knows its magnification.
+**The crossover is between 8× and 12×, and it is a cliff rather than a curve.** The CPU
+lane costs 0.44 ms at 8× and 4.4 ms at 12× — ten times more for half as much page —
+because that is where this page's glyphs cross `MAX_GLYPH_DIM` (128 device pixels) and
+stop entering the atlas. Everything either side of it follows: below, the CPU lane is
+answering from 107 cached tiles; above, it is rasterising every glyph on every frame,
+and the GPU lane's cost is flat because nothing in it depends on the scale.
+
+So the threshold a caller should use is **not a fitted constant**. It is
+`MAX_GLYPH_DIM ÷ the height of the text on the page`: for body text of 10 to 12 points
+that is a magnification of 13 down to 10.7, which is where the cliff was measured. A
+caller that knows its text size can compute it; one that only knows the magnification
+should use ten and know why.
 
 Two things the measurement changed while it was being taken, both recorded because
 they were found rather than designed:

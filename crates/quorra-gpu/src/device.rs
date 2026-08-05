@@ -397,6 +397,31 @@ impl Device {
         self.limits
     }
 
+    /// Which lane makes coverage bytes for the frames after this call.
+    #[must_use]
+    pub fn coverage(&self) -> Coverage {
+        self.coverage
+    }
+
+    /// Choose the coverage lane for the frames after this call.
+    ///
+    /// **Per frame, because the right answer changes within a session.** The two lanes
+    /// have opposite cost curves and the crossover is a magnification (ADR 0016): the
+    /// CPU lane's atlas wins while glyphs are small and repeated, and the GPU lane wins
+    /// once a glyph costs more to fill than to describe. Only a caller knows which side
+    /// of that its next frame is on, and a choice fixed at construction would make it
+    /// choose once for a session in which a person zooms.
+    ///
+    /// Switching costs nothing but the cache that goes idle: the glyph atlas and the
+    /// winding texture both live on the device and survive frames drawn by the other
+    /// lane, so alternating does not throw either away. What it *does* change is the
+    /// bytes: coverage from the two lanes differs on antialiased edges within the bound
+    /// ADR 0016 states, so a caller comparing frames across a switch is comparing two
+    /// answers to the same question rather than one answer twice.
+    pub fn set_coverage(&mut self, coverage: Coverage) {
+        self.coverage = coverage;
+    }
+
     /// Upload an outline: validated, priced against the resource budget, resident
     /// until [`Device::release`]. The id is what a scene's `fill`/`stroke`/`clip`
     /// reference — uploaded once, referenced many times (§2.2 of the brief: the
