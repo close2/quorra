@@ -33,13 +33,7 @@
 //!   ([`QUAD_TOLERANCE`]), because the conversion happens before any transform exists.
 //!   The device-space consequence is stated there.
 
-// Dead until the encoder routes fills here (ADR 0016's "what is landed"): every item
-// below is reached only by this module's own tests today. `allow` rather than removal,
-// with the condition for its going away named: it goes when `encode.rs` gains the
-// coverage selector, and the same commit that adds the caller deletes this line.
-#![allow(dead_code)]
-
-use quorra_scene::{Point, Rect, Segment};
+use quorra_scene::{Point, Segment};
 
 /// How far a converted quadratic may sit from the cubic it replaces, as a fraction of
 /// the outline's bounding-box diagonal.
@@ -65,6 +59,30 @@ const THIRD_DIFFERENCE_BOUND: f32 = 0.048_112_52;
 /// non-finite coefficient that slipped past the scene boundary cannot spin. Reaching
 /// it is not an error: the quadratics emitted are still a curve, just a coarser one.
 const MAX_SPLIT_DEPTH: u8 = 8;
+
+/// The diagonal of an outline's control-point bounding box: the scale its conversion
+/// tolerance is relative to.
+fn segment_extent(segments: &[Segment]) -> f32 {
+    let mut bounds: Option<(f32, f32, f32, f32)> = None;
+    let mut extend = |p: Point| {
+        bounds = Some(match bounds {
+            None => (p.x, p.y, p.x, p.y),
+            Some((x0, y0, x1, y1)) => (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y)),
+        });
+    };
+    for segment in segments {
+        match *segment {
+            Segment::MoveTo(p) | Segment::LineTo(p) => extend(p),
+            Segment::CubicTo { c1, c2, to } => {
+                extend(c1);
+                extend(c2);
+                extend(to);
+            }
+            Segment::Close => {}
+        }
+    }
+    bounds.map_or(0.0, |(x0, y0, x1, y1)| (x1 - x0).hypot(y1 - y0))
+}
 
 /// One quadratic segment of a converted outline, in outline space.
 ///
@@ -98,11 +116,14 @@ impl QuadOutline {
     /// explicitly closed shall be closed by the `f` operator before painting"), so a
     /// contour whose last point is not its first gains the closing chord here. That
     /// chord is geometry, not a repair: it is what the clause says the fill sees.
-    pub(crate) fn from_segments(segments: &[Segment], bounds: Option<Rect>) -> Self {
-        let tolerance = bounds.map_or(QUAD_TOLERANCE, |rect| {
-            let size = rect.size();
-            QUAD_TOLERANCE * size.width.hypot(size.height).max(f32::MIN_POSITIVE)
-        });
+    pub(crate) fn from_segments(segments: &[Segment]) -> Self {
+        // Relative to the outline's own extent, measured here rather than taken from a
+        // caller: the conversion runs before any transform exists, so the bound cannot
+        // be in device pixels, and an *absolute* one would give a 14-unit glyph the
+        // same allowance as a 600-unit page border — thirty-two quadratics where four
+        // would have been inside a thousandth of the glyph.
+        let extent = segment_extent(segments);
+        let tolerance = QUAD_TOLERANCE * extent.max(f32::MIN_POSITIVE);
         let mut outline = Self::default();
         let mut current: Option<(Point, Vec<QuadSegment>)> = None;
         let mut cursor = Point::new(0.0, 0.0);
@@ -173,12 +194,20 @@ impl QuadOutline {
         self.contours.push((start, parts));
     }
 
+    /// What the converted form costs while resident, for the resource budget.
+    pub(crate) fn stored_bytes(&self) -> u64 {
+        let per_contour = size_of::<(Point, Vec<QuadSegment>)>() as u64;
+        let segments = (self.segments as u64).saturating_mul(size_of::<QuadSegment>() as u64);
+        segments.saturating_add((self.contours.len() as u64).saturating_mul(per_contour))
+    }
+
     /// Whether this outline can cover anything at all.
     pub(crate) fn is_empty(&self) -> bool {
         self.contours.is_empty()
     }
 
     /// Triangles this outline needs: one per segment, two per curved segment.
+    #[cfg(test)]
     #[allow(clippy::arithmetic_side_effects)] // a sum of two lengths of the same Vec
     pub(crate) fn triangle_count(&self) -> usize {
         self.contours
@@ -230,6 +259,44 @@ impl QuadOutline {
                 }
                 from = part.to;
             }
+        }
+    }
+}
+
+/// Appends triangles for already-flattened device-space polylines.
+///
+/// The stroke and oblique-rectangle lanes arrive here rather than at
+/// [`QuadOutline::append_triangles`]: a stroke's outline is expanded to a polygon on
+/// the CPU (§8.4.3's caps, joins and miters), and what comes out is straight edges. The
+/// fan is the same, and so is the rule that gives it its sign — only the curve
+/// triangles are missing, because there are no curves left to carry.
+///
+/// The scale-independence [`QuadOutline`] buys does not apply to this path, and saying
+/// so is the point: a stroke still flattens per frame. What moves to the device is the
+/// *rasterisation*, which is the half ADR 0015 measured as the cost.
+pub(crate) fn append_polyline_triangles(
+    polylines: &[crate::raster::Polyline],
+    place: impl Fn(Point) -> [f32; 2],
+    clip: [f32; 4],
+    out: &mut Vec<WindingVertex>,
+) {
+    for polyline in polylines {
+        let Some(start) = polyline.points.first() else {
+            continue;
+        };
+        if polyline.points.len() < 3 {
+            continue; // no area to enclose, as in `finish_contour`
+        }
+        let anchor = place(*start);
+        // Closed by construction here: an expanded stroke is a closed polygon, and the
+        // chord from the last point back to the first is what makes it one.
+        let points = polyline.points.iter().chain(std::iter::once(start));
+        let mut from = *start;
+        for to in points.skip(1) {
+            out.push(WindingVertex::solid(anchor, clip));
+            out.push(WindingVertex::solid(place(from), clip));
+            out.push(WindingVertex::solid(place(*to), clip));
+            from = *to;
         }
     }
 }
@@ -330,18 +397,15 @@ mod tests {
         let q = Point::new(4.0, 8.0);
         let (p0, p3) = (Point::new(0.0, 0.0), Point::new(8.0, 0.0));
         let elevate = |end: Point| Point::new((end.x + 2.0 * q.x) / 3.0, (end.y + 2.0 * q.y) / 3.0);
-        let outline = QuadOutline::from_segments(
-            &[
-                Segment::MoveTo(p0),
-                Segment::CubicTo {
-                    c1: elevate(p0),
-                    c2: elevate(p3),
-                    to: p3,
-                },
-                Segment::Close,
-            ],
-            None,
-        );
+        let outline = QuadOutline::from_segments(&[
+            Segment::MoveTo(p0),
+            Segment::CubicTo {
+                c1: elevate(p0),
+                c2: elevate(p3),
+                to: p3,
+            },
+            Segment::Close,
+        ]);
         // One curve, plus the closing chord back to the start.
         assert_eq!(outline.triangle_count(), 1 + 2, "one curve and one chord");
         let mut vertices = Vec::new();
@@ -357,14 +421,11 @@ mod tests {
     /// the start is part of the geometry rather than something a caller must add.
     #[test]
     fn an_open_contour_is_closed_by_a_chord() {
-        let outline = QuadOutline::from_segments(
-            &[
-                Segment::MoveTo(Point::new(0.0, 0.0)),
-                Segment::LineTo(Point::new(4.0, 0.0)),
-                Segment::LineTo(Point::new(4.0, 4.0)),
-            ],
-            None,
-        );
+        let outline = QuadOutline::from_segments(&[
+            Segment::MoveTo(Point::new(0.0, 0.0)),
+            Segment::LineTo(Point::new(4.0, 0.0)),
+            Segment::LineTo(Point::new(4.0, 4.0)),
+        ]);
         assert_eq!(
             outline.triangle_count(),
             3,
@@ -376,14 +437,11 @@ mod tests {
     /// not worth the vertices, and a fill of them is transparent either way.
     #[test]
     fn a_degenerate_contour_emits_no_triangles() {
-        let outline = QuadOutline::from_segments(
-            &[
-                Segment::MoveTo(Point::new(1.0, 1.0)),
-                Segment::LineTo(Point::new(9.0, 9.0)),
-                Segment::Close,
-            ],
-            None,
-        );
+        let outline = QuadOutline::from_segments(&[
+            Segment::MoveTo(Point::new(1.0, 1.0)),
+            Segment::LineTo(Point::new(9.0, 9.0)),
+            Segment::Close,
+        ]);
         assert!(outline.is_empty());
         assert_eq!(outline.triangle_count(), 0);
     }
@@ -392,15 +450,12 @@ mod tests {
     /// at (0, 1), which is what lets one fragment shader serve both triangle kinds.
     #[test]
     fn a_chord_triangle_is_never_discarded() {
-        let outline = QuadOutline::from_segments(
-            &[
-                Segment::MoveTo(Point::new(0.0, 0.0)),
-                Segment::LineTo(Point::new(4.0, 0.0)),
-                Segment::LineTo(Point::new(4.0, 4.0)),
-                Segment::Close,
-            ],
-            None,
-        );
+        let outline = QuadOutline::from_segments(&[
+            Segment::MoveTo(Point::new(0.0, 0.0)),
+            Segment::LineTo(Point::new(4.0, 0.0)),
+            Segment::LineTo(Point::new(4.0, 4.0)),
+            Segment::Close,
+        ]);
         let mut vertices = Vec::new();
         outline.append_triangles(|p| [p.x, p.y], [0.0, 0.0, 4.0, 4.0], &mut vertices);
         assert_eq!(vertices.len(), 9, "three chords, three vertices each");
@@ -422,5 +477,81 @@ mod tests {
             size_of::<[f32; 8]>(),
             "eight floats, and the pipeline reads them as one array"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::cast_precision_loss
+)]
+mod conversion_error {
+    use super::QuadOutline;
+    use quorra_scene::{Point, Segment};
+
+    /// How far the converted quadratics sit from the cubic they replace, sampled.
+    #[test]
+    fn the_conversion_stays_inside_its_stated_bound() {
+        let (p0, c1, c2, p3) = (
+            Point::new(8.0, 8.0),
+            Point::new(40.0, 2.0),
+            Point::new(44.0, 30.0),
+            Point::new(24.0, 40.0),
+        );
+        let outline = QuadOutline::from_segments(&[
+            Segment::MoveTo(p0),
+            Segment::CubicTo { c1, c2, to: p3 },
+            Segment::Close,
+        ]);
+        let mut vertices = Vec::new();
+        outline.append_triangles(|p| [p.x, p.y], [0.0, 0.0, 64.0, 64.0], &mut vertices);
+        // Every curve triangle's three vertices, in order: (from, control, to).
+        let mut quads = Vec::new();
+        for triangle in vertices.chunks_exact(3) {
+            let uv = triangle[1].floats();
+            if (uv[2] - 0.5).abs() < 1e-6 && uv[3].abs() < 1e-6 {
+                let f = |v: &super::WindingVertex| {
+                    let x = v.floats();
+                    Point::new(x[0], x[1])
+                };
+                quads.push((f(&triangle[0]), f(&triangle[1]), f(&triangle[2])));
+            }
+        }
+        assert!(!quads.is_empty(), "the cubic converted to quadratics");
+        eprintln!("{} quadratics", quads.len());
+
+        let cubic_at = |t: f32| {
+            let u = 1.0 - t;
+            Point::new(
+                u * u * u * p0.x
+                    + 3.0 * u * u * t * c1.x
+                    + 3.0 * u * t * t * c2.x
+                    + t * t * t * p3.x,
+                u * u * u * p0.y
+                    + 3.0 * u * u * t * c1.y
+                    + 3.0 * u * t * t * c2.y
+                    + t * t * t * p3.y,
+            )
+        };
+        let mut worst = 0.0_f32;
+        for i in 0..=200 {
+            let point = cubic_at(i as f32 / 200.0);
+            let mut nearest = f32::INFINITY;
+            for (a, b, c) in &quads {
+                for j in 0..=100 {
+                    let s = j as f32 / 100.0;
+                    let r = 1.0 - s;
+                    let q = Point::new(
+                        r * r * a.x + 2.0 * r * s * b.x + s * s * c.x,
+                        r * r * a.y + 2.0 * r * s * b.y + s * s * c.y,
+                    );
+                    nearest = nearest.min((q.x - point.x).hypot(q.y - point.y));
+                }
+            }
+            worst = worst.max(nearest);
+        }
+        eprintln!("worst deviation {worst} units");
+        assert!(worst < 0.01, "conversion drifted by {worst} units");
     }
 }

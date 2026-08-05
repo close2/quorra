@@ -136,8 +136,21 @@ fn the_upload_once_reference_many_round_trip() {
 /// hitting it is a refusal naming all three numbers (§5).
 #[test]
 fn resource_budget_is_discoverable_and_loud() {
-    // Big enough for exactly one of the test outlines, not two.
-    let budget = 150;
+    // Big enough for exactly one of the test outlines, not two — *measured* rather
+    // than written down, because what an outline costs is a property of what the
+    // device keeps for it (segments, and since ADR 0016 the quadratics the GPU lane
+    // draws), and a constant here would fail the day that changes for a good reason.
+    let budget = {
+        let mut sizing = Device::headless(&Options {
+            adapter: Some("llvmpipe".into()),
+            ..Options::default()
+        })
+        .expect("llvmpipe is present");
+        sizing
+            .upload_outline(&glyph_like_outline())
+            .expect("the default budget holds one outline");
+        sizing.resource_bytes_in_use() * 3 / 2
+    };
     let mut device = Device::headless(&Options {
         adapter: Some("llvmpipe".into()),
         max_resource_bytes: budget,

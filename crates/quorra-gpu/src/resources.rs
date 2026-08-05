@@ -31,6 +31,12 @@ pub(crate) struct StoredOutline {
     /// The segments, as uploaded.
     #[allow(dead_code)] // consumed by the lanes from M4/M5; identity and budget are M2's part
     pub segments: Box<[Segment]>,
+    /// The same outline as closed contours of quadratic segments, for the GPU lane.
+    ///
+    /// Built here, once, and that is the whole reason the GPU lane's cost does not
+    /// grow with magnification: the conversion depends on the outline and on nothing
+    /// else, so a frame at 100× re-uses what the upload built (ADR 0016).
+    pub quads: crate::outline::QuadOutline,
     /// The axis-aligned rectangle the outline traces, when it traces exactly one —
     /// recognised once, at upload, because §6.4 turns on it: a rectangular clip is
     /// four floats, never a mask, and the encoder asks this on every frame.
@@ -141,13 +147,20 @@ impl ResourceStore {
                 }
             }
         }
-        let bytes = (path.len() as u64).saturating_mul(size_of::<Segment>() as u64);
+        let rect_hint = axis_aligned_rect(path);
+        let quads = crate::outline::QuadOutline::from_segments(path);
+        // Both forms are charged: the quadratics are as resident as the segments, and
+        // a budget that priced only half of what it stores would be a budget in name.
+        let bytes = (path.len() as u64)
+            .saturating_mul(size_of::<Segment>() as u64)
+            .saturating_add(quads.stored_bytes());
         self.charge(bytes)?;
         let id = self.allocate_id();
         self.outlines.insert(
             id,
             StoredOutline {
-                rect_hint: axis_aligned_rect(path),
+                rect_hint,
+                quads,
                 segments: path.into(),
                 bytes,
             },

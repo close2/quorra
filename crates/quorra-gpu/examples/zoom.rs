@@ -28,7 +28,7 @@
 
 use std::time::Duration;
 
-use quorra_gpu::{Device, Options, Target, Viewport, wgpu};
+use quorra_gpu::{Coverage, Device, Options, Target, Viewport, wgpu};
 use quorra_scene::{Affine, Color, Point, Scene, SceneBuilder, Segment};
 
 /// A real window, which is what the zoom is relative to.
@@ -96,7 +96,7 @@ fn frame(
     scene: &Scene,
     texture: &wgpu::Texture,
     magnification: f32,
-) -> (Duration, Duration, Duration, u32, u32) {
+) -> (Duration, Duration, Duration, u32, u32, Duration) {
     let viewport = Viewport::full(WIDTH, HEIGHT, zoomed(magnification));
     let started = std::time::Instant::now();
     let drawn = device
@@ -111,11 +111,21 @@ fn frame(
         wall,
         counters.commands_culled,
         counters.segments,
+        timings.upload,
     )
 }
 
 fn main() {
-    let mut device = Device::headless(&Options::default()).expect("some adapter must exist");
+    let coverage = if std::env::args().any(|arg| arg == "gpu") {
+        Coverage::Gpu
+    } else {
+        Coverage::Cpu
+    };
+    let mut device = Device::headless(&Options {
+        coverage,
+        ..Options::default()
+    })
+    .expect("some adapter must exist");
     device.wait_until_warm();
     let scene = glyph_page(&mut device);
     let texture = device.wgpu().0.create_texture(&wgpu::TextureDescriptor {
@@ -134,25 +144,28 @@ fn main() {
     });
 
     println!(
-        "dense glyph page at {WIDTH}x{HEIGHT} on {}",
+        "dense glyph page at {WIDTH}x{HEIGHT} on {}, coverage {coverage:?}",
         device.description()
     );
     println!("held at one magnification (fastest of five, after a warm-up frame)");
-    println!("  zoom   encode      execute     wall      culled/5933  segments");
+    println!("  zoom   encode      execute     upload      wall      culled  segments");
     for magnification in [1.0_f32, 4.0, 20.0, 100.0] {
         frame(&mut device, &scene, &texture, magnification);
         let mut best = (Duration::MAX, Duration::MAX, Duration::MAX);
+        let mut best_upload = Duration::MAX;
         let mut counted = (0, 0);
         for _ in 0..5 {
-            let (encode, execute, wall, culled, segments) =
+            let (encode, execute, wall, culled, segments, upload) =
                 frame(&mut device, &scene, &texture, magnification);
             best = (best.0.min(encode), best.1.min(execute), best.2.min(wall));
             counted = (culled, segments);
+            best_upload = best_upload.min(upload);
         }
         println!(
-            "  {magnification:>5.0}  {:>7.3} ms  {:>7.3} ms  {:>7.3} ms  {:>7}      {:>8}",
+            "  {magnification:>5.0}  {:>7.3} ms  {:>7.3} ms  {:>7.3} ms  {:>7.3} ms  {:>7}  {:>8}",
             milliseconds(best.0),
             milliseconds(best.1),
+            milliseconds(best_upload),
             milliseconds(best.2),
             counted.0,
             counted.1,
@@ -166,7 +179,7 @@ fn main() {
     let mut worst = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
     for step in 0..24_u32 {
         let magnification = 1.0 + (step as f32) * (19.0 / 23.0);
-        let (encode, execute, wall, _, _) = frame(&mut device, &scene, &texture, magnification);
+        let (encode, execute, wall, _, _, _) = frame(&mut device, &scene, &texture, magnification);
         worst = (worst.0.max(encode), worst.1.max(execute), worst.2.max(wall));
     }
     println!(

@@ -46,6 +46,7 @@ use crate::atlas::{AtlasStore, GlyphKey, PhaseKey};
 use crate::error::RenderError;
 use crate::raster::{self, DeviceTransform, Polyline, Rule};
 use crate::resources::ResourceStore;
+use crate::startup::Coverage;
 use crate::viewport::Viewport;
 
 /// Bytes per rectangle instance: device rect (4 × f32), premultiplied colour
@@ -258,6 +259,9 @@ pub(crate) struct Encoded {
     pub segments: u32,
     /// Commands the walk rejected for reaching no pixel of the target.
     pub commands_culled: u32,
+    /// The GPU lane's triangles and tiles for this frame; empty under `Coverage::Cpu`
+    /// and for every command that took the CPU lane anyway.
+    pub winding: crate::winding::Sheet,
     /// Set when a glyph tile no longer fit the atlas and fell through to scratch:
     /// the device resets the atlas after the frame so the next frame repacks fresh.
     pub atlas_pressure: bool,
@@ -385,36 +389,46 @@ impl ScratchPacker {
         }
     }
 
-    /// Pack a mask's bytes; `None` when the frame's scratch would outgrow the
-    /// texture dimension limit (the byte budget was already charged by the caller).
+    /// Reserve a tile's place on the sheet, without writing anything into it.
+    ///
+    /// The shelf arithmetic, alone. Both producers go through it — the CPU lane then
+    /// copies its bytes in, the GPU lane hands the position to a pass that draws there
+    /// — which is what lets one sheet hold both kinds of tile without either knowing
+    /// the other exists (ADR 0016).
     #[allow(clippy::arithmetic_side_effects)] // bounded by width/max_height checks
-    fn pack(&mut self, mask: &raster::CoverageMask) -> Option<(u32, u32)> {
-        if mask.width == 0 || mask.height == 0 || mask.width > self.width {
+    fn reserve(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+        if width == 0 || height == 0 || width > self.width {
             return None;
         }
-        let position = self
-            .shelves
+        self.shelves
             .iter_mut()
-            .find(|(_, height, cursor)| {
-                *height >= mask.height
-                    && *height <= mask.height.saturating_mul(2)
-                    && cursor + mask.width <= self.width
+            .find(|(_, shelf_height, cursor)| {
+                *shelf_height >= height
+                    && *shelf_height <= height.saturating_mul(2)
+                    && cursor + width <= self.width
             })
             .map(|(y, _, cursor)| {
                 let position = (*cursor, *y);
-                *cursor += mask.width;
+                *cursor += width;
                 position
             })
             .or_else(|| {
-                if self.next_y + mask.height <= self.max_height {
+                if self.next_y + height <= self.max_height {
                     let y = self.next_y;
-                    self.next_y += mask.height;
-                    self.shelves.push((y, mask.height, mask.width));
+                    self.next_y += height;
+                    self.shelves.push((y, height, width));
                     Some((0, y))
                 } else {
                     None
                 }
-            })?;
+            })
+    }
+
+    /// Pack a mask's bytes; `None` when the frame's scratch would outgrow the
+    /// texture dimension limit (the byte budget was already charged by the caller).
+    #[allow(clippy::arithmetic_side_effects)] // bounded by width/max_height checks
+    fn pack(&mut self, mask: &raster::CoverageMask) -> Option<(u32, u32)> {
+        let position = self.reserve(mask.width, mask.height)?;
         let row_bytes = self.width as usize;
         let needed_rows = (position.1 + mask.height) as usize;
         if self.data.len() < needed_rows * row_bytes {
@@ -428,16 +442,28 @@ impl ScratchPacker {
         Some(position)
     }
 
-    fn finish(self) -> Option<Scratch> {
+    /// The packed sheet, or `None` when nothing was placed on it.
+    ///
+    /// `data` is padded to the whole sheet when the CPU lane wrote any of it, and left
+    /// **empty** when every tile on the sheet is the GPU lane's — the device then
+    /// clears rather than uploads, and the distinction is the one bit it needs.
+    fn finish(mut self) -> Option<Scratch> {
         if self.next_y == 0 {
-            None
-        } else {
-            Some(Scratch {
-                width: self.width,
-                height: self.next_y,
-                data: self.data,
-            })
+            return None;
         }
+        if !self.data.is_empty() {
+            // Both extents are bounded by the device dimension, so the product is far
+            // inside a `usize`; saturating says so rather than relying on it.
+            self.data.resize(
+                (self.width as usize).saturating_mul(self.next_y as usize),
+                0,
+            );
+        }
+        Some(Scratch {
+            width: self.width,
+            height: self.next_y,
+            data: self.data,
+        })
     }
 }
 
@@ -529,6 +555,10 @@ struct Encoder<'a> {
     /// [`target_rect`] of `viewport`, computed once: every command is tested against
     /// it before its geometry is built.
     visible: Rect,
+    /// Which lane makes coverage bytes (ADR 0016).
+    coverage: Coverage,
+    /// The GPU lane's triangles and tiles, empty under [`Coverage::Cpu`].
+    winding: crate::winding::Sheet,
     resources: &'a ResourceStore,
     atlas: &'a mut AtlasStore,
     quantum: Option<u16>,
@@ -559,6 +589,7 @@ struct Encoder<'a> {
 
 /// Walk the scene once: classify, count, rasterise, check the budget, lay out
 /// instances.
+#[allow(clippy::too_many_arguments)] // the frame's inputs, named once at the one call
 pub(crate) fn encode(
     scene: &Scene,
     viewport: &Viewport<'_>,
@@ -567,6 +598,7 @@ pub(crate) fn encode(
     resources: &ResourceStore,
     atlas: &mut AtlasStore,
     quantum: Option<u16>,
+    coverage: Coverage,
 ) -> Result<Encoded, RenderError> {
     let commands = scene.commands();
 
@@ -585,6 +617,8 @@ pub(crate) fn encode(
         scene,
         viewport,
         visible: target_rect(viewport),
+        coverage,
+        winding: crate::winding::Sheet::default(),
         resources,
         atlas,
         quantum,
@@ -617,6 +651,19 @@ pub(crate) fn encode(
         encoder.command(index, command)?;
     }
 
+    // The sheet's extent is only known once every tile has been placed, so the GPU
+    // lane learns it here rather than carrying a guess: its triangles are already in
+    // sheet coordinates, and what was missing was how large the sheet turned out to
+    // be. Then the whole thing is charged — scene-derived arithmetic, priced where
+    // nothing has been allocated yet, against the same one number (principle 3).
+    let mut winding = std::mem::take(&mut encoder.winding);
+    let scratch = std::mem::replace(&mut encoder.scratch, ScratchPacker::new(1, 1)).finish();
+    if let Some(sheet) = scratch.as_ref() {
+        winding.width = sheet.width;
+        winding.height = sheet.height;
+    }
+    encoder.charge(winding.device_bytes())?;
+
     let mut distinct = HashSet::new();
     for resolved in encoder.clips.resolved.iter().flatten() {
         distinct.insert([
@@ -639,7 +686,7 @@ pub(crate) fn encode(
         root: encoder.root,
         layers: encoder.layers,
         mask_plans: encoder.mask_plans,
-        scratch: encoder.scratch.finish(),
+        scratch,
         used_images: sorted(encoder.used_images),
         used_ramps: sorted(encoder.used_ramps),
         used_meshes: sorted(encoder.used_meshes),
@@ -649,6 +696,7 @@ pub(crate) fn encode(
         atlas_distinct_keys: u32::try_from(encoder.atlas_keys.len()).unwrap_or(u32::MAX),
         segments: u32::try_from(encoder.segments).unwrap_or(u32::MAX),
         commands_culled: encoder.culled,
+        winding,
         atlas_pressure: encoder.atlas_pressure,
     })
 }
@@ -1151,6 +1199,35 @@ impl Encoder<'_> {
             let Some((bx0, by0, bx1, by1)) = bounds else {
                 return Ok(()); // no geometry: draws nothing
             };
+            // The GPU lane takes the outline as it was uploaded — quadratics, not
+            // polylines — which is the whole of why its cost does not grow with the
+            // magnification: there is no flattening here to be done again at a new
+            // scale, and no atlas in front of it to be cold (ADR 0016).
+            if self.gpu_lane(&resolved) && !stored.quads.is_empty() {
+                let Some(tile) = self.visible_tile((bx0, by0, bx1, by1), &resolved) else {
+                    return Ok(());
+                };
+                let quads = &stored.quads;
+                let device = to_device;
+                return self.push_gpu_tile(
+                    tile,
+                    rule,
+                    color,
+                    &resolved,
+                    style,
+                    mask,
+                    |out, origin, clip| {
+                        quads.append_triangles(
+                            |p| {
+                                let q = apply(&device, p);
+                                [q.x + origin[0], q.y + origin[1]]
+                            },
+                            clip,
+                            out,
+                        );
+                    },
+                );
+            }
             if resolved.residues.is_none()
                 && bx1 - bx0 <= MAX_GLYPH_DIM
                 && by1 - by0 <= MAX_GLYPH_DIM
@@ -1618,6 +1695,32 @@ impl Encoder<'_> {
         style: DrawStyle,
         mask: Option<u32>,
     ) -> Result<(), RenderError> {
+        if self.gpu_lane(resolved)
+            && let Some(bounds) = raster::polyline_bounds(polylines)
+        {
+            // Flattened already — a stroke was expanded on the CPU (§8.4.3) and an
+            // oblique rectangle is four corners — so what moves to the device is the
+            // rasterising, which is the half that costs (ADR 0015).
+            let Some(tile) = self.visible_tile(bounds, resolved) else {
+                return Ok(());
+            };
+            return self.push_gpu_tile(
+                tile,
+                rule,
+                color,
+                resolved,
+                style,
+                mask,
+                |out, origin, clip| {
+                    crate::outline::append_polyline_triangles(
+                        polylines,
+                        |p| [p.x + origin[0], p.y + origin[1]],
+                        clip,
+                        out,
+                    );
+                },
+            );
+        }
         let Some(tile) = self.coverage_tile(polylines, rule, resolved)? else {
             return Ok(());
         };
@@ -1663,6 +1766,101 @@ impl Encoder<'_> {
             }
         }
         Ok(Some(tile))
+    }
+
+    /// The tile a shape with these device bounds occupies: shape ∩ clip ∩ target,
+    /// rounded out to whole pixels.
+    ///
+    /// The same arithmetic `coverage_tile` does, without rasterising — which is what
+    /// the GPU lane needs, since its coverage is drawn rather than computed.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
+    fn visible_tile(
+        &self,
+        bounds: (f32, f32, f32, f32),
+        resolved: &ResolvedClip,
+    ) -> Option<(i32, i32, u32, u32)> {
+        let (x0, y0, x1, y1) = bounds;
+        let vx0 = x0.max(resolved.rect.min.x).max(0.0);
+        let vy0 = y0.max(resolved.rect.min.y).max(0.0);
+        let vx1 = x1.min(resolved.rect.max.x).min(self.viewport.width as f32);
+        let vy1 = y1.min(resolved.rect.max.y).min(self.viewport.height as f32);
+        if vx0 >= vx1 || vy0 >= vy1 {
+            return None;
+        }
+        let left = vx0.floor() as i32;
+        let top = vy0.floor() as i32;
+        let width = (vx1.ceil() as i32 - left).max(0) as u32;
+        let height = (vy1.ceil() as i32 - top).max(0) as u32;
+        (width > 0 && height > 0).then_some((left, top, width, height))
+    }
+
+    /// Whether this command can take the GPU lane at all.
+    ///
+    /// A residue clip is the one thing that stops it: a non-rectangular clip multiplies
+    /// into the coverage bytes on the CPU (`residue_product`), and there is no pass yet
+    /// that does the same on the device. Such a command takes the CPU lane and lands on
+    /// the same sheet beside the GPU's tiles, which is why the sheet has one layout and
+    /// two producers rather than two sheets (ADR 0016).
+    fn gpu_lane(&self, resolved: &ResolvedClip) -> bool {
+        self.coverage == Coverage::Gpu && resolved.residues.is_none()
+    }
+
+    /// Reserve a tile on the sheet and emit the quad that will sample it.
+    ///
+    /// `triangles` appends the shape's geometry in sheet space; it is handed the map
+    /// from device pixels to sheet pixels, which is a translation and nothing else —
+    /// the shape was already transformed into device space by the caller.
+    #[allow(clippy::too_many_arguments)] // one draw's parameters, threaded once
+    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::arithmetic_side_effects)] // a reserved tile fits the sheet, and the
+    // sheet fits the device dimension: a corner cannot leave u32
+    fn push_gpu_tile(
+        &mut self,
+        tile: (i32, i32, u32, u32),
+        rule: Rule,
+        color: quorra_scene::Color,
+        resolved: &ResolvedClip,
+        style: DrawStyle,
+        mask: Option<u32>,
+        triangles: impl FnOnce(&mut Vec<crate::outline::WindingVertex>, [f32; 2], [f32; 4]),
+    ) -> Result<(), RenderError> {
+        let (left, top, width, height) = tile;
+        let (sx, sy) =
+            self.scratch
+                .reserve(width, height)
+                .ok_or(RenderError::ScratchExhausted {
+                    limit: self.scratch.max_height,
+                })?;
+        let origin = [sx as f32 - left as f32, sy as f32 - top as f32];
+        let clip = [
+            sx as f32,
+            sy as f32,
+            (sx + width) as f32,
+            (sy + height) as f32,
+        ];
+        let mut vertices = Vec::new();
+        triangles(&mut vertices, origin, clip);
+        self.winding.push_tile(
+            crate::winding::Tile {
+                rect: clip,
+                even_odd: rule == Rule::EvenOdd,
+            },
+            &vertices,
+        );
+        self.push_quad_instance(
+            Point::new(left as f32, top as f32),
+            width as f32,
+            height as f32,
+            sx as f32,
+            sy as f32,
+            1.0, // source: scratch, whichever lane drew it
+            color,
+            resolved.rect,
+            style,
+            mask,
+        );
+        Ok(())
     }
 
     /// Pack into scratch, charging is the caller's; splits from `push_scratch_quad`
@@ -1849,6 +2047,7 @@ mod tests {
     use crate::atlas::AtlasStore;
     use crate::error::RenderError;
     use crate::resources::ResourceStore;
+    use crate::startup::Coverage;
     use crate::viewport::Viewport;
 
     fn no_resources() -> ResourceStore {
@@ -1887,6 +2086,7 @@ mod tests {
             &no_resources(),
             &mut empty_atlas(),
             Some(16),
+            Coverage::Cpu,
         )
         .expect("within budget");
         assert_eq!(encoded.commands, 1);
@@ -1943,6 +2143,7 @@ mod tests {
             &no_resources(),
             &mut empty_atlas(),
             Some(16),
+            Coverage::Cpu,
         )
         .expect("drawable since M5");
         assert_eq!(encoded.root.ops.len(), 1);
@@ -1969,6 +2170,7 @@ mod tests {
             &no_resources(),
             &mut empty_atlas(),
             Some(16),
+            Coverage::Cpu,
         ) {
             Err(RenderError::FrameBudgetExceeded { needed, budget }) => {
                 assert_eq!(needed, 96);
@@ -1991,6 +2193,7 @@ mod tests {
             &no_resources(),
             &mut empty_atlas(),
             Some(16),
+            Coverage::Cpu,
         )
         .expect("blank is legitimate");
         assert_eq!(encoded.commands, 0);

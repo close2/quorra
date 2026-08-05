@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use quorra_gpu::{Device, Options, Target, TimingProvenance, Viewport};
+use quorra_gpu::{Coverage, Device, Options, Target, TimingProvenance, Viewport};
 use quorra_scene::{Affine, Color, Point, Rect, Scene, SceneBuilder};
 
 /// A dense page's shape: thousands of small rectangles. (5 933 is one dense page's
@@ -133,5 +133,52 @@ fn a_zoomed_page_culls_what_it_cannot_reach() {
         drawn.counters().commands_culled,
         5_909,
         "at 20x, 24 of the 5 933 rectangles reach the window and the rest must not be built"
+    );
+}
+
+/// The GPU coverage lane draws the same page, and culls the same commands.
+///
+/// A counting gate, like the zoom one above and for the same reason: which lane made
+/// the bytes is a cost decision, and the *number of commands a frame builds* is not
+/// allowed to depend on it. A lane that quietly dropped work would show here as a
+/// changed count long before anyone noticed a thinner page.
+///
+/// What it deliberately does not gate is time. The two lanes cross over somewhere
+/// between 4× and 20× on this machine (ADR 0016's table), the crossing moves with the
+/// adapter, and a threshold either side of it would be a number about this laptop.
+#[test]
+fn the_gpu_lane_draws_and_culls_the_same_frame() {
+    let mut device = Device::headless(&Options {
+        coverage: Coverage::Gpu,
+        ..Options::default()
+    })
+    .expect("some adapter must exist");
+    device.wait_until_warm();
+    let scene = dense_scene();
+
+    let drawn = device
+        .render(
+            &scene,
+            &Viewport::full(1191, 1684, Affine::IDENTITY),
+            Target::Readback,
+        )
+        .expect("the dense page is within every budget");
+    assert_eq!(drawn.counters().commands_culled, 0);
+    assert_eq!(drawn.counters().commands, 5_933);
+
+    let zoomed = Affine::translate(-580.0, -565.0)
+        .then(Affine::scale(20.0, 20.0))
+        .then(Affine::translate(1191.0 / 2.0, 1684.0 / 2.0));
+    let drawn = device
+        .render(
+            &scene,
+            &Viewport::full(1191, 1684, zoomed),
+            Target::Readback,
+        )
+        .expect("the dense page is within every budget");
+    assert_eq!(
+        drawn.counters().commands_culled,
+        5_909,
+        "the cull is the encoder's, so both lanes reject exactly the same commands"
     );
 }

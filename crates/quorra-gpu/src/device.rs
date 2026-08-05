@@ -39,7 +39,7 @@ use crate::pipeline::{PipelineStore, WARM_FORMAT};
 use crate::readback;
 use crate::report::{Report, ReportKind};
 use crate::resources::ResourceStore;
-use crate::startup::{self, Options, PreSteps, StartupTimings};
+use crate::startup::{self, Coverage, Options, PreSteps, StartupTimings};
 use crate::surface::SurfaceState;
 use crate::target::Target;
 pub(crate) use crate::timing::PassQuery;
@@ -81,6 +81,11 @@ pub struct Device {
     linear_sampler: wgpu::Sampler,
     dummy_texture: Option<wgpu::TextureView>,
     glyph_quantum: Option<u16>,
+    /// Which lane makes coverage bytes, and how finely the GPU one samples (ADR 0016).
+    coverage: Coverage,
+    coverage_samples: u32,
+    /// The GPU lane's winding target, kept across frames (ADR 0016's measurement).
+    winding_texture: crate::winding::WindingTexture,
     timestamps: Option<TimestampSupport>,
     surface: Option<SurfaceState>,
     /// The blocking startup steps, each measured on its own (§7, and the caller's
@@ -343,6 +348,14 @@ impl Device {
             linear_sampler,
             dummy_texture: None,
             glyph_quantum: options.glyph_quantum,
+            coverage: options.coverage,
+            winding_texture: crate::winding::WindingTexture::default(),
+            // Rounded to a square grid and bounded, here rather than at the call site:
+            // an option is a request, and what the lane can actually sample is ours.
+            coverage_samples: {
+                let side = options.coverage_samples.clamp(4, 64).isqrt().max(2);
+                side.saturating_mul(side)
+            },
             timestamps,
             surface: surface_state,
             startup: StartupSteps {
@@ -355,10 +368,7 @@ impl Device {
     }
 
     /// The pipeline cache, for the passes that live in modules of their own.
-    ///
-    /// Reached only by `winding.rs`'s tests until the encoder routes fills to the GPU
-    /// lane; the `allow` goes with the same commit that adds the caller (ADR 0016).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // `winding.rs`'s own tests build a device to reach its pipelines
     pub(crate) fn pipeline_store(&self) -> &PipelineStore {
         &self.pipelines
     }
@@ -549,6 +559,7 @@ impl Device {
             &self.resources,
             &mut self.atlas,
             self.glyph_quantum,
+            self.coverage,
         )?;
         let encode_time = encode_started.elapsed();
 
@@ -580,7 +591,7 @@ impl Device {
         let paint_started = Instant::now();
         let paint_bytes = self.ensure_paint_textures(&encoded)?;
         let paint_time = paint_started.elapsed();
-        let upload = self.upload(&mut encoded, viewport);
+        let upload = self.upload(&mut encoded, viewport)?;
         let upload_time = upload.time.saturating_add(paint_time);
         let upload_bytes = upload.bytes.saturating_add(paint_bytes);
 
@@ -873,7 +884,16 @@ impl Device {
 
     /// Phase 2: create the frame's buffers and textures, sized by phase 1's counts,
     /// and schedule their uploads.
-    fn upload(&mut self, encoded: &mut Encoded, viewport: &Viewport<'_>) -> Upload {
+    ///
+    /// # Errors
+    ///
+    /// Whatever the GPU coverage lane refuses: its sheet is a texture like any other
+    /// and is bounded by the adapter's dimension.
+    fn upload(
+        &mut self,
+        encoded: &mut Encoded,
+        viewport: &Viewport<'_>,
+    ) -> Result<Upload, RenderError> {
         let started = Instant::now();
         let globals = self.gpu.create_buffer(&wgpu::BufferDescriptor {
             label: Some("quorra globals"),
@@ -927,40 +947,57 @@ impl Device {
             .saturating_add(encoded.rect_instances.len() as u64)
             .saturating_add(encoded.quad_instances.len() as u64);
 
-        let scratch_view = self.upload_scratch(encoded, &mut bytes);
+        let scratch_view = self.upload_scratch(encoded, &mut bytes)?;
         self.flush_atlas_tiles(&mut bytes);
 
-        Upload {
+        Ok(Upload {
             globals,
             rect_instances,
             quad_instances,
             scratch_view,
             bytes,
             time: started.elapsed(),
-        }
+        })
     }
 
-    /// The frame's scratch coverage image, uploaded whole.
+    /// The frame's scratch coverage sheet: the CPU lane's bytes uploaded, the GPU
+    /// lane's tiles drawn, into one texture.
+    ///
+    /// One sheet with two producers is the whole of the GPU lane's integration (ADR
+    /// 0016): downstream, a coverage quad names a rectangle of *this* texture and has
+    /// no idea which lane put the bytes there. The upload goes first because the draw
+    /// loads what it finds — a tile the GPU draws covers only its own rectangle, so
+    /// the CPU lane's bytes elsewhere on the sheet survive it.
     fn upload_scratch(
         &mut self,
         encoded: &mut Encoded,
         bytes: &mut u64,
-    ) -> Option<(wgpu::Texture, wgpu::TextureView)> {
-        encoded.scratch.take().map(|scratch| {
-            let texture = self.gpu.create_texture(&wgpu::TextureDescriptor {
-                label: Some("quorra scratch coverage"),
-                size: wgpu::Extent3d {
-                    width: scratch.width,
-                    height: scratch.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
+    ) -> Result<Option<(wgpu::Texture, wgpu::TextureView)>, RenderError> {
+        let Some(scratch) = encoded.scratch.take() else {
+            return Ok(None);
+        };
+        let winding = std::mem::take(&mut encoded.winding);
+        let mut usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+        if !winding.is_empty() {
+            // COPY_SRC with it, so a test can read the sheet back and hold the two
+            // lanes to a stated difference rather than to a hope.
+            usage |= wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+        }
+        let texture = self.gpu.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quorra scratch coverage"),
+            size: wgpu::Extent3d {
+                width: scratch.width,
+                height: scratch.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage,
+            view_formats: &[],
+        });
+        if !scratch.data.is_empty() {
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &texture,
@@ -980,10 +1017,24 @@ impl Device {
                     depth_or_array_layers: 1,
                 },
             );
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            *bytes = bytes.saturating_add(scratch.data.len() as u64);
-            (texture, view)
-        })
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        *bytes = bytes.saturating_add(scratch.data.len() as u64);
+        if !winding.is_empty() {
+            *bytes = bytes.saturating_add(winding.device_bytes());
+            crate::winding::render_into(
+                &self.gpu,
+                &self.queue,
+                &self.pipelines,
+                &mut self.winding_texture,
+                &view,
+                &winding,
+                self.coverage_samples,
+                scratch.data.is_empty(),
+                self.limits.max_target_size,
+            )?;
+        }
+        Ok(Some((texture, view)))
     }
 
     /// New glyph tiles into the persistent atlas texture (created on first need —

@@ -1,0 +1,436 @@
+//! The two coverage lanes, held against each other (ADR 0016).
+//!
+//! `Coverage::Cpu` computes the exact area of the pixel a shape covers; `Coverage::Gpu`
+//! counts samples on an ordered grid. They are *different answers to the same
+//! question*, and this file is about the shape of that difference:
+//!
+//! - where a pixel is wholly inside or wholly outside, the two must **agree exactly** —
+//!   no sampling scheme can disagree about a pixel no edge crosses, so a difference
+//!   there is a defect and not a quantisation;
+//! - where an edge crosses a pixel, the GPU lane's answer must be the *sampled* one:
+//!   `round(k/n × 255)` for `k` of `n` samples inside, which is derivable before the
+//!   frame is drawn rather than read off it;
+//! - and both must draw the *same* geometry — same clause, same fill rule, same
+//!   sub-pixel placement — because the lane is a choice about cost, never about what
+//!   the page says.
+
+// Test-file lint policy as in m1.rs.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::arithmetic_side_effects
+)]
+
+use quorra_gpu::{Coverage, Device, Options, Target, Viewport};
+use quorra_scene::{
+    Affine, BlendMode, Color, Compose, FillRule, LineCap, LineJoin, Paint, Point, Scene,
+    SceneBuilder, Segment, Stroke,
+};
+
+const SIZE: u32 = 48;
+
+fn device_with(coverage: Coverage) -> Device {
+    Device::headless(&Options {
+        adapter: Some("llvmpipe".into()),
+        coverage,
+        ..Options::default()
+    })
+    .expect("llvmpipe is present wherever this suite runs")
+}
+
+/// The frame's pixels, and the count of commands that reached the GPU lane.
+fn render(coverage: Coverage, build: impl Fn(&mut Device) -> Scene) -> Vec<u8> {
+    let mut device = device_with(coverage);
+    device.wait_until_warm();
+    let scene = build(&mut device);
+    device
+        .render(
+            &scene,
+            &Viewport::full(SIZE, SIZE, Affine::IDENTITY),
+            Target::Readback,
+        )
+        .expect("the scene is inside every budget")
+        .into_raster()
+        .unwrap()
+        .into_pixels()
+}
+
+fn alpha(pixels: &[u8], x: u32, y: u32) -> u8 {
+    pixels[((y * SIZE + x) * 4 + 3) as usize]
+}
+
+fn black() -> Paint {
+    Paint::Solid(Color::new(0.0, 0.0, 0.0, 1.0))
+}
+
+/// A curved blob big enough to leave the atlas, so the CPU lane takes its path lane
+/// and the two are compared on the same machinery.
+fn blob(device: &mut Device) -> Scene {
+    let outline = device
+        .upload_outline(&[
+            Segment::MoveTo(Point::new(8.0, 8.0)),
+            Segment::CubicTo {
+                c1: Point::new(40.0, 2.0),
+                c2: Point::new(44.0, 30.0),
+                to: Point::new(24.0, 40.0),
+            },
+            Segment::CubicTo {
+                c1: Point::new(10.0, 44.0),
+                c2: Point::new(2.0, 24.0),
+                to: Point::new(8.0, 8.0),
+            },
+            Segment::Close,
+        ])
+        .unwrap();
+    let mut builder = SceneBuilder::new();
+    builder
+        .fill(
+            outline,
+            Affine::IDENTITY,
+            FillRule::NonZero,
+            black(),
+            None,
+            BlendMode::Normal,
+            Compose::SrcOver,
+            None,
+        )
+        .unwrap();
+    builder.finish()
+}
+
+/// Pixels no edge crosses are not a matter of opinion: wholly covered is 255 and
+/// wholly uncovered is 0 in both lanes, and a difference there would be a defect in
+/// one of them rather than the sampling.
+#[test]
+fn the_lanes_agree_exactly_where_no_edge_crosses() {
+    let cpu = render(Coverage::Cpu, blob);
+    let gpu = render(Coverage::Gpu, blob);
+    let mut interior = 0;
+    let mut exterior = 0;
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let (a, b) = (alpha(&cpu, x, y), alpha(&gpu, x, y));
+            if a == 255 {
+                assert_eq!(
+                    b, 255,
+                    "solid for the CPU lane, {b} for the GPU one at {x},{y}"
+                );
+                interior += 1;
+            }
+            if a == 0 {
+                assert_eq!(
+                    b, 0,
+                    "empty for the CPU lane, {b} for the GPU one at {x},{y}"
+                );
+                exterior += 1;
+            }
+        }
+    }
+    assert!(interior > 200, "the fixture has an interior: {interior}");
+    assert!(exterior > 200, "and an exterior: {exterior}");
+}
+
+/// On a **straight** edge the difference is the sample grid and nothing else.
+///
+/// Four sample columns sit at ⅛, ⅜, ⅝ and ⅞ across a pixel, so a straight edge at any
+/// fraction is answered to within half a column — `1/8` of a pixel, `32` of 255. That
+/// is a property of the grid, derived before the frame is drawn; the fixture measures
+/// 12.
+#[test]
+fn a_straight_edge_differs_by_the_sample_grid_and_no_more() {
+    let cpu = render(Coverage::Cpu, straight);
+    let gpu = render(Coverage::Gpu, straight);
+    let (edges, worst) = compare(&cpu, &gpu);
+    assert!(edges > 40, "the fixture has an antialiased edge: {edges}");
+    assert!(
+        worst <= 32,
+        "a 4x4 ordered grid answers a straight edge to within an eighth of a pixel; \
+         worst difference was {worst}"
+    );
+}
+
+/// On a **curved** edge the difference is larger, and the reason is the CPU lane.
+///
+/// `raster.rs` flattens curves to `FLATTEN_TOLERANCE` — a quarter pixel — and a chord
+/// cuts *inside* a convex curve, so its shape is up to that much smaller than the one
+/// the caller submitted. The GPU lane does not flatten at all: it draws the quadratics
+/// the outline converted to at upload, within 8×10⁻⁵ units of the cubic. So the gap
+/// here is a quarter pixel of coverage (64 of 255) on top of the grid's eighth, and
+/// **the GPU lane is the more accurate of the two**.
+///
+/// Measured rather than asserted into being: at `FLATTEN_TOLERANCE` = 0.25 the worst
+/// difference on this fixture is 62 and 33 pixels differ by more than 20; tightening
+/// that constant to 0.004 takes it to *zero* pixels over 20, which is what identifies
+/// the flattening as the whole of the difference rather than something in this lane.
+#[test]
+fn a_curved_edge_differs_by_the_cpu_lane_s_flattening_too() {
+    let cpu = render(Coverage::Cpu, blob);
+    let gpu = render(Coverage::Gpu, blob);
+    let (edges, worst) = compare(&cpu, &gpu);
+    assert!(edges > 40, "the fixture has an antialiased edge: {edges}");
+    assert!(
+        worst <= 96,
+        "an eighth of a pixel for the grid and a quarter for the flattening bound this \
+         at 96 of 255; worst difference was {worst}"
+    );
+}
+
+/// Antialiased pixels, and the largest disagreement among them.
+fn compare(cpu: &[u8], gpu: &[u8]) -> (u32, i32) {
+    let mut edges = 0;
+    let mut worst = 0_i32;
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let (a, b) = (i32::from(alpha(cpu, x, y)), i32::from(alpha(gpu, x, y)));
+            if a > 0 && a < 255 {
+                edges += 1;
+                worst = worst.max((a - b).abs());
+            }
+        }
+    }
+    (edges, worst)
+}
+
+/// A triangle with straight edges at fractional coordinates, so every edge pixel is
+/// antialiased and none of the difference can be blamed on a curve.
+fn straight(device: &mut Device) -> Scene {
+    let outline = device
+        .upload_outline(&[
+            Segment::MoveTo(Point::new(7.3, 5.1)),
+            Segment::LineTo(Point::new(40.7, 12.9)),
+            Segment::LineTo(Point::new(22.4, 41.6)),
+            Segment::Close,
+        ])
+        .unwrap();
+    let mut builder = SceneBuilder::new();
+    builder
+        .fill(
+            outline,
+            Affine::IDENTITY,
+            FillRule::NonZero,
+            black(),
+            None,
+            BlendMode::Normal,
+            Compose::SrcOver,
+            None,
+        )
+        .unwrap();
+    builder.finish()
+}
+
+/// The lane is a choice about cost, not about the clause. Nested same-wound squares
+/// fill under §8.5.3.3.2 and hollow under §8.5.3.3.3, and both lanes must say so.
+#[test]
+fn both_lanes_read_the_fill_rules_the_same_way() {
+    let nested = |rule: FillRule| {
+        move |device: &mut Device| {
+            let square = |x0: f32, y0: f32, x1: f32, y1: f32| {
+                vec![
+                    Segment::MoveTo(Point::new(x0, y0)),
+                    Segment::LineTo(Point::new(x1, y0)),
+                    Segment::LineTo(Point::new(x1, y1)),
+                    Segment::LineTo(Point::new(x0, y1)),
+                    Segment::Close,
+                ]
+            };
+            let mut path = square(6.0, 6.0, 42.0, 42.0);
+            path.extend(square(18.0, 18.0, 30.0, 30.0));
+            let outline = device.upload_outline(&path).unwrap();
+            let mut builder = SceneBuilder::new();
+            builder
+                .fill(
+                    outline,
+                    Affine::IDENTITY,
+                    rule,
+                    black(),
+                    None,
+                    BlendMode::Normal,
+                    Compose::SrcOver,
+                    None,
+                )
+                .unwrap();
+            builder.finish()
+        }
+    };
+    for coverage in [Coverage::Cpu, Coverage::Gpu] {
+        let non_zero = render(coverage, nested(FillRule::NonZero));
+        let even_odd = render(coverage, nested(FillRule::EvenOdd));
+        assert_eq!(
+            alpha(&non_zero, 24, 24),
+            255,
+            "{coverage:?}: winding two is not zero (§8.5.3.3.2)"
+        );
+        assert_eq!(
+            alpha(&even_odd, 24, 24),
+            0,
+            "{coverage:?}: winding two is even (§8.5.3.3.3)"
+        );
+        assert_eq!(
+            alpha(&non_zero, 10, 24),
+            255,
+            "{coverage:?}: the outer ring"
+        );
+        assert_eq!(alpha(&even_odd, 10, 24), 255);
+    }
+}
+
+/// A stroke takes the GPU lane too: it is expanded to a polygon on the CPU (§8.4.3's
+/// caps and joins are the device's business either way) and the *rasterising* is what
+/// moves, which is the half that costs.
+#[test]
+fn a_stroke_draws_the_same_band_in_both_lanes() {
+    let scene = |device: &mut Device| {
+        let outline = device
+            .upload_outline(&[
+                Segment::MoveTo(Point::new(10.0, 24.0)),
+                Segment::LineTo(Point::new(38.0, 24.0)),
+            ])
+            .unwrap();
+        let mut builder = SceneBuilder::new();
+        builder
+            .stroke(
+                outline,
+                Affine::IDENTITY,
+                Stroke {
+                    width: 8.0,
+                    cap: LineCap::Butt,
+                    join: LineJoin::Miter,
+                    miter_limit: 4.0,
+                },
+                black(),
+                None,
+                BlendMode::Normal,
+                None,
+            )
+            .unwrap();
+        builder.finish()
+    };
+    let cpu = render(Coverage::Cpu, scene);
+    let gpu = render(Coverage::Gpu, scene);
+    for y in [21, 24, 27] {
+        assert_eq!(alpha(&gpu, 24, y), 255, "inside the band at row {y}");
+        assert_eq!(alpha(&cpu, 24, y), 255);
+    }
+    assert_eq!(alpha(&gpu, 24, 19), 0, "a row above the band");
+    assert_eq!(alpha(&gpu, 9, 24), 0, "before the butt cap");
+}
+
+/// **A clip the GPU lane cannot honour sends its command to the CPU lane**, and the
+/// frame is still right: a non-rectangular clip multiplies into coverage on the CPU,
+/// so both kinds of tile land on one sheet and the picture does not say which is which.
+#[test]
+fn a_residue_clip_falls_back_and_still_draws() {
+    let scene = |device: &mut Device| {
+        let diamond = device
+            .upload_outline(&[
+                Segment::MoveTo(Point::new(24.0, 4.0)),
+                Segment::LineTo(Point::new(44.0, 24.0)),
+                Segment::LineTo(Point::new(24.0, 44.0)),
+                Segment::LineTo(Point::new(4.0, 24.0)),
+                Segment::Close,
+            ])
+            .unwrap();
+        let square = device
+            .upload_outline(&[
+                Segment::MoveTo(Point::new(8.0, 8.0)),
+                Segment::LineTo(Point::new(40.0, 8.0)),
+                Segment::LineTo(Point::new(40.0, 40.0)),
+                Segment::LineTo(Point::new(8.0, 40.0)),
+                Segment::Close,
+            ])
+            .unwrap();
+        let mut builder = SceneBuilder::new();
+        // The diamond is not axis-aligned, so it resolves to a residue link.
+        let clip = builder
+            .clip(diamond, Affine::IDENTITY, FillRule::NonZero, None)
+            .unwrap();
+        builder
+            .fill(
+                square,
+                Affine::IDENTITY,
+                FillRule::NonZero,
+                black(),
+                Some(clip),
+                BlendMode::Normal,
+                Compose::SrcOver,
+                None,
+            )
+            .unwrap();
+        builder.finish()
+    };
+    let cpu = render(Coverage::Cpu, scene);
+    let gpu = render(Coverage::Gpu, scene);
+    assert_eq!(
+        gpu, cpu,
+        "the command took the CPU lane in both devices, so the frames are the same bytes"
+    );
+    assert_eq!(alpha(&gpu, 24, 24), 255, "the middle of the clipped square");
+    assert_eq!(alpha(&gpu, 10, 10), 0, "a corner the diamond clips away");
+}
+
+/// Both kinds of tile on one sheet: a residue-clipped fill (CPU) beside an unclipped
+/// one (GPU) in the same frame. The sheet has one layout and two producers, and this
+/// is the case that proves neither overwrote the other.
+#[test]
+fn one_sheet_carries_both_producers() {
+    let scene = |device: &mut Device| {
+        let diamond = device
+            .upload_outline(&[
+                Segment::MoveTo(Point::new(12.0, 2.0)),
+                Segment::LineTo(Point::new(22.0, 12.0)),
+                Segment::LineTo(Point::new(12.0, 22.0)),
+                Segment::LineTo(Point::new(2.0, 12.0)),
+                Segment::Close,
+            ])
+            .unwrap();
+        let curve = device
+            .upload_outline(&[
+                Segment::MoveTo(Point::new(28.0, 28.0)),
+                Segment::CubicTo {
+                    c1: Point::new(46.0, 28.0),
+                    c2: Point::new(46.0, 46.0),
+                    to: Point::new(28.0, 44.0),
+                },
+                Segment::Close,
+            ])
+            .unwrap();
+        let mut builder = SceneBuilder::new();
+        let clip = builder
+            .clip(diamond, Affine::IDENTITY, FillRule::NonZero, None)
+            .unwrap();
+        // Clipped by a residue: the CPU lane rasterises this one.
+        builder
+            .fill(
+                diamond,
+                Affine::IDENTITY,
+                FillRule::NonZero,
+                black(),
+                Some(clip),
+                BlendMode::Normal,
+                Compose::SrcOver,
+                None,
+            )
+            .unwrap();
+        // Unclipped and curved: the GPU lane draws this one, onto the same sheet.
+        builder
+            .fill(
+                curve,
+                Affine::IDENTITY,
+                FillRule::NonZero,
+                black(),
+                None,
+                BlendMode::Normal,
+                Compose::SrcOver,
+                None,
+            )
+            .unwrap();
+        builder.finish()
+    };
+    let gpu = render(Coverage::Gpu, scene);
+    assert_eq!(alpha(&gpu, 12, 12), 255, "the CPU lane's tile survived");
+    assert_eq!(alpha(&gpu, 33, 36), 255, "and the GPU lane's tile is there");
+    assert_eq!(alpha(&gpu, 24, 6), 0, "with nothing between them");
+}

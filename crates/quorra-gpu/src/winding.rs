@@ -15,12 +15,6 @@
 //! memory**, which is the trade a document renderer wants: the GPU is idle here
 //! (`execute` is tens of microseconds) and memory is what a zoomed page runs out of.
 
-// Dead until the encoder routes fills here (ADR 0016's "what is landed"): every item
-// below is reached only by this module's own tests today. `allow` rather than removal,
-// with the condition for its going away named: it goes when `encode.rs` gains the
-// coverage selector, and the same commit that adds the caller deletes this line.
-#![allow(dead_code)]
-
 use crate::error::RenderError;
 use crate::pipeline::{Kind, PipelineStore};
 
@@ -57,6 +51,19 @@ pub(crate) struct Sheet {
 }
 
 impl Sheet {
+    /// Adds a tile and the triangles that fill it.
+    pub(crate) fn push_tile(&mut self, tile: Tile, vertices: &[crate::outline::WindingVertex]) {
+        // A tile with no triangles is not a tile: it would resolve to transparent,
+        // which the sheet already is there.
+        if vertices.is_empty() {
+            return;
+        }
+        for vertex in vertices {
+            self.vertices.extend_from_slice(&vertex.floats());
+        }
+        self.tiles.push(tile);
+    }
+
     /// Whether this frame drew anything through the GPU lane.
     pub(crate) fn is_empty(&self) -> bool {
         self.tiles.is_empty() || self.vertices.is_empty()
@@ -101,20 +108,28 @@ pub(crate) fn sample_offsets(count: u32) -> Vec<[f32; 2]> {
         .collect()
 }
 
-/// Renders `sheet` into a fresh R8 coverage texture.
+/// Draws `sheet`'s tiles into `coverage_view`, which is the frame's scratch sheet.
+///
+/// `clear` says whether this pass owns the whole texture: false when the CPU lane
+/// uploaded bytes into the same sheet, and then the tiles drawn here land beside those
+/// bytes without touching them — each tile's quad covers only its own rectangle.
 ///
 /// # Errors
 ///
 /// [`RenderError::TargetTooLarge`] when the packed sheet exceeds the adapter's texture
 /// dimension — the same limit, named the same way, as any other target of ours.
-pub(crate) fn render(
+#[allow(clippy::too_many_arguments)] // the pass's inputs, named once at the one call
+pub(crate) fn render_into(
     gpu: &wgpu::Device,
     queue: &wgpu::Queue,
     pipelines: &PipelineStore,
+    reuse: &mut WindingTexture,
+    coverage_view: &wgpu::TextureView,
     sheet: &Sheet,
     samples: u32,
+    clear: bool,
     max_dimension: u32,
-) -> Result<(wgpu::Texture, wgpu::TextureView), RenderError> {
+) -> Result<(), RenderError> {
     if sheet.width > max_dimension || sheet.height > max_dimension {
         return Err(RenderError::TargetTooLarge {
             width: sheet.width,
@@ -127,33 +142,13 @@ pub(crate) fn render(
         height: sheet.height.max(1),
         depth_or_array_layers: 1,
     };
-    let coverage = gpu.create_texture(&wgpu::TextureDescriptor {
-        label: Some("quorra scratch coverage (gpu lane)"),
-        size: extent,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R8Unorm,
-        // COPY_SRC as well as the two it needs: the coverage sheet is the one artefact
-        // that decides whether this lane agrees with the CPU one, and a sheet nothing
-        // can read back is a lane nothing can hold to a bound.
-        usage: wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let coverage_view = coverage.create_view(&wgpu::TextureViewDescriptor::default());
-    let winding = gpu.create_texture(&wgpu::TextureDescriptor {
-        label: Some("quorra winding"),
-        size: extent,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: WINDING_FORMAT,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let winding_view = winding.create_view(&wgpu::TextureViewDescriptor::default());
+    // **Kept between frames**, which ADR 0012 declined to do for the compositor's
+    // textures "until a measurement says otherwise". This is that measurement: at 20x
+    // the sheet is 2.5 million texels, and allocating and zero-initialising eight
+    // bytes of each, every frame, cost 10.7 ms of a 15 ms frame — more than the
+    // rasterising the lane exists to avoid. One texture, grown when a frame needs a
+    // larger one and never shrunk while the device lives.
+    let winding_view = reuse.view_for(gpu, extent).clone();
 
     let buffers = Buffers::new(gpu, queue, pipelines, sheet, samples);
     let (winding_pipeline, _) = pipelines.get(Kind::Winding, WINDING_FORMAT);
@@ -181,16 +176,71 @@ pub(crate) fn render(
         );
         resolve(
             &mut encoder,
-            &coverage_view,
+            coverage_view,
             &resolve_pipeline,
             &buffers,
             group,
             &winding_source,
-            round == 0,
+            clear && round == 0,
         );
     }
     queue.submit([encoder.finish()]);
-    Ok((coverage, coverage_view))
+    Ok(())
+}
+
+/// The winding target, kept across frames.
+///
+/// Not a pool: one texture, because a frame has one sheet. It grows to the largest
+/// extent any frame has needed — a viewer that zooms in and out repeatedly should not
+/// pay an allocation each time it crosses a size it has already seen — and the bytes
+/// are still charged to every frame that uses them, because what the frame *needs* is
+/// what a budget is about, not what happens to be resident.
+#[derive(Debug, Default)]
+pub(crate) struct WindingTexture {
+    held: Option<(wgpu::Extent3d, wgpu::Texture, wgpu::TextureView)>,
+}
+
+impl WindingTexture {
+    /// A view of a texture at least `extent` in both dimensions.
+    fn view_for(&mut self, gpu: &wgpu::Device, extent: wgpu::Extent3d) -> &wgpu::TextureView {
+        let fits = self
+            .held
+            .as_ref()
+            .is_some_and(|(held, _, _)| held.width >= extent.width && held.height >= extent.height);
+        if !fits {
+            let size = wgpu::Extent3d {
+                width: self
+                    .held
+                    .as_ref()
+                    .map_or(extent.width, |(held, _, _)| held.width.max(extent.width)),
+                height: self
+                    .held
+                    .as_ref()
+                    .map_or(extent.height, |(held, _, _)| held.height.max(extent.height)),
+                depth_or_array_layers: 1,
+            };
+            let texture = gpu.create_texture(&wgpu::TextureDescriptor {
+                label: Some("quorra winding"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: WINDING_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.held = Some((size, texture, view));
+        }
+        // `held` is `Some` on both paths — it either fitted or was just replaced — and
+        // saying so with a match rather than an `expect` keeps the invariant in the
+        // type rather than in a panic message.
+        match self.held.as_ref() {
+            Some((_, _, view)) => view,
+            None => unreachable!("the branch above assigns `held` when it does not fit"),
+        }
+    }
 }
 
 /// One round's winding pass: clear, then one draw per sample of the group.
@@ -245,8 +295,8 @@ fn resolve(
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
-                // Cleared once, then added to: a tile the encoder packed but no round
-                // covers is transparent, which is the truth about it.
+                // Cleared once, and only when this lane owns the sheet: the CPU lane's
+                // bytes are already in it otherwise, and a clear would take them out.
                 load: if first {
                     wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
                 } else {
@@ -429,7 +479,7 @@ fn to_bytes(values: &[f32]) -> Vec<u8> {
     clippy::cast_possible_truncation
 )] // test-file policy as in `raster.rs`: a fixture that cannot run must fail loudly
 mod tests {
-    use super::{Sheet, Tile, render, sample_offsets};
+    use super::{Sheet, Tile, render_into, sample_offsets};
     use crate::device::Device;
     use crate::outline::QuadOutline;
     use crate::startup::Options;
@@ -451,7 +501,7 @@ mod tests {
         let device = device();
         device.wait_until_warm();
         let (gpu, queue) = device.wgpu();
-        let outline = QuadOutline::from_segments(segments, None);
+        let outline = QuadOutline::from_segments(segments);
         let mut vertices = Vec::new();
         let mut floats = Vec::new();
         outline.append_triangles(
@@ -471,12 +521,33 @@ mod tests {
             width: SIDE,
             height: SIDE,
         };
-        let (texture, _) = render(
+        let texture = gpu.create_texture(&wgpu::TextureDescriptor {
+            label: Some("winding test sheet"),
+            size: wgpu::Extent3d {
+                width: SIDE,
+                height: SIDE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut reuse = super::WindingTexture::default();
+        render_into(
             gpu,
             queue,
             device.pipeline_store(),
+            &mut reuse,
+            &view,
             &sheet,
             samples,
+            true,
             device.limits().max_target_size,
         )
         .expect("the sheet is inside every limit");

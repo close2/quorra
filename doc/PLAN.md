@@ -15,31 +15,38 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
-**Coverage can come from the GPU, and the lane is proven but not yet reachable**
-(2026-08-05, ADR 0016): Evan Wallace's method — one triangle per outline segment
-fanned from an anchor, accumulated with additive blending so that what lands at a
-sample *is* §8.5.3.3's winding number, plus a Loop-Blinn control triangle per curve
-whose orientation alone decides whether the bulge is added or bitten out. Cubics
-become quadratics **once, at upload**, so no step in the lane knows the device scale:
-that is the answer to the thing the cull uncovered, where a zoom gesture makes every
-cached tile cold on every frame. Signed accumulation rather than his parity trick,
-because parity is even-odd only and §8.5.3.3.2's non-zero is PDF's default; samples in
-an `rgba16float` texel's channels rather than packed into a byte's bits, so sample
-count costs time and not memory; and the sample grid stated in our own code rather
-than taken from the driver, so ADR 0006's cross-adapter identity survives.
+**Coverage can come from the GPU, and a caller can now ask for it** (2026-08-05,
+ADR 0016): Evan Wallace's method — one triangle per outline segment fanned from an
+anchor, accumulated with additive blending so that what lands at a sample *is*
+§8.5.3.3's winding number, plus a Loop-Blinn control triangle per curve whose
+orientation alone decides whether the bulge is added or bitten out. Cubics become
+quadratics **once, at upload**, so no step in the lane knows the device scale: that is
+the answer to what the cull uncovered, where a zoom gesture makes every cached tile
+cold on every frame. Signed accumulation rather than his parity trick, because parity
+is even-odd only and §8.5.3.3.2's non-zero is PDF's default; samples in an
+`rgba16float` texel's channels rather than packed into a byte's bits, so sample count
+costs time and not memory; and the sample grid stated in our own code rather than taken
+from the driver, so ADR 0006's cross-adapter identity survives.
 
-**What is landed is the lane and its proof** — geometry (`outline.rs`), shaders
-(`shaders/winding.wgsl`), pipelines, and the frame pass (`winding.rs`), exercised end
-to end on a real device: an aligned square solid inside and empty outside, a
-half-covered column reading exactly 128 as the 4×4 grid derives, and nested same-wound
-squares filling under one rule and hollowing under the other. **The encoder does not
-route anything to it yet**, and the three things wiring it needs are named in ADR 0016:
-a scratch reservation without bytes, the frame budget pricing the winding texture
-(`Sheet::device_bytes` is written and uncalled), and residue clips, which still
-multiply into a coverage mask on the CPU. Until then the `allow(dead_code)` markers
-name the commit that deletes them. The number that decides *when* a caller should
-choose this lane — the magnification at which it overtakes the CPU one — cannot be
-measured until the encoder can reach it, and no one should guess it in the meantime.
+`Options::coverage` selects it, and **the crossover is measured**: on the dense page at
+1191×1684, RADV, the CPU lane wins at 1× (1.1 ms against 15.2) and at 4×, and the GPU
+lane wins from somewhere before 20× (**1.9 ms against 12.5**, with encode 32× cheaper)
+and stays won at 100×. The shape is what the designs predict — an atlas that pays per
+pixel rasterised against triangles that pay per curve described — so the default stays
+`Coverage::Cpu` and the choice belongs to a caller that knows its magnification. Two
+findings the measurement forced: **the winding texture is kept between frames** (ADR
+0012's deferred pool, now with the measurement it asked for — per-frame allocation and
+zero-init was 10.7 ms of a 15 ms frame), and the conversion tolerance is relative to
+the outline rather than absolute.
+
+Where the lanes differ is stated rather than hoped: they agree **exactly** where no
+edge crosses a pixel; a straight edge differs by at most the sample grid's eighth of a
+pixel (32 of 255, measured 12); and a curved edge differs by up to 96 — **because the
+CPU lane flattens to a quarter pixel and the GPU lane does not flatten at all**.
+Tightening `FLATTEN_TOLERANCE` to 0.004 takes the worst difference to zero pixels over
+20, which identifies the flattening as the whole of it. The GPU lane is the more
+accurate about the shape and the less accurate about the pixel. Still on the CPU lane:
+commands under a non-rectangular clip, which fall back and share the one sheet.
 
 **A frame costs what it shows, not what the page holds** (2026-08-04): the caller
 zoomed, and found that a frame got *more* expensive the further in a person went —

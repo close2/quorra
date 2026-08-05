@@ -62,6 +62,43 @@ pub const DEFAULT_ATLAS_BUDGET: u64 = 8 * 1024 * 1024;
 /// a dense page and left its oracle's verdicts unmoved; 1/8 contradicted pages.
 pub const DEFAULT_GLYPH_QUANTUM: u16 = 16;
 
+/// Which producer makes coverage bytes for fills and strokes.
+///
+/// The two lanes hand the same artefact — an R8 tile in the frame's scratch sheet — to
+/// the same quad lane, so nothing downstream of coverage can tell them apart. What
+/// differs is where the cost falls, and the curves are opposite (ADR 0016).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Coverage {
+    /// The CPU scanline rasteriser of ADR 0008, with the glyph atlas in front of it.
+    ///
+    /// Coverage is the **exact** area of the pixel a shape covers, 256 levels, and a
+    /// page of text at reading size costs almost nothing because the atlas answers
+    /// most of it. Its weakness is magnification: past `MAX_GLYPH_DIM` a glyph never
+    /// enters the atlas and is rasterised again on every frame.
+    #[default]
+    Cpu,
+    /// Outline triangles rasterised by the device, winding accumulated in a float
+    /// target (ADR 0016 — Wallace's method).
+    ///
+    /// **Nothing in it depends on the magnification**: cubics become quadratics once,
+    /// at upload, so a frame at 100× re-uses what a frame at 1× built, and a zoom
+    /// gesture — where every cached tile is cold on every frame — costs the same as
+    /// standing still. Its weakness is the other end: coverage is sampled rather than
+    /// exact ([`Options::coverage_samples`] levels, not 256), and there is no atlas in
+    /// front of it, so a dense page of small text pays per glyph per frame.
+    ///
+    /// Commands under a non-rectangular clip still take the CPU lane, because the
+    /// residue multiply is CPU-side; both kinds of tile share one sheet.
+    Gpu,
+}
+
+/// The GPU lane's default sample count: sixteen, on a 4×4 grid.
+///
+/// Seventeen coverage levels. Wallace's article reached eight samples by packing them
+/// into the bits of one byte; a float target has no such ceiling, and sixteen is where
+/// a half-covered pixel lands on exactly 128 while the pass still runs four times.
+pub const DEFAULT_COVERAGE_SAMPLES: u32 = 16;
+
 /// Construction options.
 ///
 /// A plain value: budgets, an adapter filter, the glyph quantum. No `wgpu` handle
@@ -100,6 +137,18 @@ pub struct Options {
     /// caller's own measurement). Quantising moves rendered text by at most half a
     /// quantum, which is why this is exposed rather than chosen silently (§4.5).
     pub glyph_quantum: Option<u16>,
+    /// Which lane produces coverage ([`Coverage`]); [`Coverage::Cpu`] by default,
+    /// which is the lane whose bytes are exact and whose output the caller's CPU
+    /// oracle agrees with.
+    pub coverage: Coverage,
+    /// How many samples the GPU lane takes per pixel, rounded down to a square and
+    /// clamped to 4..=64 ([`DEFAULT_COVERAGE_SAMPLES`]).
+    ///
+    /// Coverage has `samples + 1` levels rather than 256, so this is the quality knob
+    /// and it costs **time, not memory**: four samples fit one `rgba16float` texel, and
+    /// a frame runs the pass once per group of four. Ignored by [`Coverage::Cpu`],
+    /// whose coverage is analytic.
+    pub coverage_samples: u32,
 }
 
 impl Default for Options {
@@ -110,6 +159,8 @@ impl Default for Options {
             max_resource_bytes: DEFAULT_MAX_RESOURCE_BYTES,
             atlas_budget: DEFAULT_ATLAS_BUDGET,
             glyph_quantum: Some(DEFAULT_GLYPH_QUANTUM),
+            coverage: Coverage::Cpu,
+            coverage_samples: DEFAULT_COVERAGE_SAMPLES,
         }
     }
 }

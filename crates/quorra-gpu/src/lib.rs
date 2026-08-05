@@ -58,8 +58,8 @@ pub use error::{DeviceError, RenderError, ResourceProblem, SurfaceProblem};
 pub use frame::{Counters, Frame, Raster, TimingProvenance, Timings};
 pub use report::{Report, ReportKind};
 pub use startup::{
-    DEFAULT_ATLAS_BUDGET, DEFAULT_GLYPH_QUANTUM, DEFAULT_MAX_FRAME_BYTES,
-    DEFAULT_MAX_RESOURCE_BYTES, Options, StartupTimings, create_instance,
+    Coverage, DEFAULT_ATLAS_BUDGET, DEFAULT_COVERAGE_SAMPLES, DEFAULT_GLYPH_QUANTUM,
+    DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_RESOURCE_BYTES, Options, StartupTimings, create_instance,
 };
 pub use target::Target;
 pub use viewport::Viewport;
