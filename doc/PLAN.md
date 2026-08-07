@@ -15,6 +15,16 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A device no longer outlives its own thread** (2026-08-07, ADR 0018): the warm-up
+thread was detached, so a device dropped before it was warm — which is what probing
+adapters does, and what a host does when it constructs a device, dislikes a limit and
+falls back — could reach `exit()` with a thread still inside the driver, and Mesa's own
+atexit teardown then crashed the process. `tests/device_lifecycle.rs` reproduced it at
+**13 of 15 runs**, SIGSEGV or SIGABRT in `quorra-warm-up`, always *after* every test in
+the binary had passed, which is why nothing had ever caught it. `Device` now holds the
+`JoinHandle` and joins it on drop: ~5 ms added to a device dropped before it is warm,
+nothing at all to one dropped after, and nothing new blocks during construction.
+
 **A frame is charged for what it allocates, and a CPU-lane frame allocates no winding
 texture** (2026-08-05): the caller's 974-document corpus gate went from one refusal to
 six the moment its lock moved onto the per-frame coverage lane, and all five new ones

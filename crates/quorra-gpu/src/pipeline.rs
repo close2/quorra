@@ -8,7 +8,9 @@
 //! - **No pipeline compilation on the critical path of device construction.**
 //!   `PipelineStore::new` creates nothing on the GPU; the warm set compiles on a
 //!   background thread (`PipelineStore::spawn_warm_up`), and its duration lands in
-//!   `StartupTimings::pipeline_compilation`.
+//!   `StartupTimings::pipeline_compilation`. Nobody waits on that thread — but the
+//!   device *owns* it and joins it when dropped, because a thread inside the driver
+//!   may not outlive the device it compiles for (ADR 0018).
 //! - **Compiled lazily.** A render that needs a pipeline the warm thread has not
 //!   already produced compiles it on the spot — correct frames, sooner, at a one-off
 //!   cost the frame's `Timings::phases` names — and every later frame finds it cached.
@@ -180,17 +182,23 @@ impl PipelineStore {
     /// thread: if the host cannot spawn one, the warm set compiles inline instead —
     /// construction blocks for the compile, which is the documented cost of a host
     /// with no threads to give, and `is_warm` keeps meaning what it says.
-    pub(crate) fn spawn_warm_up(self: &Arc<Self>) {
+    ///
+    /// The handle goes to the [`Device`], which joins it when it is dropped. Nothing
+    /// *waits* on it — completion is observed through `is_warm`/`wait_until_warm`, and
+    /// a frame that arrives early compiles what it needs on the spot — but a thread
+    /// inside the driver must not outlive the device it is compiling for (ADR 0018).
+    ///
+    /// [`Device`]: crate::device::Device
+    pub(crate) fn spawn_warm_up(self: &Arc<Self>) -> Option<thread::JoinHandle<()>> {
         let store = Arc::clone(self);
         let spawned = thread::Builder::new()
             .name("quorra-warm-up".into())
             .spawn(move || store.warm_up_now());
-        if spawned.is_err() {
+        let Ok(handle) = spawned else {
             self.warm_up_now();
-        }
-        // The JoinHandle is dropped deliberately: completion is observed through
-        // `is_warm`/`wait_until_warm`, and rendering does not depend on the thread —
-        // a frame that arrives early compiles what it needs on the spot.
+            return None;
+        };
+        Some(handle)
     }
 
     /// The warm-up itself: the two over-lanes a page of text needs (§7 — the

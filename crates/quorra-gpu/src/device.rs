@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use quorra_scene::Scene;
@@ -69,6 +70,11 @@ pub struct Device {
     description: String,
     limits: Limits,
     pipelines: Arc<PipelineStore>,
+    /// The warm-up thread, held so that [`Drop`] can join it: a thread compiling
+    /// inside the driver may not outlive the device it compiles for (ADR 0018).
+    /// `None` when the host could not give us a thread and the warm set compiled
+    /// inline.
+    warm_up: Option<thread::JoinHandle<()>>,
     resources: ResourceStore,
     atlas: AtlasStore,
     atlas_texture: Option<(wgpu::Texture, wgpu::TextureView)>,
@@ -311,7 +317,7 @@ impl Device {
             });
 
         let pipelines = PipelineStore::new(gpu.clone());
-        pipelines.spawn_warm_up();
+        let warm_up = pipelines.spawn_warm_up();
 
         // A sampler is a descriptor, not a compilation: creating it here costs
         // startup nothing measurable and spares every frame an Option.
@@ -339,6 +345,7 @@ impl Device {
             description,
             limits,
             pipelines,
+            warm_up,
             resources: ResourceStore::new(options.max_resource_bytes),
             atlas: AtlasStore::new(options.atlas_budget, max_dimension),
             atlas_texture: None,
@@ -1707,6 +1714,26 @@ impl Device {
         // Just created above when absent.
         #[allow(clippy::expect_used)]
         self.dummy_texture.clone().expect("created above")
+    }
+}
+
+/// Dropping a device waits for its warm-up thread, and for nothing else.
+///
+/// A thread compiling a pipeline is *inside the driver*, and a driver that is torn
+/// down — by this device's release, or by `exit()` running the loader's own atexit
+/// handlers — while one of its threads is still in there crashes the process. That is
+/// not hypothetical: on this machine, thirteen runs in fifteen of a test that built
+/// devices and dropped them without rendering died in `quorra-warm-up`, after every
+/// test in them had passed (`tests/device_lifecycle.rs`). ADR 0018 has the
+/// reproduction and why the wait is bounded by a compile nobody else waits on.
+impl Drop for Device {
+    fn drop(&mut self) {
+        if let Some(handle) = self.warm_up.take() {
+            // The thread's body cannot panic — it compiles two pipelines and sets two
+            // fields — and a device being dropped has no one left to report to if it
+            // did. `is_warm` would stay false, which is the honest residue.
+            drop(handle.join());
+        }
     }
 }
 
