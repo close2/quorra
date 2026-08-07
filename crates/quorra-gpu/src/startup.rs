@@ -18,11 +18,15 @@
 //!   `wgpu::Instance` is `Send + Sync`; the caller measured ~20 ms of a 145 ms launch
 //!   in the overlap.
 //!
-//! What is *not* here, deliberately: a backend-set knob. Restricting the instance to
-//! Vulkan halves `Instance::new` and gives every millisecond back in
-//! `request_adapter` — the caller measured both halves on this machine's three
-//! adapters, and the total is the invariant (their feedback §8.3). A knob whose only
-//! evidence is a plausible argument is not a knob we add.
+//! - **Which driver stack talks to the hardware is the host's to say.**
+//!   [`create_instance_with`] takes the backend set; [`create_instance`] is it with
+//!   `Backends::all()` and is unchanged. This is an escape hatch from a driver, not a
+//!   speed knob — restricting the instance to Vulkan halves `Instance::new` and gives
+//!   every millisecond back in `request_adapter`, which the caller measured (their
+//!   feedback §8.3), so the total is the invariant. What it *is* for is the machine in
+//!   their §12, where wgpu reached an Intel Vulkan driver that crashed and nothing
+//!   could ask for the DX12 one. ADR 0017 records the shape and the two silences that
+//!   go with it: no backend field in [`Options`], and no `WGPU_BACKEND`.
 
 use std::time::Duration;
 
@@ -257,13 +261,71 @@ impl PreSteps {
 /// **One instance per process when measuring.** A second instance in the same process
 /// finds the driver loader warm and reports a fraction of the true cost — the caller
 /// spent a first version of its bring-up harness on exactly that mistake.
+///
+/// Every backend `wgpu` was built with is loaded. To name a subset — because a machine
+/// has a driver that must be avoided — use [`create_instance_with`].
 #[must_use]
 pub fn create_instance() -> wgpu::Instance {
-    wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle())
+    create_instance_with(wgpu::Backends::all())
+}
+
+/// [`create_instance`], restricted to the backends the host names: `Backends::DX12` on
+/// a Windows machine whose Vulkan driver crashes, `Backends::VULKAN` on a machine
+/// whose GL driver does.
+///
+/// **Why this is a parameter rather than a preference.** One GPU is enumerated once per
+/// backend that can drive it, under the *device's* name both times, so
+/// [`Options::adapter`] cannot express "this GPU, through DX12" — it selects hardware,
+/// and the question here is which driver stack talks to it. With no restriction the
+/// choice falls to wgpu's hub order, where Vulkan precedes DX12; that is how the
+/// caller's project owner reached a crashing Intel Vulkan driver on Windows with no way
+/// to ask for the other one (their feedback §12). The backend set belongs to the
+/// instance, which is made before an [`Options`] exists, so it is an argument here and
+/// nowhere else (ADR 0017).
+///
+/// **Not a speed knob**, and the measurement is in ADR 0014 §3: restricting to Vulkan
+/// halves `Instance::new` and gives every millisecond of it back in `request_adapter`.
+/// A host with no driver to avoid should call [`create_instance`].
+///
+/// **The environment is not consulted**, here or in [`create_instance`] — this argument
+/// is the only route, deliberately (ADR 0017). A host that wants `WGPU_BACKEND` honoured
+/// can say so in one line, and keep its own command line above it:
+///
+/// ```no_run
+/// # use quorra_gpu::{create_instance, create_instance_with, wgpu};
+/// let from_flag: Option<wgpu::Backends> = None; // whatever `--backend` parsed to
+/// let instance = match from_flag.or_else(wgpu::Backends::from_env) {
+///     Some(backends) => create_instance_with(backends),
+///     None => create_instance(),
+/// };
+/// ```
+///
+/// # Naming a set this machine cannot supply
+///
+/// Is not an error here — an instance with no usable backend is constructible, and
+/// nothing has been asked of it yet. It becomes [`DeviceError::NoAdapter`] at the
+/// constructor that uses it ([`Device::headless_with_instance`],
+/// [`Device::for_surface_with_instance`]), with an **empty** `available` list; on a
+/// machine that visibly has a GPU, that emptiness is the signature of this mistake
+/// rather than of a broken driver.
+///
+/// [`Device::headless_with_instance`]: crate::device::Device::headless_with_instance
+/// [`Device::for_surface_with_instance`]: crate::device::Device::for_surface_with_instance
+#[must_use]
+pub fn create_instance_with(backends: wgpu::Backends) -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    })
 }
 
 /// Choose the adapter: the [`Options::adapter`] filter when there is one, wgpu's own
 /// preference when there is not.
+///
+/// The `Backends::all()` passed to `enumerate_adapters` is not a second backend
+/// decision: `wgpu::Instance` only holds the backends it was built with, so the mask
+/// means "everything this instance has" and [`create_instance_with`]'s restriction is
+/// already inside it.
 pub(crate) fn select_adapter(
     instance: &wgpu::Instance,
     surface: Option<&wgpu::Surface<'static>>,

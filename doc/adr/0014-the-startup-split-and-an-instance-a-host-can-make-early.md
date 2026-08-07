@@ -1,7 +1,10 @@
 # ADR 0014 — The startup split, and an instance a host can make early
 
 Status: accepted, 2026-08-04. Decided from the caller's feedback §8, which is a
-request rather than a defect report.
+request rather than a defect report. §3 is superseded in part by ADR 0017: the backend
+set became nameable, at the instance and not in `Options`, for a reason §3 never
+weighed — a driver that crashes — and §3's measurement, which says there is no *speed*
+to win, is unchanged.
 
 ## Context
 
@@ -81,6 +84,12 @@ gives every millisecond of it back in `request_adapter` (34–36 ms → 39–43 
 total is the invariant. So the knob is **not added**, and this paragraph is the
 record that the silence is deliberate — the measurement exists, and it says there is
 nothing to win.
+
+*Superseded in part, 2026-08-07 (ADR 0017).* `create_instance_with(backends)` now
+exists. Nothing above is retracted: it is still true that there is no startup time in
+restricting the set, and there is still no backend field in `Options`. What this
+paragraph did not consider is a machine whose default driver **crashes**, where the
+question is not what the choice costs but whether it can be expressed at all.
 
 ## What it cost
 

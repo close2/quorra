@@ -263,9 +263,28 @@ impl Device {
     /// The names of every adapter wgpu can see on this machine, for choosing an
     /// [`Options::adapter`] filter — and for the cross-adapter byte-equality gate,
     /// which renders on all of them (§4.6, §11.4).
+    ///
+    /// Every backend, because the instance is this function's own. A host that
+    /// restricted the backend set ([`startup::create_instance_with`]) must ask
+    /// [`Device::adapter_names_on`] instead, or it will offer a choice its own
+    /// constructors cannot honour.
     #[must_use]
     pub fn adapter_names() -> Vec<String> {
         let instance = startup::create_instance();
+        Self::adapter_names_on(&instance)
+    }
+
+    /// The names of every adapter *this instance* can see: the same list
+    /// [`Device::adapter_names`] returns, narrowed to the backends the instance was
+    /// built with.
+    ///
+    /// Which is why it takes the instance rather than a backend set — it answers with
+    /// what the constructors given the same instance will actually choose among, and
+    /// nothing else can promise that. One GPU appears once per backend that can drive
+    /// it, under the same device name each time, so a duplicated name in the result of
+    /// [`Device::adapter_names`] is that and not a second card.
+    #[must_use]
+    pub fn adapter_names_on(instance: &wgpu::Instance) -> Vec<String> {
         pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
             .iter()
             .map(|adapter| adapter.get_info().name)

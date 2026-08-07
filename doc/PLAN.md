@@ -15,7 +15,26 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
-**A device no longer outlives its own thread** (2026-08-07, ADR 0018): the warm-up
+**Feedback §12 is answered — a host can name the backend set** (2026-08-07, ADR 0017):
+the caller's project owner ran their viewer on a Windows machine with Intel graphics
+and it crashed inside the **Vulkan driver**, and nothing here could ask for the DX12
+one. `create_instance()` took `Backends::all()`; `Options::adapter` filters on the
+*device's* name, which one GPU reports once per backend that can drive it, so it cannot
+express "this GPU, through DX12"; and with no filter wgpu's hub order puts Vulkan
+first. **`create_instance_with(backends)`** is the whole answer — `create_instance()`
+is unchanged and is now that function with `Backends::all()` — plus
+`Device::adapter_names_on`, which lists what a *given* instance can see so a host
+cannot offer a choice its own constructors could not honour. The environment is
+deliberately **not** read: the caller asked that the `WGPU_BACKEND` question be decided
+rather than defaulted, and the decision is that the argument is the only route, with
+`Backends::from_env()` one line away in a host that wants it *under* its own command
+line rather than over it. ADR 0014 §3 is superseded in part — it declined a backend
+knob as a *startup* optimisation, that measurement stands, and it never weighed a
+driver that crashes. No machine here runs Windows, so the mechanism is exercised with
+the backends this one has (`tests/backend_choice.rs`).
+
+**A device no longer outlives its own thread** (2026-08-07, ADR 0018), found while
+writing that test and older than it: the warm-up
 thread was detached, so a device dropped before it was warm — which is what probing
 adapters does, and what a host does when it constructs a device, dislikes a limit and
 falls back — could reach `exit()` with a thread still inside the driver, and Mesa's own
@@ -128,8 +147,9 @@ RADV here, instance creation is ~80% of what bring-up blocks for (22.9–29.8 ms
 29.4–36.1 ms), and hoisting it leaves **5.1–9.2 ms** to pay after the window exists.
 `instance_creation` is then `None` rather than zero — the step happened, on someone
 else's clock, and a struct for attribution may not claim otherwise. The backend knob
-§8.3 talks a host out of is **not** added, and ADR 0014 records the caller's
-measurement that says why. `examples/startup.rs` is the measurement, one
+§8.3 talks a host out of was **not** added *for speed*, and ADR 0014 records the
+caller's measurement that says there is none to win; it arrived later and for another
+reason entirely, in ADR 0017 above. `examples/startup.rs` is the measurement, one
 configuration per process by design.
 
 **Feedback §7 is answered — a refusal costs the surface nothing** (2026-08-04): the
