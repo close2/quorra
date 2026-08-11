@@ -15,6 +15,20 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**Feedback §17 is answered with no change at all — two rasters of one page already
+work** (2026-08-11): §11.4.7 puts a colour space under the whole page, and a
+four-component one is three plus one, so the page is interpreted twice and the two
+rasters are put together by a per-pixel conversion afterwards. §17 offered to close
+itself if two `Target::Readback` calls against one device were simply supported and
+cheap. They are, and `tests/two_rasters.rs` is the evidence rather than the assertion:
+both rasters come back whole, resources are device-scoped so the second display list
+references the first's uploads, neither pass changes what the other draws — and **the
+second interpretation pays no geometry at all**, because the atlas key is
+`(outline, linear part, phase, rule)` and colour is not in it. Two caveats stated rather
+than buried: a frame whose tiles overflow the atlas can leave the next pass cold
+(ADR 0024 narrowed when that happens), and each pass pays its own readback, which is
+irreducible when both rasters are wanted.
+
 **Feedback §14 is answered — §11.4.6's two stages can be asked for by name**
 (2026-08-11, ADR 0025): `Compose::Src` reads an element's shape off the alpha it is drawn
 with, which is right where they are the same quantity and wrong where §11.6.4.2's shape
