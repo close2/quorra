@@ -67,12 +67,32 @@ pub(crate) fn read_back(
         },
     );
     queue.submit([encoder.finish()]);
-    let padded = read_buffer(gpu, &buffer)?;
-    Ok(Raster::new(
-        width,
-        height,
-        demultiply(&padded, width, height, bytes_per_row),
-    ))
+    // Converted straight out of the mapped range: `read_buffer`'s `to_vec` would be a
+    // second full-target copy — 8 MB at page size — of bytes this reads once and
+    // discards (ADR 0022).
+    let pixels = map_and_convert(gpu, &buffer, width, height, bytes_per_row)?;
+    Ok(Raster::new(width, height, pixels))
+}
+
+/// Map the copy-out buffer and demultiply straight from it, without a staging `Vec`.
+fn map_and_convert(
+    gpu: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+    bytes_per_row: u32,
+) -> Result<Vec<u8>, RenderError> {
+    await_map(gpu, buffer)?;
+    let pixels = {
+        let view = buffer
+            .get_mapped_range(..)
+            .map_err(|e| RenderError::ReadbackFailed {
+                detail: e.to_string(),
+            })?;
+        demultiply(&view, width, height, bytes_per_row)
+    };
+    buffer.unmap();
+    Ok(pixels)
 }
 
 /// Map a `MAP_READ` buffer and copy its bytes out.
@@ -80,6 +100,21 @@ pub(crate) fn read_buffer(
     gpu: &wgpu::Device,
     buffer: &wgpu::Buffer,
 ) -> Result<Vec<u8>, RenderError> {
+    await_map(gpu, buffer)?;
+    let bytes = {
+        let view = buffer
+            .get_mapped_range(..)
+            .map_err(|e| RenderError::ReadbackFailed {
+                detail: e.to_string(),
+            })?;
+        view.to_vec()
+    };
+    buffer.unmap();
+    Ok(bytes)
+}
+
+/// Ask for the map and block until the device has done it.
+fn await_map(gpu: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), RenderError> {
     let (sender, receiver) = std::sync::mpsc::channel();
     buffer.map_async(wgpu::MapMode::Read, .., move |result| {
         // The poll below drives this callback; a send failure would mean the
@@ -103,51 +138,82 @@ pub(crate) fn read_buffer(
             });
         }
     }
-    let bytes = {
-        let view = buffer
-            .get_mapped_range(..)
-            .map_err(|e| RenderError::ReadbackFailed {
-                detail: e.to_string(),
-            })?;
-        view.to_vec()
-    };
-    buffer.unmap();
-    Ok(bytes)
+    Ok(())
+}
+
+/// The rounding rule of `doc/adr/0005`, for every (alpha, channel) pair there is:
+/// `straight = round(255·c / a)`, computed in integers as `(c·255 + a/2) / a` and
+/// clamped to 255 — the clamp covers the ≤1-ulp cases where unorm blending leaves a
+/// channel a hair above its alpha.
+///
+/// 64 KiB, built at compile time, indexed `[alpha << 8 | channel]`. It exists because
+/// the loop below ran three integer divisions per pixel — six million on a page — and a
+/// division is the most expensive integer operation a CPU has. The table is not an
+/// approximation of the rule: it *is* the rule, evaluated ahead of time, which
+/// `demultiply_matches_the_documented_division` checks over all 65 536 pairs
+/// (ADR 0022).
+static STRAIGHT: [u8; 65_536] = build_straight_table();
+
+// The 64 KiB array is the point of the function, and it is a `static`: the local is
+// the initialiser, evaluated at compile time and never on a stack.
+#[allow(clippy::cast_possible_truncation)] // every value is clamped to 255 first
+#[allow(clippy::large_stack_arrays)]
+// Both loop counters stop at 256 and `channel * 255 + alpha / 2` is at most 65 152, so
+// nothing here can overflow; a const fn that panicked would fail the build rather than
+// the frame, which is the strongest form this bound could be checked in.
+#[allow(clippy::arithmetic_side_effects)]
+const fn build_straight_table() -> [u8; 65_536] {
+    let mut table = [0_u8; 65_536];
+    let mut alpha = 1_usize; // alpha 0 keeps its row of zeros: a transparent pixel has
+    while alpha < 256 {
+        // no straight colour, and the loop below never reads that row.
+        let mut channel = 0_usize;
+        while channel < 256 {
+            let straight = (channel * 255 + alpha / 2) / alpha;
+            table[alpha << 8 | channel] = if straight > 255 { 255 } else { straight as u8 };
+            channel += 1;
+        }
+        alpha += 1;
+    }
+    table
 }
 
 /// Premultiplied RGBA8 rows (with copy padding) to straight-alpha RGBA8, tightly
 /// packed. The conversion happens exactly once, at this boundary (§3 of the brief).
 ///
-/// The rounding rule is ours and is documented in `doc/adr/0005`:
-/// `straight = round(255·c / a)`, computed in integers as `(c·255 + a/2) / a`, clamped
-/// to 255 — the clamp covers the ≤1-ulp cases where unorm blending leaves a channel a
-/// hair above its alpha.
-// Bounds make the arithmetic infallible: c, a ≤ 255 so c·255 + a/2 ≤ 65 152 < 2³²;
-// the divisor is nonzero on its branch; row indexing is bounded by the buffer layout
-// the copy just wrote. Stated here once rather than checked per pixel in a hot loop.
+/// Three shapes of pixel, in the order a real page has them: fully transparent (most
+/// of a page of text), fully opaque (a filled background, and every pixel of a photo),
+/// and partial. The first two are byte copies; only the third reaches the table.
+// Bounds make the arithmetic infallible: `alpha << 8 | channel` is below 65 536 by
+// construction, and row indexing is bounded by the buffer layout the copy just wrote.
+// Stated here once rather than checked per pixel in a hot loop.
 #[allow(clippy::arithmetic_side_effects)]
 fn demultiply(padded: &[u8], width: u32, height: u32, bytes_per_row: u32) -> Vec<u8> {
     let width = width as usize;
     let height = height as usize;
     let bytes_per_row = bytes_per_row as usize;
     let row_bytes = width * 4;
-    let mut pixels = Vec::with_capacity(row_bytes * height);
+    // Written through a slice rather than `push`ed: eight million bounds-checked pushes
+    // is the shape of the loop, not the work in it.
+    let mut pixels = vec![0_u8; row_bytes * height];
     for row in 0..height {
         let start = row * bytes_per_row;
-        for pixel in padded[start..start + row_bytes].chunks_exact(4) {
-            let a = pixel[3];
-            if a == 0 {
-                pixels.extend_from_slice(&[0, 0, 0, 0]);
-            } else {
-                let alpha = u32::from(a);
-                for &channel in &pixel[..3] {
-                    let straight = (u32::from(channel) * 255 + alpha / 2) / alpha;
-                    // The min makes the cast total; see the bounds note above.
-                    #[allow(clippy::cast_possible_truncation)]
-                    pixels.push(straight.min(255) as u8);
-                }
-                pixels.push(a);
+        let source = &padded[start..start + row_bytes];
+        let destination = &mut pixels[row * row_bytes..(row + 1) * row_bytes];
+        for (pixel, out) in source.chunks_exact(4).zip(destination.chunks_exact_mut(4)) {
+            let alpha = pixel[3];
+            if alpha == 0 {
+                continue; // the destination is already zero
             }
+            if alpha == 255 {
+                out.copy_from_slice(pixel);
+                continue;
+            }
+            let row = usize::from(alpha) << 8;
+            out[0] = STRAIGHT[row | usize::from(pixel[0])];
+            out[1] = STRAIGHT[row | usize::from(pixel[1])];
+            out[2] = STRAIGHT[row | usize::from(pixel[2])];
+            out[3] = alpha;
         }
     }
     pixels
@@ -173,6 +239,25 @@ mod tests {
         assert_eq!(&out[4..8], &[10, 128, 255, 255]);
         // (64·255 + 64)/128 = 128; (1·255 + 64)/128 = 2; (128·255 + 64)/128 clamps to 255.
         assert_eq!(&out[8..12], &[128, 2, 255, 128]);
+    }
+
+    /// The table *is* the documented division, for every pair there is — the claim
+    /// that makes replacing six million divisions a shortcut rather than a change.
+    #[test]
+    #[allow(clippy::cast_possible_truncation)] // both counters are bounded by 255
+    fn demultiply_matches_the_documented_division() {
+        for alpha in 1_u32..=255 {
+            for channel in 0_u32..=255 {
+                let divided = ((channel * 255 + alpha / 2) / alpha).min(255) as u8;
+                let padded = [channel as u8, 0, 0, alpha as u8];
+                let out = demultiply(&padded, 1, 1, 4);
+                assert_eq!(
+                    out[0], divided,
+                    "alpha {alpha}, channel {channel}: table {} against division {divided}",
+                    out[0]
+                );
+            }
+        }
     }
 
     /// Copy padding between rows is dropped, not read into the raster.

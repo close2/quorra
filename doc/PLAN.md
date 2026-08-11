@@ -15,6 +15,23 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**The readback reads the pixels once, and divides never** (2026-08-11, ADR 0022): the
+caller's `performance.md` has quorra at 2.5–3× their multi-threaded `tiny-skia` on an
+offscreen corpus, "dominated by a per-frame floor that does not grow with pixels".
+Measured here, the floor is **the readback and almost nothing else**: at 1191×1684 a
+frame with one rectangle cost 2.44 ms of which 2.05 was readback, a dense page 4.94 ms
+of which 3.84 — while the same page to a `Texture` target cost 0.47 ms end to end. Two
+things inside it, neither of them the device: the mapped range was copied into a `Vec`
+the conversion then read once and discarded (8 MB), and the conversion ran three integer
+divisions per pixel — six million on a page — writing its output through eight million
+`push` calls. Now it converts straight out of the mapped range, through a 64 KiB table
+built at compile time from ADR 0005's rule verbatim (and held to it over all 65 536
+pairs, because a table that agreed only on a fixture's pixels would be curve-fitting),
+writing through a slice with transparent pixels writing nothing at all. **A dense page's
+offscreen frame is three times faster: 4.94 → 1.65 ms**, and the remainder is memory
+bandwidth. `tests/perf_gate.rs` has a readback gate now, with both numbers in its
+failure message.
+
 **A frame's layer textures are a depth, not a count** (2026-08-11, ADR 0020): every plan
 renders into a ping-pong pair of full-target textures, and the compositor created one
 pair per plan — all of them at once, and priced that way. A plan is a group *or* an
