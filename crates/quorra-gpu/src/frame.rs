@@ -149,6 +149,16 @@ pub struct Counters {
     pub commands_culled: u32,
     /// Bytes scheduled for CPU→GPU transfer this frame.
     pub bytes_uploaded: u64,
+    /// Full-target internal layer textures this frame allocated — the compositor's
+    /// peak, not its total (ADR 0020).
+    ///
+    /// A group and every element with a non-Normal blend mode is a plan, and each plan
+    /// renders into a ping-pong pair; the pairs are reused between siblings, so this is
+    /// twice the **depth** of the plan tree rather than twice its size. It is the
+    /// number `Limits::max_frame_bytes` is spent on for a page of nested artwork, which
+    /// is why it is a counter rather than an inference: a frame that reports 4 here
+    /// allocated 4, whatever its group count says.
+    pub layer_textures: u32,
 }
 
 /// A drawn frame: what it cost, what it counted, and what it could not do as asked.

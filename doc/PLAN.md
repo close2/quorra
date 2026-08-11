@@ -15,6 +15,19 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A frame's layer textures are a depth, not a count** (2026-08-11, ADR 0020): every plan
+renders into a ping-pong pair of full-target textures, and the compositor created one
+pair per plan — all of them at once, and priced that way. A plan is a group *or* an
+element with a non-Normal blend mode, and a pair is 16.05 MB at 1191×1684, so the
+default 256 MiB budget held **sixteen plans**: eight groups each holding one blended
+rectangle — ordinary Illustrator artwork — was `FrameBudgetExceeded { needed: 272767584 }`.
+The refusal was honest and its model was wrong. A child's pair is dead the moment its
+parent's composite has read it, so siblings share: the peak is the tree's **depth**, the
+budget prices that, and `Counters::layer_textures` reports what was actually allocated.
+Sixty-four such groups now draw in six textures. What still costs is nesting, which the
+builder bounds at 16 — and that is the case bbox-bounded layers would answer, recorded
+in the ADR rather than taken now.
+
 **Feedback §16 is answered — a group's buffer can begin as a copy of what is under it**
 (2026-08-11, ADR 0019): `GroupSpec` gains `isolated`, Table 145's `/I` and the one entry
 the vocabulary was missing. ISO 32000-2 §11.4.4's non-isolated group composites its

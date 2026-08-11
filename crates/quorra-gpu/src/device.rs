@@ -36,6 +36,7 @@ use crate::compose::{self, Executor};
 use crate::encode::{self, ChildOp, Encoded, ImageOp, MaskPlan, PaintSource, ShadedOp};
 use crate::error::{DeviceError, RenderError};
 use crate::frame::{Counters, Frame, Payload, Raster, TimingProvenance, Timings};
+use crate::layers::{self, LayerPool};
 use crate::pipeline::{PipelineStore, WARM_FORMAT};
 use crate::readback;
 use crate::report::{Report, ReportKind};
@@ -627,7 +628,7 @@ impl Device {
         // A patched frame renders through the root pair even when flat.
         let patches = matches!(&damage, DamagePlan::Patch { rects, .. } if !rects.is_empty());
         let internal_bytes =
-            compose::internal_texture_bytes(&encoded, viewport.width, viewport.height, patches);
+            layers::internal_texture_bytes(&encoded, viewport.width, viewport.height, patches);
         if internal_bytes > self.limits.max_frame_bytes {
             return Err(RenderError::FrameBudgetExceeded {
                 needed: internal_bytes,
@@ -651,7 +652,7 @@ impl Device {
         let bound = self.bind_target(&into, viewport)?;
 
         let query = self.make_pass_query();
-        let (execute_wall, mut phases) =
+        let (execute_wall, mut phases, layer_textures) =
             match self.run_frame(&encoded, &bound, upload, query.as_ref(), &damage) {
                 Ok(ran) => ran,
                 Err(error) => return Err(self.abandon_frame(bound, error)),
@@ -711,6 +712,7 @@ impl Device {
                 segments: encoded.segments,
                 commands_culled: encoded.commands_culled,
                 bytes_uploaded: upload_bytes,
+                layer_textures,
                 ..Counters::default()
             },
             reports,
@@ -733,7 +735,7 @@ impl Device {
         upload: Upload,
         query: Option<&PassQuery>,
         damage: &DamagePlan,
-    ) -> Result<(Duration, FramePhases), RenderError> {
+    ) -> Result<(Duration, FramePhases, u32), RenderError> {
         let width = bound.texture().width();
         let height = bound.texture().height();
         let mut recorder = self
@@ -746,18 +748,6 @@ impl Device {
             DamagePlan::Patch { bbox, rects } if !rects.is_empty() => Some((*bbox, rects)),
             _ => None,
         };
-        let pairs = if flat && patch.is_none() {
-            Vec::new()
-        } else {
-            (0..=encoded.layers.len())
-                .map(|_| {
-                    [
-                        self.create_internal_texture("quorra layer", width, height, WARM_FORMAT),
-                        self.create_internal_texture("quorra layer", width, height, WARM_FORMAT),
-                    ]
-                })
-                .collect()
-        };
         let dummy_view = self.ensure_dummy();
         let mask_count = encoded.mask_plans.len();
         let mut executor = Executor {
@@ -765,7 +755,9 @@ impl Device {
             encoded,
             width,
             height,
-            pairs,
+            // Empty: a plan's pair is created on its first acquire, so a flat frame
+            // creates none at all (ADR 0020).
+            pool: LayerPool::new(),
             mask_views: (0..mask_count).map(|_| None).collect(),
             rect_buffer: upload.rect_instances,
             quad_buffer: upload.quad_instances,
@@ -788,10 +780,10 @@ impl Device {
             // every pass scissored to the damage bounding box, then replace exactly
             // the damage rectangles on the caller's retained texture.
             executor.realise_masks(&mut recorder)?;
-            let root_view = executor.render_plan(&mut recorder, 0, false)?;
+            let root = executor.render_plan(&mut recorder, 0, None)?;
             executor.patch_to_target(
                 &mut recorder,
-                &root_view,
+                &root.view(),
                 &target_view,
                 target_format,
                 rects,
@@ -805,10 +797,12 @@ impl Device {
             executor.draw_pass(&mut recorder, &target_view, target_format, true, &root_ops)?;
         } else {
             executor.realise_masks(&mut recorder)?;
-            let root_view = executor.render_plan(&mut recorder, 0, false)?;
-            executor.blit_to_target(&mut recorder, &root_view, &target_view, target_format);
+            let root = executor.render_plan(&mut recorder, 0, None)?;
+            executor.blit_to_target(&mut recorder, &root.view(), &target_view, target_format);
         }
         executor.end_stamp(&mut recorder, &target_view);
+        let layer_textures =
+            u32::try_from(executor.pool.peak().saturating_mul(2)).unwrap_or(u32::MAX);
         let phases = std::mem::take(&mut executor.phases);
         drop(executor);
         if let Some(q) = query {
@@ -816,7 +810,7 @@ impl Device {
             recorder.copy_buffer_to_buffer(&q.resolve, 0, &q.map, 0, 16);
         }
         let execute_wall = compose::submit_and_wait(self, recorder)?;
-        Ok((execute_wall, phases))
+        Ok((execute_wall, phases, layer_textures))
     }
 
     /// Decide how this frame treats the viewport's damage list (ADR 0012).

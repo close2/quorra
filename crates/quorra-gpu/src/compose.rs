@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use crate::device::{Device, PassQuery};
 use crate::encode::{Batch, BatchKind, ChildOp, DrawStyle, Encoded, ImageOp, Op, ShadedOp};
 use crate::error::RenderError;
+use crate::layers::{LayerPool, Pair};
 use crate::pipeline::Kind;
 
 /// One drawable item of a pass: an instanced lane batch, or a single-quad op
@@ -63,8 +64,9 @@ pub(crate) struct Executor<'a> {
     pub encoded: &'a Encoded,
     pub width: u32,
     pub height: u32,
-    /// Per-plan texture pairs: index 0 is the root, 1.. are `Encoded::layers`.
-    pub pairs: Vec<[wgpu::Texture; 2]>,
+    /// The frame's layer textures, acquired per plan and given back when the parent's
+    /// composite has read them (ADR 0020).
+    pub pool: LayerPool,
     /// Realised mask views by mask index.
     pub mask_views: Vec<Option<wgpu::TextureView>>,
     /// Lane instance buffers.
@@ -86,29 +88,18 @@ pub(crate) struct Executor<'a> {
     pub scissor: Option<[u32; 4]>,
 }
 
-/// How many internal textures this frame needs, for the budget check before any of
-/// them exist: two per plan (ping-pong) when layers are needed at all, plus one
-/// RGBA pair set and one R8 per used mask. `force_layers` prices the root pair a
-/// damage-patched flat frame renders through (ADR 0012).
-pub(crate) fn internal_texture_bytes(
-    encoded: &Encoded,
-    width: u32,
-    height: u32,
-    force_layers: bool,
-) -> u64 {
-    let per_layer = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(4);
-    let masks_used = encoded.mask_plans.iter().flatten().count() as u64;
-    let needs_layers = !encoded.layers.is_empty() || masks_used > 0 || force_layers;
-    if !needs_layers {
-        return 0;
+/// One plan's finished pixels, and the pair they are in — returned rather than the
+/// view alone, because the caller is what gives the pair back (ADR 0020).
+pub(crate) struct Rendered {
+    pair: Pair,
+    current: usize,
+}
+
+impl Rendered {
+    /// The texture holding this plan's result.
+    pub(crate) fn view(&self) -> wgpu::TextureView {
+        self.pair[self.current].create_view(&wgpu::TextureViewDescriptor::default())
     }
-    let plan_count = (encoded.layers.len() as u64).saturating_add(1);
-    plan_count
-        .saturating_mul(2)
-        .saturating_mul(per_layer)
-        .saturating_add(masks_used.saturating_mul(per_layer / 4))
 }
 
 impl Executor<'_> {
@@ -128,7 +119,8 @@ impl Executor<'_> {
                 continue;
             };
             // A soft mask's group renders on its own, onto transparency (§11.5).
-            let group_view = self.render_plan(recorder, plan.root.saturating_add(1), false)?;
+            let group = self.render_plan(recorder, plan.root.saturating_add(1), None)?;
+            let group_view = group.view();
             let mask_texture = self.device.create_internal_texture(
                 "quorra soft mask",
                 self.width,
@@ -165,34 +157,42 @@ impl Executor<'_> {
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
             drop(pass);
+            // The reduce has read it; the mask's own R8 is what outlives this loop.
+            self.pool.release(group.pair);
             self.mask_views[index] = Some(mask_view);
         }
         Ok(())
     }
 
-    /// Render one plan into its texture pair; returns the view holding the result.
+    /// Render one plan into a pair borrowed from the pool; returns the pair and which
+    /// of its two textures holds the result, for the caller to read and then release
+    /// (ADR 0020).
     ///
-    /// `pair_index` 0 is the root, `layers[i]` is `i + 1`. Recursion depth is the
-    /// scene's group depth, bounded at 16 by the builder.
+    /// `plan_index` 0 is the root, `layers[i]` is `i + 1`. Recursion depth is the plan
+    /// tree's depth, which the scene builder bounds.
     ///
-    /// `seeded` says the plan's first texture already holds this group's initial
-    /// backdrop — §11.4.4's non-isolated group, where the caller blitted the backdrop
-    /// in before recursing (ADR 0019). It means only "do not clear": every pass below
-    /// loads instead, and a group with no ops at all is then exactly its backdrop,
-    /// which is what `E(B)` with no elements is.
+    /// `seed` is §11.4.4's initial backdrop for a non-isolated group: the parent's
+    /// accumulated view, blitted in before anything draws (ADR 0019). `None` is
+    /// §11.4.5's transparency, and then the first pass clears instead.
     pub(crate) fn render_plan(
         &mut self,
         recorder: &mut wgpu::CommandEncoder,
-        pair_index: usize,
-        seeded: bool,
-    ) -> Result<wgpu::TextureView, RenderError> {
-        let plan = if pair_index == 0 {
+        plan_index: usize,
+        seed: Option<&wgpu::TextureView>,
+    ) -> Result<Rendered, RenderError> {
+        let plan = if plan_index == 0 {
             &self.encoded.root
         } else {
-            &self.encoded.layers[pair_index.saturating_sub(1)]
+            &self.encoded.layers[plan_index.saturating_sub(1)]
         };
+        let pair = self.pool.acquire(self.device, self.width, self.height);
         let mut current = 0_usize;
-        let mut cleared = seeded;
+        let mut cleared = false;
+        if let Some(backdrop) = seed {
+            let view = pair[0].create_view(&wgpu::TextureViewDescriptor::default());
+            self.seed_layer(recorder, backdrop, &view);
+            cleared = true;
+        }
         let mut op_index = 0;
         while op_index < plan.ops.len() {
             match &plan.ops[op_index] {
@@ -202,8 +202,7 @@ impl Executor<'_> {
                     while op_index < plan.ops.len() && !matches!(plan.ops[op_index], Op::Child(_)) {
                         op_index = op_index.saturating_add(1);
                     }
-                    let view = self.pairs[pair_index][current]
-                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    let view = pair[current].create_view(&wgpu::TextureViewDescriptor::default());
                     let run = run_ops(&plan.ops[run_start..op_index]);
                     self.draw_pass(
                         recorder,
@@ -217,51 +216,48 @@ impl Executor<'_> {
                 Op::Child(child) => {
                     let child_op = *child;
                     op_index = op_index.saturating_add(1);
+                    let backdrop_view =
+                        pair[current].create_view(&wgpu::TextureViewDescriptor::default());
                     if !cleared {
                         // The composite reads the backdrop, so it must exist even if
                         // nothing was drawn yet: clear it with an empty pass.
-                        let view = self.pairs[pair_index][current]
-                            .create_view(&wgpu::TextureViewDescriptor::default());
                         self.draw_pass(
                             recorder,
-                            &view,
+                            &backdrop_view,
                             wgpu::TextureFormat::Rgba8Unorm,
                             true,
                             &[],
                         )?;
                         cleared = true;
                     }
-                    let backdrop_view = self.pairs[pair_index][current]
-                        .create_view(&wgpu::TextureViewDescriptor::default());
                     // §11.4.4: a non-isolated group's elements composite onto the
                     // group's backdrop, so its buffer begins as a copy of what is under
                     // it. The composite that follows takes that contribution back out
                     // (ADR 0019), which is why this seeding is only half a change.
-                    let child_pair = child_op.layer.saturating_add(1);
-                    if !child_op.isolated {
-                        self.seed_layer(recorder, &backdrop_view, child_pair);
-                    }
-                    let child_view = self.render_plan(recorder, child_pair, !child_op.isolated)?;
+                    let seed = (!child_op.isolated).then_some(&backdrop_view);
+                    let child =
+                        self.render_plan(recorder, child_op.layer.saturating_add(1), seed)?;
                     let flip = 1_usize.saturating_sub(current);
-                    let out_view = self.pairs[pair_index][flip]
-                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    let out_view = pair[flip].create_view(&wgpu::TextureViewDescriptor::default());
                     self.composite_pass(
                         recorder,
                         &out_view,
                         &backdrop_view,
-                        &child_view,
+                        &child.view(),
                         &child_op,
                     );
+                    // Every pass that reads the child has been recorded; a sibling may
+                    // have its textures now.
+                    self.pool.release(child.pair);
                     current = flip;
                 }
             }
         }
         if !cleared {
-            let view = self.pairs[pair_index][current]
-                .create_view(&wgpu::TextureViewDescriptor::default());
+            let view = pair[current].create_view(&wgpu::TextureViewDescriptor::default());
             self.draw_pass(recorder, &view, wgpu::TextureFormat::Rgba8Unorm, true, &[])?;
         }
-        Ok(self.pairs[pair_index][current].create_view(&wgpu::TextureViewDescriptor::default()))
+        Ok(Rendered { pair, current })
     }
 
     /// One render pass of lane batches and single-quad ops onto `view`. Public to
@@ -495,9 +491,8 @@ impl Executor<'_> {
         &mut self,
         recorder: &mut wgpu::CommandEncoder,
         backdrop: &wgpu::TextureView,
-        child_pair: usize,
+        into: &wgpu::TextureView,
     ) {
-        let view = self.pairs[child_pair][0].create_view(&wgpu::TextureViewDescriptor::default());
         let bind = self.device.blit_bind(backdrop);
         let (pipeline, compiled) = self
             .device
@@ -510,7 +505,7 @@ impl Executor<'_> {
         let mut pass = recorder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("quorra seed non-isolated group"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
+                view: into,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
