@@ -211,6 +211,11 @@ pub(crate) struct ChildOp {
     pub residue_origin: [f32; 2],
     /// The group's soft mask, as a mask index.
     pub mask: Option<u32>,
+    /// §11.4.5's isolated group (the ordinary case) or §11.4.4's non-isolated one,
+    /// whose layer is seeded with the backdrop and interpolated back onto it
+    /// (ADR 0019). The implicit one-element groups §11.3.5 needs for a blended
+    /// element are isolated: the wrapper is a device trick, not a PDF group.
+    pub isolated: bool,
 }
 
 /// A soft mask's realisation plan: its group's layer tree plus the reduction
@@ -760,9 +765,10 @@ impl Encoder<'_> {
                 let resolved = self.resolve_clip(spec.clip)?;
                 let outer_style = self.style;
                 let child = self.plan_child(|encoder| {
-                    // §11.4.6 binds inside this group; §11.4.1 makes it isolated, so
-                    // the initial backdrop is transparent and elements draw plainly
-                    // unless the group itself knocks out.
+                    // §11.4.6 binds inside this group. What the elements draw *onto* is
+                    // `spec.isolated`: transparent for §11.4.5's group, a copy of the
+                    // backdrop for §11.4.4's — a decision the compositor makes when it
+                    // seeds the layer, not one the elements can see.
                     encoder.style = if spec.knockout {
                         DrawStyle::Knockout
                     } else {
@@ -789,6 +795,7 @@ impl Encoder<'_> {
                     residue_rect,
                     residue_origin,
                     mask,
+                    isolated: spec.isolated,
                 }));
                 Ok(())
             }
@@ -899,6 +906,7 @@ impl Encoder<'_> {
                 residue_rect: [0.0; 4],
                 residue_origin: [0.0; 2],
                 mask,
+                isolated: true,
             }));
             return Ok(());
         }
@@ -1183,6 +1191,7 @@ impl Encoder<'_> {
                 residue_rect: [0.0; 4],
                 residue_origin: [0.0; 2],
                 mask,
+                isolated: true,
             }));
             return Ok(());
         }
@@ -1308,6 +1317,7 @@ impl Encoder<'_> {
                 residue_rect: [0.0; 4],
                 residue_origin: [0.0; 2],
                 mask,
+                isolated: true,
             }));
             return Ok(());
         }

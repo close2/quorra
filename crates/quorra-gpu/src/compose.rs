@@ -127,7 +127,8 @@ impl Executor<'_> {
             let Some(plan) = &self.encoded.mask_plans[index] else {
                 continue;
             };
-            let group_view = self.render_plan(recorder, plan.root.saturating_add(1))?;
+            // A soft mask's group renders on its own, onto transparency (§11.5).
+            let group_view = self.render_plan(recorder, plan.root.saturating_add(1), false)?;
             let mask_texture = self.device.create_internal_texture(
                 "quorra soft mask",
                 self.width,
@@ -173,10 +174,17 @@ impl Executor<'_> {
     ///
     /// `pair_index` 0 is the root, `layers[i]` is `i + 1`. Recursion depth is the
     /// scene's group depth, bounded at 16 by the builder.
+    ///
+    /// `seeded` says the plan's first texture already holds this group's initial
+    /// backdrop — §11.4.4's non-isolated group, where the caller blitted the backdrop
+    /// in before recursing (ADR 0019). It means only "do not clear": every pass below
+    /// loads instead, and a group with no ops at all is then exactly its backdrop,
+    /// which is what `E(B)` with no elements is.
     pub(crate) fn render_plan(
         &mut self,
         recorder: &mut wgpu::CommandEncoder,
         pair_index: usize,
+        seeded: bool,
     ) -> Result<wgpu::TextureView, RenderError> {
         let plan = if pair_index == 0 {
             &self.encoded.root
@@ -184,7 +192,7 @@ impl Executor<'_> {
             &self.encoded.layers[pair_index.saturating_sub(1)]
         };
         let mut current = 0_usize;
-        let mut cleared = false;
+        let mut cleared = seeded;
         let mut op_index = 0;
         while op_index < plan.ops.len() {
             match &plan.ops[op_index] {
@@ -223,10 +231,17 @@ impl Executor<'_> {
                         )?;
                         cleared = true;
                     }
-                    let child_view =
-                        self.render_plan(recorder, child_op.layer.saturating_add(1))?;
                     let backdrop_view = self.pairs[pair_index][current]
                         .create_view(&wgpu::TextureViewDescriptor::default());
+                    // §11.4.4: a non-isolated group's elements composite onto the
+                    // group's backdrop, so its buffer begins as a copy of what is under
+                    // it. The composite that follows takes that contribution back out
+                    // (ADR 0019), which is why this seeding is only half a change.
+                    let child_pair = child_op.layer.saturating_add(1);
+                    if !child_op.isolated {
+                        self.seed_layer(recorder, &backdrop_view, child_pair);
+                    }
+                    let child_view = self.render_plan(recorder, child_pair, !child_op.isolated)?;
                     let flip = 1_usize.saturating_sub(current);
                     let out_view = self.pairs[pair_index][flip]
                         .create_view(&wgpu::TextureViewDescriptor::default());
@@ -450,6 +465,52 @@ impl Executor<'_> {
             label: Some("quorra composite"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: out,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: stamp,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.apply_scissor(&mut pass);
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Seed a non-isolated group's buffer with its backdrop (§11.4.4): one REPLACE
+    /// blit of the parent's accumulated texture into the child's first texture.
+    ///
+    /// A blit rather than `copy_texture_to_texture` because it needs no copy usage on
+    /// every internal texture in the frame, and because it is scissored by the same
+    /// rule as every other pass — under a damage patch (ADR 0012) the seed is only the
+    /// pixels the frame is allowed to touch. `blit.wgsl` is a `textureLoad` and a store
+    /// with no blending, so between two `Rgba8Unorm` textures it is exact.
+    fn seed_layer(
+        &mut self,
+        recorder: &mut wgpu::CommandEncoder,
+        backdrop: &wgpu::TextureView,
+        child_pair: usize,
+    ) {
+        let view = self.pairs[child_pair][0].create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = self.device.blit_bind(backdrop);
+        let (pipeline, compiled) = self
+            .device
+            .pipelines()
+            .get(Kind::Blit, wgpu::TextureFormat::Rgba8Unorm);
+        if let Some(duration) = compiled {
+            self.phases.push(("pipeline compile (first use)", duration));
+        }
+        let stamp = self.pass_stamp();
+        let mut pass = recorder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("quorra seed non-isolated group"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {

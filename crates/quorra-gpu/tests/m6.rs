@@ -63,6 +63,7 @@ fn plain_group() -> GroupSpec {
         clip: None,
         knockout: false,
         mask: None,
+        isolated: true,
     }
 }
 

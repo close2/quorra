@@ -222,6 +222,7 @@ fn layered_scenes_patch_too() {
             clip: None,
             knockout: false,
             mask: None,
+            isolated: true,
         },
         |body| {
             body.rect(

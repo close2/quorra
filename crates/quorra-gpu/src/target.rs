@@ -18,6 +18,9 @@
 //! *isolated*, and a finished page is composited onto the medium by the caller after we
 //! return it — painting the medium first is a different picture. Every target is
 //! cleared to transparent before the scene draws, including a `Texture` the host owns.
+//! A non-isolated group inside the page (§11.4.4, ADR 0019) seeds its own buffer from
+//! its backdrop, never from the target: the page's own initial backdrop stays
+//! transparent, which is what §11.4.7 requires of it.
 
 /// Where a frame's pixels go.
 #[derive(Debug)]

@@ -788,7 +788,7 @@ impl Device {
             // every pass scissored to the damage bounding box, then replace exactly
             // the damage rectangles on the caller's retained texture.
             executor.realise_masks(&mut recorder)?;
-            let root_view = executor.render_plan(&mut recorder, 0)?;
+            let root_view = executor.render_plan(&mut recorder, 0, false)?;
             executor.patch_to_target(
                 &mut recorder,
                 &root_view,
@@ -805,7 +805,7 @@ impl Device {
             executor.draw_pass(&mut recorder, &target_view, target_format, true, &root_ops)?;
         } else {
             executor.realise_masks(&mut recorder)?;
-            let root_view = executor.render_plan(&mut recorder, 0)?;
+            let root_view = executor.render_plan(&mut recorder, 0, false)?;
             executor.blit_to_target(&mut recorder, &root_view, &target_view, target_format);
         }
         executor.end_stamp(&mut recorder, &target_view);
@@ -1330,6 +1330,8 @@ impl Device {
         let mut bytes = [0_u8; 64];
         bytes[0..4].copy_from_slice(&op.mode.to_le_bytes());
         bytes[4..8].copy_from_slice(&op.alpha.to_le_bytes());
+        let non_isolated = u32::from(!op.isolated);
+        bytes[8..12].copy_from_slice(&non_isolated.to_le_bytes());
         for (i, v) in op.clip_rect.iter().enumerate() {
             let at = 16 + i * 4;
             bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());

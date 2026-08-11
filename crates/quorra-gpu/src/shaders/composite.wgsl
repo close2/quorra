@@ -18,7 +18,9 @@ struct Params {
     mode: u32,
     // The group's constant alpha (§11.4.5).
     alpha: f32,
-    _pad0: f32,
+    // 1 for §11.4.4's non-isolated group, whose layer was seeded with this backdrop
+    // and is interpolated back onto it; 0 for §11.4.5's isolated group.
+    non_isolated: u32,
     _pad1: f32,
     // Device-space clip rectangle for the composited group (min.xy, max.xy).
     clip: vec4f,
@@ -228,7 +230,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let mask_dims = textureDimensions(soft_mask_tex);
     let mask_texel = min(pi, vec2i(mask_dims) - vec2i(1, 1));
     let soft = textureLoad(soft_mask_tex, mask_texel, 0).r;
-    s = s * (params.alpha * soft * clip_coverage(p) * residue_value(p));
+    let w = params.alpha * soft * clip_coverage(p) * residue_value(p);
+
+    // §11.4.4, the non-isolated group. `s` holds E(B): this group's elements
+    // composited onto the very backdrop `b` holds, because the layer was seeded with
+    // it. The clause's Result step removes that backdrop's contribution by dividing by
+    // Table 140's group alpha — which this raster does not carry — and §11.3.3 then
+    // multiplies it straight back in when the result is composited with the same
+    // backdrop under Normal. The two cancel, leaving one interpolation, exact for
+    // every backdrop alpha and every blend mode *inside* the group (ADR 0019; the
+    // builder refuses the three cases where the cancellation is false).
+    if params.non_isolated != 0u {
+        return mix(b, s, w);
+    }
+
+    s = s * w;
 
     let ab = b.a;
     let as_ = s.a;

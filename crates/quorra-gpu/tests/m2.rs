@@ -222,6 +222,7 @@ fn each_missing_lane_is_named() {
                 clip: None,
                 knockout: false,
                 mask: None,
+                isolated: true,
             },
             |b| {
                 b.rect(

@@ -587,6 +587,7 @@ fn frame_budget_refusal_precedes_target_binding() {
                 clip: None,
                 knockout: false,
                 mask: None,
+                isolated: true,
             },
             |body| {
                 body.rect(

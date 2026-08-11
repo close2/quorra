@@ -82,13 +82,14 @@ pub enum ImageFilter {
 pub const MAX_GROUP_DEPTH: usize = 16;
 
 /// What a transparency group is composited with once its content is complete
-/// (ISO 32000-2 §11.4.5): the group's elements draw onto a fully transparent backdrop,
-/// and the finished group is painted exactly once under these parameters.
+/// (ISO 32000-2 §11.4.4, §11.4.5): the group's elements draw onto the backdrop
+/// [`GroupSpec::isolated`] names, and the finished group is painted exactly once under
+/// these parameters.
 ///
-/// Every group is **isolated**: the caller decides isolation upstream and only emits a
-/// group where the computation is provably the isolated one (§4.4 of the brief asks us
-/// to say so rather than leave it implicit — this is where it is said). The group's
-/// soft mask arrives with M6.
+/// [`GroupSpec::isolated`] is Table 145's `/I`, and it is the one entry whose default —
+/// `true` — is the behaviour every rasterising library offers. See its documentation
+/// for what `false` costs a backend and for the three conditions a scene must meet
+/// before the builder will accept it (ADR 0019).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroupSpec {
     /// The group's constant alpha, `0..=1` (§11.4.5's group alpha).
@@ -102,6 +103,50 @@ pub struct GroupSpec {
     pub knockout: bool,
     /// Soft mask applied to the composited group, or `None` (§11.6.4.3).
     pub mask: Option<MaskId>,
+    /// What the elements composite **onto** (ISO 32000-2 §11.4.5, §11.4.4).
+    ///
+    /// `true` is §11.4.5's isolated group, which is what a layer in any rasterising
+    /// library is:
+    ///
+    /// > An isolated group is one whose elements shall be composited onto a fully
+    /// > transparent initial backdrop rather than onto the group's backdrop.
+    ///
+    /// `false` is §11.4.4's own model: the elements composite onto the backdrop the
+    /// group is being painted over, and the Result step then takes that backdrop's
+    /// contribution out again so it is counted once (its NOTE 3 — "Essentially, these
+    /// formulas remove the contribution of the group backdrop from the computed
+    /// results"). The two differ only where an element **blends**, which §11.4.4's
+    /// NOTE 2 gives as the whole reason both kinds exist.
+    ///
+    /// # The three conditions, and why the builder enforces them
+    ///
+    /// §11.4.4's removal divides by Table 140's *group alpha* — the elements' own
+    /// accumulated alpha, "excluding the initial backdrop" — which is not the alpha a
+    /// premultiplied raster holds; NOTE 4's advice is to keep a second set of
+    /// accumulators for it. quorra keeps one set and does not need the second, because
+    /// the quantity the removal divides out is multiplied straight back in when the
+    /// group's result is composited with that same backdrop under the **Normal** blend
+    /// function. Writing `B` for the backdrop, `E(B)` for the elements composited onto
+    /// it — both premultiplied — and `w` for [`GroupSpec::alpha`] times the group's
+    /// soft mask and clip at the pixel, the two steps together are
+    ///
+    /// ```text
+    /// result = (1 − w) × B + w × E(B)
+    /// ```
+    ///
+    /// Checked against transcriptions of §11.4.4's recurrence, its Result step and
+    /// §11.3.6's composite over 200 000 random inputs: worst deviation 5.6 × 10⁻¹⁶
+    /// (`quorra-gpu/tests/non_isolated_groups.rs`, which is that transcription).
+    ///
+    /// The step that cancels is the composite under **Normal**. Under any other blend
+    /// the group's own colour is needed, and with it the group alpha this raster does
+    /// not have — the same test measures 0.91 of full scale of error. So a
+    /// non-isolated group is accepted only where [`GroupSpec::blend`] is
+    /// [`BlendMode::Normal`], [`GroupSpec::knockout`] is `false`, and no enclosing
+    /// group is a knockout group; anything else is a
+    /// [`SceneError::NonIsolatedGroupUnsupported`], refused at the builder rather than
+    /// approximated at the device (§5 of the brief).
+    pub isolated: bool,
 }
 
 /// One soft mask: a transparency group plus the reduction that turns its pixels into
@@ -236,6 +281,28 @@ pub enum Command {
     },
 }
 
+/// Which of [`GroupSpec::isolated`]'s three conditions a non-isolated group broke.
+///
+/// Each names a case where §11.4.4's backdrop removal no longer cancels against the
+/// composite that follows it, so the group's own alpha — Table 140's group alpha,
+/// which a premultiplied raster does not hold — would be needed to draw it correctly.
+/// A refusal here is §5 of the brief: a hole and a sentence beat a plausible lie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonIsolatedReason {
+    /// The group's own blend mode is not [`BlendMode::Normal`]. The cancellation *is*
+    /// the Normal blend function; under any other the identity is false by up to 0.91
+    /// of full scale.
+    GroupBlendNotNormal,
+    /// The group is itself a knockout group (§11.4.6): its elements composite with the
+    /// initial backdrop rather than with each other, so seeding that backdrop into the
+    /// accumulating buffer describes neither model.
+    KnockoutGroup,
+    /// The group is nested inside a knockout group, whose elements composite with
+    /// *its* initial backdrop — which is not the accumulated content this group would
+    /// be seeded from.
+    InsideKnockoutGroup,
+}
+
 /// Why the builder refused an input. Every variant names what was wrong with which
 /// value, because §4.7's refusal is only useful to a caller if it can be attributed.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -289,6 +356,14 @@ pub enum SceneError {
     GroupTooDeep {
         /// The bound that was hit.
         limit: usize,
+    },
+    /// A non-isolated group (§11.4.4) in a position where a one-accumulator raster
+    /// cannot draw it. The reason names which of the three conditions failed; see
+    /// [`GroupSpec::isolated`] for why each is load-bearing, and ADR 0019 for the
+    /// derivation.
+    NonIsolatedGroupUnsupported {
+        /// Which condition the scene broke.
+        reason: NonIsolatedReason,
     },
     /// A [`MaskId`] that this scene has not (yet) defined. Masks are scene-scoped
     /// and may only be referenced after their `mask()` call returns — which also
@@ -353,6 +428,22 @@ impl fmt::Display for SceneError {
             }
             Self::GroupTooDeep { limit } => {
                 write!(f, "group nesting exceeds the bound of {limit}")
+            }
+            Self::NonIsolatedGroupUnsupported { reason } => {
+                let because = match reason {
+                    NonIsolatedReason::GroupBlendNotNormal => {
+                        "its own blend mode is not Normal, and the Normal composite is \
+                         what cancels §11.4.4's backdrop removal"
+                    }
+                    NonIsolatedReason::KnockoutGroup => "it is also a knockout group",
+                    NonIsolatedReason::InsideKnockoutGroup => {
+                        "it is nested inside a knockout group"
+                    }
+                };
+                write!(
+                    f,
+                    "a non-isolated group (§11.4.4) cannot be drawn here because {because}"
+                )
             }
             Self::UnknownMask { mask, defined } => {
                 write!(
@@ -455,6 +546,11 @@ pub struct SceneBuilder {
 #[derive(Debug)]
 struct OpenFrame {
     commands: Vec<Command>,
+    /// Whether the commands landing here sit inside a knockout group — the question
+    /// [`NonIsolatedReason::InsideKnockoutGroup`] asks. A soft mask's body starts a
+    /// fresh stack: §11.6.5 renders the mask group on its own, so a knockout group
+    /// outside it is not above the mask's content.
+    inside_knockout: bool,
 }
 
 impl SceneBuilder {
@@ -631,8 +727,9 @@ impl SceneBuilder {
     }
 
     /// Append a transparency group (ISO 32000-2 §11.4): everything `body` draws
-    /// composites onto a fully transparent backdrop, and the finished group is painted
-    /// exactly once under `spec`. Nesting is bounded at [`MAX_GROUP_DEPTH`].
+    /// composites onto the backdrop [`GroupSpec::isolated`] names, and the finished
+    /// group is painted exactly once under `spec`. Nesting is bounded at
+    /// [`MAX_GROUP_DEPTH`].
     ///
     /// `body` returns a `Result` so builder refusals inside the group propagate with
     /// `?` — a small departure from the brief's illustrative closure, in exchange for
@@ -640,9 +737,11 @@ impl SceneBuilder {
     ///
     /// # Errors
     ///
-    /// Refuses an invalid alpha, an unknown clip, nesting beyond the bound, and
-    /// whatever `body` itself refuses. On any error the group is discarded whole; the
-    /// builder remains usable and consistent.
+    /// Refuses an invalid alpha, an unknown clip, nesting beyond the bound, a
+    /// non-isolated group in a position §11.4.4's arithmetic cannot survive
+    /// ([`SceneError::NonIsolatedGroupUnsupported`]), and whatever `body` itself
+    /// refuses. On any error the group is discarded whole; the builder remains usable
+    /// and consistent.
     pub fn group(
         &mut self,
         spec: GroupSpec,
@@ -653,9 +752,32 @@ impl SceneBuilder {
         }
         self.check_clip(spec.clip)?;
         self.check_mask(spec.mask)?;
-        let commands = self.nested_body(body)?;
+        self.check_isolation(&spec)?;
+        let commands = self.nested_body(self.inside_knockout() || spec.knockout, body)?;
         self.push(Command::Group { spec, commands });
         Ok(())
+    }
+
+    /// The three conditions of [`GroupSpec::isolated`], in the order a reader of the
+    /// clause meets them. Checked before the body runs, so a refusal costs nothing
+    /// that was built inside it.
+    fn check_isolation(&self, spec: &GroupSpec) -> Result<(), SceneError> {
+        if spec.isolated {
+            return Ok(());
+        }
+        let reason = if spec.blend != BlendMode::Normal {
+            Some(NonIsolatedReason::GroupBlendNotNormal)
+        } else if spec.knockout {
+            Some(NonIsolatedReason::KnockoutGroup)
+        } else if self.inside_knockout() {
+            Some(NonIsolatedReason::InsideKnockoutGroup)
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => Err(SceneError::NonIsolatedGroupUnsupported { reason }),
+            None => Ok(()),
+        }
     }
 
     /// Append an image draw (ISO 32000-2 §8.9.5): the uploaded image mapped into
@@ -717,7 +839,9 @@ impl SceneBuilder {
         {
             return Err(SceneError::InvalidColor(backdrop));
         }
-        let commands = self.nested_body(body)?;
+        // §11.6.5 renders the mask group on its own, so whatever encloses the `mask()`
+        // call is not above the mask's content: the knockout stack starts fresh here.
+        let commands = self.nested_body(false, body)?;
         let id = u32::try_from(self.masks.len()).unwrap_or(u32::MAX);
         self.masks.push(MaskDef {
             kind,
@@ -729,8 +853,13 @@ impl SceneBuilder {
 
     /// Run a nested body against its own command frame, popping it on both paths so
     /// an errored body is discarded whole and the builder stays consistent.
+    ///
+    /// `inside_knockout` is what the *body's* commands are nested in, which is why the
+    /// group's own knockout flag is folded in by the caller and a mask body passes
+    /// `false`.
     fn nested_body(
         &mut self,
+        inside_knockout: bool,
         body: impl FnOnce(&mut Self) -> Result<(), SceneError>,
     ) -> Result<Vec<Command>, SceneError> {
         if self.open_frames.len() >= MAX_GROUP_DEPTH {
@@ -740,13 +869,22 @@ impl SceneBuilder {
         }
         self.open_frames.push(OpenFrame {
             commands: Vec::new(),
+            inside_knockout,
         });
         let body_result = body(self);
         let finished = self.open_frames.pop().unwrap_or(OpenFrame {
             commands: Vec::new(),
+            inside_knockout,
         });
         body_result?;
         Ok(finished.commands)
+    }
+
+    /// Whether commands appended right now land inside a knockout group.
+    fn inside_knockout(&self) -> bool {
+        self.open_frames
+            .last()
+            .is_some_and(|frame| frame.inside_knockout)
     }
 
     /// Finish building. Consumes the builder; the scene is immutable from here on,
@@ -882,6 +1020,7 @@ mod tests {
             clip: None,
             knockout: false,
             mask: None,
+            isolated: true,
         }
     }
 
@@ -1104,6 +1243,7 @@ mod tests {
                     clip: None,
                     knockout: false,
                     mask: None,
+                    isolated: true,
                 },
                 |b| nest(b, remaining - 1),
             )

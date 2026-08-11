@@ -711,6 +711,7 @@ fn image_inside_a_group_takes_the_group_alpha() {
                 clip: None,
                 knockout: false,
                 mask: None,
+                isolated: true,
             },
             |body| {
                 body.image(

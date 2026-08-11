@@ -21,9 +21,9 @@ drawing vocabulary: analytic rectangles with rectangular clips at zero device co
 cached tiles → 1.0 ms/frame at window scale on RADV; ADR 0009); a general path lane —
 fills under both rules, strokes with caps/joins/miters, non-rectangular clip
 residues — over one deterministic CPU coverage rasteriser (ADR 0008); clause 11
-natively — isolated groups, all sixteen §11.3.5 blend modes in-shader, per-element
-knockout, soft masks byte-agreed with the caller's CPU reduction on all 256 inputs
-(ADR 0010); and the rare-case lanes — images with resolved per-placement filtering,
+natively — isolated and non-isolated groups (ADR 0019), all sixteen §11.3.5 blend
+modes in-shader, per-element knockout, soft masks byte-agreed with the caller's CPU
+reduction on all 256 inputs (ADR 0010); and the rare-case lanes — images with resolved per-placement filtering,
 axial/radial ramp sweeps with clause-derived bytes, pre-rasterised meshes — as
 uniform-driven quads (ADR 0011; the dense page plus a figure load: 0.63 ms/frame on
 RADV). The scene vocabulary validates loudly per §4.7; resources are

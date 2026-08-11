@@ -147,6 +147,11 @@ fn random_ops(rng: &mut Rng, builder: &mut SceneBuilder, outlines: &[OutlineId],
                         clip,
                         knockout: seed % 2 == 0,
                         mask: None,
+                        // A third of the groups ask for §11.4.4's backdrop, including
+                        // inside knockout groups and under blend modes the builder
+                        // must refuse — the refusal is as much of the boundary as the
+                        // acceptance is.
+                        isolated: seed % 3 != 0,
                     },
                     |inner| {
                         if depth < 20 {

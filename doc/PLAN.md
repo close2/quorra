@@ -15,6 +15,32 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**Feedback §16 is answered — a group's buffer can begin as a copy of what is under it**
+(2026-08-11, ADR 0019): `GroupSpec` gains `isolated`, Table 145's `/I` and the one entry
+the vocabulary was missing. ISO 32000-2 §11.4.4's non-isolated group composites its
+elements onto the group's own backdrop and then removes that backdrop's contribution —
+by dividing by Table 140's group alpha, which a premultiplied raster does not hold, and
+whose NOTE 4 advises a second set of accumulators. **It is not needed**: the quantity
+divided out is multiplied straight back in when the result is composited with the same
+backdrop under Normal, leaving `result = (1 − w) × B + w × E(B)`. Transcribed from the
+clause in `tests/non_isolated_groups.rs` and checked over 200 000 configurations, that
+is exact — **5.6 × 10⁻¹⁶** — while the same construction under a non-Normal group blend
+is wrong by 0.91 of full scale and applied to an *isolated* group by 0.76, which is why
+the builder refuses the three cases rather than approximating them
+(`SceneError::NonIsolatedGroupUnsupported`, naming which condition failed). The
+implementation is a seeded layer (one scissored blit, no new allocation and no change to
+the frame budget) plus a branch in `composite.wgsl` on a flag that fits in its existing
+padding — no second pipeline, so no startup cost. Measured at 1191×1684 on RADV: a seed
+is 0.11 ms of device time, and the isolated path is unchanged within the run-to-run
+spread (0.384 → 0.386 ms). **Held against the caller's 956-page gate, before and after,
+three documents move from refused to agreeing and nothing else moves**: `bug1755507`,
+`issue13520` and `issue18032` — Illustrator and InDesign artwork that used to be counted
+as agreeing while both backends substituted the same wrong initial backdrop — now agree
+with their CPU backend's independent reading of §11.4.4, and the `differ` list is
+identical page for page (910/35/11/18 → 913/35/8/18). The fourth document §16 named is
+still refused, and now says why it really is: a page composited in a four-component
+blending space, which is their §17.
+
 **Feedback §12 is answered — a host can name the backend set** (2026-08-07, ADR 0017):
 the caller's project owner ran their viewer on a Windows machine with Intel graphics
 and it crashed inside the **Vulkan driver**, and nothing here could ask for the DX12
@@ -457,12 +483,14 @@ This is the part an SVG-shaped model cannot be patched into, so it is the part d
 first and compromised never.
 
 **Groups are layers, painted once.** A `Group` becomes an offscreen premultiplied
-target initialised to transparent; its children draw into it; the finished layer is
-composited onto its parent exactly once, under the group's constant alpha and blend
-mode (§4.4; clause 11.4.1, 11.4.5). Every group is isolated — the caller guarantees it
-and asks us to document the assumption, which this sentence and the rustdoc both do.
-Nesting is bounded at 16 (§1.1), so the layer stack is countable in phase 1 like
-everything else. The page itself renders onto transparency, always, because clause
+target; its children draw into it; the finished layer is composited onto its parent
+exactly once, under the group's constant alpha and blend mode (§4.4; clause 11.4.1,
+11.4.5). What the layer is *initialised to* is `GroupSpec::isolated`: transparent for
+clause 11.4.5's isolated group, which is the default and what the brief's §4.4 promised
+would be the only case, or a copy of the backdrop for clause 11.4.4's non-isolated one,
+whose composite is then an interpolation rather than §11.3.6 (ADR 0019, from the
+caller's feedback §16). Nesting is bounded at 16 (§1.1), so the layer stack is
+countable in phase 1 like everything else. The page itself renders onto transparency, always, because clause
 11.4.7 makes the page group isolated and compositing onto the medium is the caller's
 job (§3).
 
@@ -882,7 +910,9 @@ matches §11.4.6's formula, isolation and group alpha hold, and the compositor i
 byte-deterministic per adapter. The layer-precision question closed on the side of
 rgba8 layers (quantisation between commands is the CPU reference's model and the
 mask byte-agreement's precondition); full-target layer textures are the recorded
-optimisation candidate for a bbox-bounded version, with M8's measurements.
+optimisation candidate for a bbox-bounded version, with M8's measurements. Item 4's
+"onto transparency" is the isolated group only, which is what §4.4 promised at the
+time; clause 11.4.4's other initial backdrop arrived later, in ADR 0019.
 
 ## M7 — Shadings, meshes, images
 
