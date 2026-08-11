@@ -100,18 +100,23 @@ refused — and it cost five real documents. The condition now lives in
 so the two cannot drift apart again; `tests/coverage_lanes.rs` holds the pair, because
 the point is that the charge still stands where the texture is real.
 
-**Found on the way there and deliberately not fixed here: the sheet is committed at the
-device's maximum dimension wide, not at what it uses.** `ScratchPacker::finish` pads
-every row to 16 384 and `upload_scratch` creates and uploads a texture that size, so
-those same five pages move 34, 39, 69, 81 and 143 MB of R8 per frame for between 28 KB
-and 99 MB of tile area — `issue14497.pdf` is a 6 512 × 2 383 sheet carrying three tiles
-and 28 KB of coverage. The comment at the packer's construction says the dimension is
-"capacity, not commitment"; `finish` makes it commitment. Worse, the frame budget does
-not see it: it charges each tile's own area, so the largest scene-derived allocation a
-page makes is the one number nobody counts, which is the reverse of what principle 3
-asks. Narrowing the sheet to its used width, charging the sheet rather than the tiles,
-or both — that is its own change with its own measurement, and it is the next thing to
-do here.
+**The sheet is as wide as it is used, and is charged for what it is** (2026-08-11,
+ADR 0021 — the item the paragraph this replaces called "the next thing to do here"):
+`ScratchPacker::finish` committed a texture at the *packing* width, which is the device's
+maximum dimension because a narrow one refuses real pages (feedback §3). On this machine
+that is 16 384 texels a row, so one 180-pixel tile allocated and moved 2.95 MB to carry
+32 KB — and the GPU lane, whose winding target takes its extent from the same sheet at
+eight bytes a texel, paid 23.6 MB for it. Every tile sits left of the widest shelf
+cursor, so narrowing there moves nothing and keeps the capacity that §3 bought. Measured
+at 1191×1684 on RADV, best of nine: **a GPU-lane frame with eight blobs went from
+10.54 MB and 3.00 ms to 0.46 MB and 1.96 ms** — a third of the frame, and the shape of
+the caller's median page. `Timings::execute` is unmoved, which is what says the cost was
+allocation and bandwidth rather than shading. The sheet's own bytes are now charged too:
+shelf gaps are allocated, and pricing only the tiles made the largest scene-derived
+allocation of a page of path work the one number nobody counted. On the caller's
+957-page gate no page changed verdict. What is left is the sheet's *height* — gaps
+between shelves that narrowing cannot reach — and that is a packer question with its own
+measurement.
 
 **Coverage can come from the GPU, and a caller can now ask for it** (2026-08-05,
 ADR 0016): Evan Wallace's method — one triangle per outline segment fanned from an

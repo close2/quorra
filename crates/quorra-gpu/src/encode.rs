@@ -449,6 +449,13 @@ impl ScratchPacker {
 
     /// The packed sheet, or `None` when nothing was placed on it.
     ///
+    /// **Narrowed to the width the shelves actually reached** (ADR 0021). The packing
+    /// width is the device's maximum dimension because a narrow one refuses real pages
+    /// (the caller's feedback §3), but every tile sits left of the widest shelf cursor,
+    /// so everything to the right of it is a texture nobody wrote and a texture nobody
+    /// reads — 16 384 texels of it on this machine. Narrowing moves no tile: the
+    /// coordinates the lanes recorded are all inside the kept region.
+    ///
     /// `data` is padded to the whole sheet when the CPU lane wrote any of it, and left
     /// **empty** when every tile on the sheet is the GPU lane's — the device then
     /// clears rather than uploads, and the distinction is the one bit it needs.
@@ -456,19 +463,45 @@ impl ScratchPacker {
         if self.next_y == 0 {
             return None;
         }
+        let used = self
+            .shelves
+            .iter()
+            .map(|(_, _, cursor)| *cursor)
+            .max()
+            .unwrap_or(self.width)
+            .clamp(1, self.width);
         if !self.data.is_empty() {
+            self.compact_rows(used);
             // Both extents are bounded by the device dimension, so the product is far
             // inside a `usize`; saturating says so rather than relying on it.
-            self.data.resize(
-                (self.width as usize).saturating_mul(self.next_y as usize),
-                0,
-            );
+            self.data
+                .resize((used as usize).saturating_mul(self.next_y as usize), 0);
         }
         Some(Scratch {
-            width: self.width,
+            width: used,
             height: self.next_y,
             data: self.data,
         })
+    }
+
+    /// Restride the written rows from the packing width down to `used`, in place.
+    ///
+    /// Rows move left and never right, and row `r`'s destination start is always below
+    /// its source start, so a forward copy cannot overwrite bytes it has yet to read.
+    fn compact_rows(&mut self, used: u32) {
+        if used >= self.width {
+            return;
+        }
+        let (from, to) = (self.width as usize, used as usize);
+        // `from` is the packing width, which `new` takes from the device dimension and
+        // `reserve` refuses to place anything into when it is zero.
+        let rows = self.data.len().checked_div(from).unwrap_or(0);
+        for row in 1..rows {
+            let source = row.saturating_mul(from);
+            let destination = row.saturating_mul(to);
+            self.data
+                .copy_within(source..source.saturating_add(to), destination);
+        }
     }
 }
 
@@ -590,6 +623,9 @@ struct Encoder<'a> {
     /// Commands that could reach no pixel of the target, and so were never built.
     culled: u32,
     atlas_pressure: bool,
+    /// Sheet bytes already charged tile by tile, so the sheet's own extent can be
+    /// charged once at the end without paying twice (ADR 0021).
+    scratch_charged: u64,
 }
 
 /// Walk the scene once: classify, count, rasterise, check the budget, lay out
@@ -650,6 +686,7 @@ pub(crate) fn encode(
         segments: 0,
         culled: 0,
         atlas_pressure: false,
+        scratch_charged: 0,
     };
 
     for (index, command) in commands.iter().enumerate() {
@@ -668,6 +705,13 @@ pub(crate) fn encode(
     if let Some(sheet) = scratch.as_ref() {
         winding.width = sheet.width;
         winding.height = sheet.height;
+        // The sheet is one texture, and until ADR 0021 the only thing charged for it
+        // was the area of the tiles *on* it — so the largest scene-derived allocation
+        // a page of path work makes was the one number nobody counted, which is the
+        // reverse of what principle 3 asks. Shelf packing leaves gaps, and the gaps
+        // are allocated too: charge the difference, once, now that the extent is known.
+        let sheet_bytes = u64::from(sheet.width).saturating_mul(u64::from(sheet.height));
+        encoder.charge(sheet_bytes.saturating_sub(encoder.scratch_charged))?;
     }
     encoder.charge(winding.device_bytes())?;
 
@@ -1015,7 +1059,7 @@ impl Encoder<'_> {
         let top = vy0.floor() as i32;
         let width = (vx1.ceil() as i32 - left).max(1) as u32;
         let height = (vy1.ceil() as i32 - top).max(1) as u32;
-        self.charge(u64::from(width) * u64::from(height))?;
+        self.charge_tile(width, height)?;
         // Present by construction: the residues Option was checked above.
         let Some(mask) = self.residue_product(resolved, left, top, width, height)? else {
             return Ok(([0.0; 4], [0.0; 2]));
@@ -1367,7 +1411,7 @@ impl Encoder<'_> {
         let width = (vx1.ceil() as i32 - left).max(1) as u32;
         let height = (vy1.ceil() as i32 - top).max(1) as u32;
         let residue_origin = if resolved.residues.is_some() {
-            self.charge(u64::from(width) * u64::from(height))?;
+            self.charge_tile(width, height)?;
             match self.residue_product(&resolved, left, top, width, height)? {
                 Some(product) => {
                     let (sx, sy) = self.pack_scratch(&product)?;
@@ -1641,7 +1685,7 @@ impl Encoder<'_> {
                 if width == 0 || height == 0 {
                     return Ok(());
                 }
-                self.charge(u64::from(width) * u64::from(height))?;
+                self.charge_tile(width, height)?;
                 let tile = raster::fill_mask(&polylines, rule, left, top, width, height);
                 let inserted = self.atlas.insert(key, &tile);
                 if inserted.is_none() {
@@ -1768,7 +1812,7 @@ impl Encoder<'_> {
         if width == 0 || height == 0 {
             return Ok(None);
         }
-        self.charge(u64::from(width) * u64::from(height))?;
+        self.charge_tile(width, height)?;
         let mut tile = raster::fill_mask(polylines, rule, left, top, width, height);
 
         // Residue links multiply in: coverage of clip ∧ shape, per pixel.
@@ -1913,6 +1957,15 @@ impl Encoder<'_> {
             mask,
         );
         Ok(())
+    }
+
+    /// Charge one coverage tile, remembering how much of the sheet has been paid for
+    /// tile by tile — the sheet's own extent is charged once at the end (ADR 0021), and
+    /// this is what keeps that from charging twice for the same bytes.
+    fn charge_tile(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
+        let bytes = u64::from(width).saturating_mul(u64::from(height));
+        self.scratch_charged = self.scratch_charged.saturating_add(bytes);
+        self.charge(bytes)
     }
 
     fn charge(&mut self, bytes: u64) -> Result<(), RenderError> {

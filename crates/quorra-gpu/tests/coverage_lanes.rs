@@ -539,8 +539,12 @@ fn wide_blob(device: &mut Device) -> Scene {
 /// refusing anything priced against a sheet 200 rows deep.
 #[test]
 fn only_the_lane_that_makes_the_winding_texture_pays_for_it() {
-    let dimension = u64::from(device_with(Coverage::Cpu).limits().max_target_size);
-    let budget = dimension * 8 * 8;
+    // The sheet this scene packs is the blob's own tile, roughly WIDE x WIDE of R8
+    // (ADR 0021 narrows it to what the shelves reached, so the device's maximum
+    // dimension no longer decides this number). Four tiles' worth admits the CPU lane,
+    // which allocates the sheet and nothing else, and refuses the GPU lane, which adds
+    // eight bytes a texel of `rgba16float` on top of it.
+    let budget = u64::from(WIDE) * u64::from(WIDE) * 4;
     let mut device = Device::headless(&Options {
         adapter: Some("llvmpipe".into()),
         max_frame_bytes: budget,
