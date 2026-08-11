@@ -88,6 +88,26 @@ pub enum TimingProvenance {
 }
 
 /// What this frame cost, phase by phase (§8 of the brief).
+///
+/// # Which clock each number is on, because they are not all the same one
+///
+/// [`encode`](Timings::encode), [`upload`](Timings::upload) and
+/// [`readback`](Timings::readback) are **host** spans: they are `Instant` measurements
+/// around code running on the calling thread, and they are commensurable with a wall
+/// clock a caller wraps around [`Device::render`]. [`Timings::host_total`] sums exactly
+/// those three.
+///
+/// [`execute`](Timings::execute) is usually **not**: where the adapter offers timestamp
+/// queries it is the *device's* clock over the drawing passes
+/// ([`execute_provenance`](Timings::execute_provenance) says which). Subtracting it from
+/// a host measurement mixes whatever the two clocks disagree by into the remainder —
+/// the caller's feedback §13 found exactly that and downgraded its own "elsewhere" row
+/// to a bound. So: **subtract `host_total`, not the sum of all four**, and read what is
+/// left against the `"target acquire"` and `"present"` entries of
+/// [`phases`](Timings::phases), which name the two host-side steps that are not in the
+/// three.
+///
+/// [`Device::render`]: crate::device::Device::render
 #[derive(Debug, Clone)]
 pub struct Timings {
     /// CPU: turning a [`Scene`](quorra_scene::Scene) into device commands.
@@ -108,6 +128,23 @@ pub struct Timings {
     /// entries accumulate as milestones add passes. May also carry one-off costs a
     /// frame absorbed, such as a first-use pipeline compilation.
     pub phases: Vec<(&'static str, Duration)>,
+}
+
+impl Timings {
+    /// The three phases measured on **your** clock: encode, upload and readback.
+    ///
+    /// This is the number to subtract from a host-side wall clock around
+    /// [`Device::render`](crate::device::Device::render); `execute` is deliberately
+    /// excluded because it is usually the adapter's clock, and mixing the two makes the
+    /// remainder a quantity with no meaning (the caller's feedback §13). What is left
+    /// after subtracting it is the device wait plus the two steps `phases` names,
+    /// `"target acquire"` and `"present"`.
+    #[must_use]
+    pub fn host_total(&self) -> Duration {
+        self.encode
+            .saturating_add(self.upload)
+            .saturating_add(self.readback)
+    }
 }
 
 /// What this frame did, in counts (§8 of the brief).

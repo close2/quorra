@@ -39,6 +39,7 @@ pub mod device;
 mod encode;
 pub mod error;
 pub mod frame;
+mod instrument;
 mod layers;
 pub mod mask;
 mod outline;

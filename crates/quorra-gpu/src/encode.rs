@@ -44,6 +44,7 @@ use quorra_scene::{
 
 use crate::atlas::{AtlasStore, GlyphKey, PhaseKey};
 use crate::error::RenderError;
+use crate::instrument::EncodeClock;
 use crate::raster::{self, DeviceTransform, Polyline, Rule};
 use crate::resources::ResourceStore;
 use crate::startup::Coverage;
@@ -270,6 +271,9 @@ pub(crate) struct Encoded {
     /// Set when a glyph tile no longer fit the atlas and fell through to scratch:
     /// the device resets the atlas after the frame so the next frame repacks fresh.
     pub atlas_pressure: bool,
+    /// What the walk above spent its time on, when the caller asked for the
+    /// subdivision (ADR 0023); empty otherwise.
+    pub encode_phases: EncodeClock,
 }
 
 /// A resolved clip chain: the intersection of its rectangular links, plus the chain
@@ -626,6 +630,8 @@ struct Encoder<'a> {
     /// Sheet bytes already charged tile by tile, so the sheet's own extent can be
     /// charged once at the end without paying twice (ADR 0021).
     scratch_charged: u64,
+    /// What encode spent its time on, when the caller asked (ADR 0023).
+    clock: EncodeClock,
 }
 
 /// Walk the scene once: classify, count, rasterise, check the budget, lay out
@@ -640,6 +646,7 @@ pub(crate) fn encode(
     atlas: &mut AtlasStore,
     quantum: Option<u16>,
     coverage: Coverage,
+    instrument: bool,
 ) -> Result<Encoded, RenderError> {
     let commands = scene.commands();
 
@@ -687,6 +694,7 @@ pub(crate) fn encode(
         culled: 0,
         atlas_pressure: false,
         scratch_charged: 0,
+        clock: EncodeClock::new(instrument),
     };
 
     for (index, command) in commands.iter().enumerate() {
@@ -741,6 +749,7 @@ pub(crate) fn encode(
         used_images: sorted(encoder.used_images),
         used_ramps: sorted(encoder.used_ramps),
         used_meshes: sorted(encoder.used_meshes),
+        encode_phases: encoder.clock,
         commands: u32::try_from(commands.len()).unwrap_or(u32::MAX),
         clip_distinct_regions: u32::try_from(distinct.len()).unwrap_or(u32::MAX),
         distinct_outlines: u32::try_from(encoder.distinct_outlines.len()).unwrap_or(u32::MAX),
@@ -958,8 +967,10 @@ impl Encoder<'_> {
         self.segments = self.segments.saturating_add(stored.segments.len() as u64);
         // Flatten under the full transform, then expand: the width arrived
         // resolved (§4.5), so our job is caps, joins and miters only.
+        let span = self.clock.start();
         let polylines = raster::flatten(&stored.segments, to_device);
         let stroked = raster::stroke_polylines(&polylines, stroke);
+        self.clock.geometry(span);
         match paint {
             Paint::Solid(color) => {
                 self.push_coverage(&stroked, Rule::NonZero, color, &resolved, mask)
@@ -1095,12 +1106,14 @@ impl Encoder<'_> {
                         outline: def.outline,
                     })?;
             let link_transform = compose(def.transform, self.viewport);
+            let span = self.clock.start();
             let link_polylines = raster::flatten(&stored.segments, link_transform);
             let link_rule = match def.rule {
                 FillRule::NonZero => Rule::NonZero,
                 FillRule::EvenOdd => Rule::EvenOdd,
             };
             let link_mask = raster::fill_mask(&link_polylines, link_rule, left, top, width, height);
+            self.clock.geometry(span);
             combined = Some(match combined {
                 None => link_mask,
                 Some(mut base) => {
@@ -1211,33 +1224,16 @@ impl Encoder<'_> {
             return Ok(());
         }
         if blend != BlendMode::Normal && self.style == DrawStyle::Over {
-            // §11.3.5 for a single element: an implicit one-element group. (Inside a
-            // knockout group the element composites with the transparent initial
-            // backdrop, where every blend mode degenerates to Normal — §11.4.6 with
-            // §11.3.6's αb = 0 — so knockout draws skip this wrap.)
-            let child = self.plan_child(|encoder| {
-                encoder.encode_fill(
-                    outline,
-                    transform,
-                    rule,
-                    paint,
-                    clip,
-                    BlendMode::Normal,
-                    compose_mode,
-                    None,
-                )
-            })?;
-            self.push_op(Op::Child(ChildOp {
-                layer: child,
-                mode: blend_word(blend),
-                alpha: 1.0,
-                clip_rect: OPEN_CLIP,
-                residue_rect: [0.0; 4],
-                residue_origin: [0.0; 2],
+            return self.fill_through_blend_group(
+                outline,
+                transform,
+                rule,
+                paint,
+                clip,
+                blend,
+                compose_mode,
                 mask,
-                isolated: true,
-            }));
-            return Ok(());
+            );
         }
         let style = if compose_mode == Compose::Src {
             DrawStyle::Knockout
@@ -1289,7 +1285,9 @@ impl Encoder<'_> {
             {
                 return self.push_glyph(outline, &to_device, rule, color, &resolved, style, mask);
             }
+            let span = self.clock.start();
             let polylines = raster::flatten(&stored.segments, to_device);
+            self.clock.geometry(span);
             return self.push_coverage_styled(&polylines, rule, color, &resolved, style, mask);
         }
         // Shading or mesh paint (§8.7.4.5): one quad over a coverage source. The
@@ -1310,8 +1308,54 @@ impl Encoder<'_> {
             self.push_shaded_rect(geometry, rect, &to_device, &resolved, style, mask);
             return Ok(());
         }
+        let span = self.clock.start();
         let polylines = raster::flatten(&stored.segments, to_device);
+        self.clock.geometry(span);
         self.push_shaded_coverage(geometry, &polylines, rule, &resolved, style, mask)
+    }
+
+    /// §11.3.5 for a single element: the implicit one-element group a blended fill
+    /// draws through, so the blend function sees the element's own colour rather than
+    /// the accumulated layer's.
+    ///
+    /// Inside a knockout group the element composites with the transparent initial
+    /// backdrop, where every blend mode degenerates to Normal — §11.4.6 with §11.3.6's
+    /// αb = 0 — so knockout draws never come here.
+    #[allow(clippy::too_many_arguments)] // the fill's own parameters, forwarded once
+    fn fill_through_blend_group(
+        &mut self,
+        outline: OutlineId,
+        transform: Affine,
+        rule: FillRule,
+        paint: Paint,
+        clip: Option<ClipId>,
+        blend: BlendMode,
+        compose_mode: Compose,
+        mask: Option<u32>,
+    ) -> Result<(), RenderError> {
+        let child = self.plan_child(|encoder| {
+            encoder.encode_fill(
+                outline,
+                transform,
+                rule,
+                paint,
+                clip,
+                BlendMode::Normal,
+                compose_mode,
+                None,
+            )
+        })?;
+        self.push_op(Op::Child(ChildOp {
+            layer: child,
+            mode: blend_word(blend),
+            alpha: 1.0,
+            clip_rect: OPEN_CLIP,
+            residue_rect: [0.0; 4],
+            residue_origin: [0.0; 2],
+            mask,
+            isolated: true,
+        }));
+        Ok(())
     }
 
     fn resolve_clip(&mut self, clip: Option<ClipId>) -> Result<ResolvedClip, RenderError> {
@@ -1674,6 +1718,7 @@ impl Encoder<'_> {
                     f: py,
                     ..*to_device
                 };
+                let span = self.clock.start();
                 let polylines = raster::flatten(&stored.segments, tile_transform);
                 let Some((x0, y0, x1, y1)) = raster::polyline_bounds(&polylines) else {
                     return Ok(());
@@ -1687,7 +1732,10 @@ impl Encoder<'_> {
                 }
                 self.charge_tile(width, height)?;
                 let tile = raster::fill_mask(&polylines, rule, left, top, width, height);
+                self.clock.geometry(span);
+                let span = self.clock.start();
                 let inserted = self.atlas.insert(key, &tile);
+                self.clock.staging(span);
                 if inserted.is_none() {
                     // Atlas full: this tile draws uncached, and the device repacks
                     // the atlas after the frame. Same pixels either way — one
@@ -1813,7 +1861,9 @@ impl Encoder<'_> {
             return Ok(None);
         }
         self.charge_tile(width, height)?;
+        let span = self.clock.start();
         let mut tile = raster::fill_mask(polylines, rule, left, top, width, height);
+        self.clock.geometry(span);
 
         // Residue links multiply in: coverage of clip ∧ shape, per pixel.
         if let Some(product) = self.residue_product(resolved, left, top, width, height)? {
@@ -1925,11 +1975,12 @@ impl Encoder<'_> {
         // Its own refusal, not the frame budget's: this one is about texture
         // capacity, and a message whose arithmetic contradicts itself costs the
         // reader the diagnosis (QUORRA_FEEDBACK.md §3 was exactly that report).
-        self.scratch
-            .pack(tile)
-            .ok_or(RenderError::ScratchExhausted {
-                limit: self.scratch.max_height,
-            })
+        let span = self.clock.start();
+        let packed = self.scratch.pack(tile);
+        self.clock.staging(span);
+        packed.ok_or(RenderError::ScratchExhausted {
+            limit: self.scratch.max_height,
+        })
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -2152,6 +2203,7 @@ mod tests {
             &mut empty_atlas(),
             Some(16),
             Coverage::Cpu,
+            false,
         )
         .expect("within budget");
         assert_eq!(encoded.commands, 1);
@@ -2209,6 +2261,7 @@ mod tests {
             &mut empty_atlas(),
             Some(16),
             Coverage::Cpu,
+            false,
         )
         .expect("drawable since M5");
         assert_eq!(encoded.root.ops.len(), 1);
@@ -2236,6 +2289,7 @@ mod tests {
             &mut empty_atlas(),
             Some(16),
             Coverage::Cpu,
+            false,
         ) {
             Err(RenderError::FrameBudgetExceeded { needed, budget }) => {
                 assert_eq!(needed, 96);
@@ -2259,6 +2313,7 @@ mod tests {
             &mut empty_atlas(),
             Some(16),
             Coverage::Cpu,
+            false,
         )
         .expect("blank is legitimate");
         assert_eq!(encoded.commands, 0);

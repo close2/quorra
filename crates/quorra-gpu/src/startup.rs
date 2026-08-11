@@ -145,6 +145,18 @@ pub struct Options {
     /// which is the lane whose bytes are exact and whose output the caller's CPU
     /// oracle agrees with.
     pub coverage: Coverage,
+    /// Subdivide [`Timings::encode`] into geometry, staging and recording, reported
+    /// through [`Timings::phases`] (the caller's feedback §13; ADR 0023).
+    ///
+    /// **Off by default, because the measurement is not free.** Encode's parts
+    /// interleave per command, so the subdivision reads the clock at each seam: about
+    /// 0.2 ms over a page of 5 933 commands, which is three times the whole encode of a
+    /// page of rectangles and about 1% of a page of paths. A host that traces frames
+    /// turns it on for the trace; a host that does not pays an `Option` check.
+    ///
+    /// [`Timings::encode`]: crate::frame::Timings::encode
+    /// [`Timings::phases`]: crate::frame::Timings::phases
+    pub instrument_encode: bool,
     /// How many samples the GPU lane takes per pixel, rounded down to a square and
     /// clamped to 4..=64 ([`DEFAULT_COVERAGE_SAMPLES`]).
     ///
@@ -165,6 +177,7 @@ impl Default for Options {
             glyph_quantum: Some(DEFAULT_GLYPH_QUANTUM),
             coverage: Coverage::Cpu,
             coverage_samples: DEFAULT_COVERAGE_SAMPLES,
+            instrument_encode: false,
         }
     }
 }

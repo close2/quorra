@@ -15,6 +15,33 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**Feedback §13 is answered — `encode` says what it spent its time on, and the phases say
+which clock they are on** (2026-08-11, ADR 0023): their trace put `encode` at 45% of a
+page turn and 3.86 µs a command, and said the thing that decides what to build — whether
+that is flattening, binding, buffer writes or recording *"is invisible from here"*. It
+subdivides now into **geometry / staging / recording**, through `Timings::phases`, behind
+`Options::instrument_encode` — a switch rather than always-on because the parts interleave
+per command, so the measurement costs a clock read per seam: ~0.2 ms on a page of 5 933
+commands, three times the whole encode of a page of rectangles. A measurement that moves
+what it measures by 300% is not an instrument. The `"target acquire"` and `"present"`
+phases are always on (two clock reads), and `Timings::host_total()` plus the rustdoc say
+which numbers a host may subtract from its own wall clock — `execute` is the adapter's,
+and mixing the two is what made their `elsewhere` row a quantity they stopped believing.
+
+**And the first reading answers the question**: on 3 675 curved fills at reading size,
+1191×1684 on RADV, encode is **60–70% geometry whenever the atlas is cold** (2.549 ms =
+1.533 geometry + 0.155 staging + 0.861 recording for 107 distinct outlines; 8.919 ms =
+6.229 + 0.795 + 1.895 for 3 675 distinct) and **entirely recording when it is warm**
+(0.995 ms and 1.758 ms, all of it hash lookups and instance writes). The cold
+all-distinct row is 2.4 µs a command, the same order as the 3.86 they fitted. So the next
+move on that phase is the rasteriser or the atlas being cold — not more cores, which is
+also why **quorra spawns no threads**: asked, the caller said take a pool rather than make
+one (their `rayon` is already sized to the machine, their confined worker is
+single-threaded because of a seccomp-killed `/sys` read in `glibc`'s arena sizing, and
+`viewer-core`'s rule 4 is "no threads the core was not handed"). If parallelism is ever
+wanted here it arrives as a pool the host supplies, in the shape `create_instance`
+already established.
+
 **The readback reads the pixels once, and divides never** (2026-08-11, ADR 0022): the
 caller's `performance.md` has quorra at 2.5–3× their multi-threaded `tiny-skia` on an
 offscreen corpus, "dominated by a per-frame floor that does not grow with pixels".

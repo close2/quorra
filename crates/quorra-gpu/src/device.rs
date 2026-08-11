@@ -90,6 +90,8 @@ pub struct Device {
     glyph_quantum: Option<u16>,
     /// Which lane makes coverage bytes, and how finely the GPU one samples (ADR 0016).
     coverage: Coverage,
+    /// Whether a frame subdivides its encode phase (ADR 0023).
+    instrument_encode: bool,
     coverage_samples: u32,
     /// The GPU lane's winding target, kept across frames (ADR 0016's measurement).
     winding_texture: crate::winding::WindingTexture,
@@ -376,6 +378,7 @@ impl Device {
             dummy_texture: None,
             glyph_quantum: options.glyph_quantum,
             coverage: options.coverage,
+            instrument_encode: options.instrument_encode,
             winding_texture: crate::winding::WindingTexture::default(),
             // Rounded to a square grid and bounded, here rather than at the call site:
             // an option is a request, and what the lane can actually sample is ours.
@@ -612,6 +615,7 @@ impl Device {
             &mut self.atlas,
             self.glyph_quantum,
             self.coverage,
+            self.instrument_encode,
         )?;
         let encode_time = encode_started.elapsed();
 
@@ -649,9 +653,17 @@ impl Device {
 
         // Every refusal a scene can earn has been taken; bind the target last, so
         // the acquire happens only for a frame that will run.
+        //
+        // Timed and reported: the caller's feedback §13 prints a `device` minus our
+        // phases remainder to name the acquire and the present, and says it no longer
+        // believes that subtraction is a duration of anything (§11.1's clocks do not
+        // mix). Two clock reads a frame is nothing next to being able to name them.
+        let acquire_started = Instant::now();
         let bound = self.bind_target(&into, viewport)?;
+        let acquire = acquire_started.elapsed();
 
         let query = self.make_pass_query();
+        let encode_phases = encoded.encode_phases.phases(encode_time);
         let (execute_wall, mut phases, layer_textures) =
             match self.run_frame(&encoded, &bound, upload, query.as_ref(), &damage) {
                 Ok(ran) => ran,
@@ -661,11 +673,15 @@ impl Device {
         // Present before reading instrumentation back: the person sees the frame at
         // the earliest moment, the numbers arrive a map later.
         let mut readback_source: Option<wgpu::Texture> = None;
+        let present_started = Instant::now();
         match bound {
             Bound::Acquired(surface_texture) => self.queue.present(surface_texture),
             Bound::Owned(texture) => readback_source = Some(texture),
             Bound::Borrowed(_) => {}
         }
+        phases.push(("target acquire", acquire));
+        phases.push(("present", present_started.elapsed()));
+        phases.extend(encode_phases);
         let (execute, provenance) = timing::read_pass(
             &self.gpu,
             self.timestamps,
@@ -675,24 +691,7 @@ impl Device {
             &mut phases,
         )?;
 
-        // Phase 4: resolve. Only Readback pays anything here (§6.1: this is the cost
-        // that dominated the old backend's offscreen frame, priced separately so
-        // §11.1 finally has its answer).
-        let (payload, readback) = match readback_source {
-            Some(texture) => {
-                let readback_started = Instant::now();
-                let raster = readback::read_back(
-                    &self.gpu,
-                    &self.queue,
-                    &texture,
-                    viewport.width,
-                    viewport.height,
-                    self.limits.max_target_size,
-                )?;
-                (Payload::Raster(raster), readback_started.elapsed())
-            }
-            None => (Payload::None, Duration::ZERO),
-        };
+        let (payload, readback) = self.resolve_payload(readback_source, viewport)?;
 
         let result = Ok(Frame {
             timings: Timings {
@@ -811,6 +810,33 @@ impl Device {
         }
         let execute_wall = compose::submit_and_wait(self, recorder)?;
         Ok((execute_wall, phases, layer_textures))
+    }
+
+    /// Phase 4: resolve. Only `Readback` pays anything here (§6.1: this is the cost
+    /// that dominated the old backend's offscreen frame, priced separately so §11.1
+    /// finally has its answer — and ADR 0022 is what it bought).
+    ///
+    /// A `Surface` frame has already been presented and a `Texture` frame is where the
+    /// caller wanted it, so both return `Payload::None` and a zero: the number is the
+    /// truth about what this target cost, not a placeholder.
+    fn resolve_payload(
+        &self,
+        readback_source: Option<wgpu::Texture>,
+        viewport: &Viewport<'_>,
+    ) -> Result<(Payload, Duration), RenderError> {
+        let Some(texture) = readback_source else {
+            return Ok((Payload::None, Duration::ZERO));
+        };
+        let started = Instant::now();
+        let raster = readback::read_back(
+            &self.gpu,
+            &self.queue,
+            &texture,
+            viewport.width,
+            viewport.height,
+            self.limits.max_target_size,
+        )?;
+        Ok((Payload::Raster(raster), started.elapsed()))
     }
 
     /// Decide how this frame treats the viewport's damage list (ADR 0012).
