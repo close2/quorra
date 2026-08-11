@@ -46,7 +46,10 @@ pub(crate) struct CoverageMask {
 }
 
 /// Which of ISO 32000-2 §8.5.3.3's two rules decides insideness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Hash` because it is part of the glyph cache's key: the same outline under the two
+/// rules is two different pictures wherever a subpath nests (ADR 0024).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Rule {
     NonZero,
     EvenOdd,

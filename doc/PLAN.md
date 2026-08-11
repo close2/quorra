@@ -15,6 +15,23 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**What the atlas admits is a share of it, and what it keys on now includes the fill
+rule** (2026-08-11, ADR 0024 — the atlas-policy question the culling work left recorded):
+`MAX_GLYPH_DIM` decided caching by a *dimension* while what it protected was a *budget*,
+and the mismatch was a cliff — past about 10× every visible letterform left the atlas and
+was rasterised again on every frame. Held at a magnification on `examples/zoom`, encode
+went **13.6 → 0.65 ms at 12×, 19.4 → 0.50 ms at 20×**, and the zoom sweep's worst frame
+35.8 → 16.2 ms (both runs on a loaded machine, so read them against each other). Two more
+things came with it. A pressure reset now happens **only when the frame's own working set
+would then fit** — otherwise it throws away the part that fits and hits, which cost 6.0 ms
+against 4.8 at 100×. And **the fill rule is part of the glyph key**, which is a
+correctness fix: the same outline under §8.5.3.3's two rules is two pictures wherever a
+subpath nests, and the cache handed the first to the second — invisible until now only
+because the dimension bound kept such shapes out, and the suite's own fill-rule test uses
+a shape twelve pixels past the old cap. `Counters::tiles` counts at last, after reading
+zero for three milestones. The caller's 957-page gate is unmoved, differ list identical
+page for page.
+
 **Feedback §13 is answered — `encode` says what it spent its time on, and the phases say
 which clock they are on** (2026-08-11, ADR 0023): their trace put `encode` at 45% of a
 page turn and 3.86 µs a command, and said the thing that decides what to build — whether

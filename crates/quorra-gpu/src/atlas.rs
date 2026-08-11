@@ -31,7 +31,21 @@
 
 use std::collections::HashMap;
 
-use crate::raster::CoverageMask;
+use crate::raster::{CoverageMask, Rule};
+
+/// The largest share of the atlas one tile may take, as a divisor (ADR 0024).
+///
+/// The bound this replaces was a *dimension* — 128 pixels a side — and what it
+/// protected was a *budget*: "one zoomed-in letterform must not evict a page's worth of
+/// text". Those are not the same rule, and the mismatch was a cliff. Past 128 a glyph
+/// never entered the atlas, so a frame magnified past about 10× rasterised every visible
+/// letterform again on every frame: 12.4 ms to draw thirty glyphs against 1.2 ms to draw
+/// 5 933.
+///
+/// An eighth of an 8 MiB atlas is a 1 MiB tile — 1024×1024, or a letterform at roughly
+/// 70× a reading size — so eight such tiles fill the atlas and a ninth evicts. That is
+/// the protection stated against the quantity it was always about.
+const MAX_TILE_SHARE: u64 = 8;
 
 /// The sub-pixel phase part of a key: quantised to `1/q` when a quantum is set,
 /// bit-exact otherwise. Two variants rather than a silently-exact quantum of 1, so
@@ -51,6 +65,12 @@ pub(crate) struct GlyphKey {
     /// Bit patterns of the composed device linear part (a, b, c, d).
     pub linear: [u32; 4],
     pub phase: PhaseKey,
+    /// §8.5.3.3's rule. Not decoration: an outline with a nested subpath wound the same
+    /// way fills solid under non-zero and holes under even-odd, so a key without it
+    /// hands the first picture to the second request. It was missing until ADR 0024,
+    /// and invisible only because the dimension cap kept most such shapes out of the
+    /// atlas entirely.
+    pub rule: Rule,
 }
 
 /// A resident tile: where it sits in the atlas, and how the tile's pixels relate to
@@ -125,6 +145,21 @@ impl AtlasStore {
 
     pub(crate) fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Whether a tile of this size may be cached at all (ADR 0024).
+    ///
+    /// Two conditions, both about this atlas rather than about a constant: the tile must
+    /// fit the texture — a wider one can never be packed — and it must take no more than
+    /// [`MAX_TILE_SHARE`] of it. A tile the rule refuses still draws, uncached, through
+    /// the scratch path; the caller decides nothing by asking.
+    pub(crate) fn admits(&self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 || width > self.width || height > self.height {
+            return false;
+        }
+        let tile = u64::from(width).saturating_mul(u64::from(height));
+        let whole = u64::from(self.width).saturating_mul(u64::from(self.height));
+        tile.saturating_mul(MAX_TILE_SHARE) <= whole
     }
 
     pub(crate) fn entry_count(&self) -> usize {
@@ -213,10 +248,11 @@ impl AtlasStore {
 #[allow(clippy::arithmetic_side_effects)] // test tile sizes are tiny and literal
 mod tests {
     use super::{AtlasStore, GlyphKey, PhaseKey};
-    use crate::raster::CoverageMask;
+    use crate::raster::{CoverageMask, Rule};
 
     fn key(outline: u32, phase: (u16, u16)) -> GlyphKey {
         GlyphKey {
+            rule: Rule::NonZero,
             outline,
             linear: [0, 0, 0, 0],
             phase: PhaseKey::Quantised(phase.0, phase.1),

@@ -709,17 +709,24 @@ impl Device {
                 atlas_entries: u32::try_from(self.atlas.entry_count()).unwrap_or(u32::MAX),
                 atlas_distinct_keys: encoded.atlas_distinct_keys,
                 segments: encoded.segments,
+                tiles: encoded.tiles,
                 commands_culled: encoded.commands_culled,
                 bytes_uploaded: upload_bytes,
                 layer_textures,
-                ..Counters::default()
             },
             reports,
             payload,
         });
-        // A tile fell through to scratch this frame: repack the atlas from empty on
-        // the next one, so the working set settles rather than thrashing.
-        if encoded.atlas_pressure {
+        // A tile fell through to scratch this frame. Repack from empty on the next one
+        // *only if this frame's working set would then fit* (ADR 0024): a repack settles
+        // an atlas holding a previous page's tiles, but when the frame's own distinct
+        // keys are simply larger than the cache it throws away the part that fits and
+        // hits, and every frame pays the packing again. Measured at 100× on the zoom
+        // ladder, where resetting each frame cost 6.0 ms of encode against 0.6 ms for
+        // keeping what fits.
+        let (atlas_width, atlas_height) = self.atlas.dimensions();
+        let atlas_bytes = u64::from(atlas_width).saturating_mul(u64::from(atlas_height));
+        if encoded.atlas_pressure && encoded.atlas_requested_bytes <= atlas_bytes {
             self.atlas.reset();
         }
         result

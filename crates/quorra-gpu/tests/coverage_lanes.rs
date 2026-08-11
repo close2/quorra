@@ -32,10 +32,16 @@ use quorra_scene::{
 
 const SIZE: u32 = 48;
 
+/// A small atlas, so the shapes below reach the scratch sheet rather than being
+/// cached in front of it: 64 KiB admits tiles of 8 KiB (ADR 0024's eighth), and this
+/// file is about what the two coverage lanes put on the sheet.
+const TINY_ATLAS: u64 = 64 * 1024;
+
 fn device_with(coverage: Coverage) -> Device {
     Device::headless(&Options {
         adapter: Some("llvmpipe".into()),
         coverage,
+        atlas_budget: TINY_ATLAS,
         ..Options::default()
     })
     .expect("llvmpipe is present wherever this suite runs")
@@ -485,9 +491,10 @@ fn the_lane_can_change_between_frames_on_one_device() {
 /// The side of the target `wide_blob` is drawn at.
 const WIDE: u32 = 240;
 
-/// `blob`'s curve, scaled past `MAX_GLYPH_DIM` — so no atlas stands in front of it and
-/// its coverage lands on the frame's scratch sheet under either lane, which is the
-/// only condition under which the sheet has an extent to be charged for at all.
+/// `blob`'s curve, scaled past what the test devices' small atlas will take (ADR 0024)
+/// — so no atlas stands in front of it and its coverage lands on the frame's scratch
+/// sheet under either lane, which is the only condition under which the sheet has an
+/// extent to be charged for at all.
 fn wide_blob(device: &mut Device) -> Scene {
     let outline = device
         .upload_outline(&[
@@ -547,6 +554,7 @@ fn only_the_lane_that_makes_the_winding_texture_pays_for_it() {
     let budget = u64::from(WIDE) * u64::from(WIDE) * 4;
     let mut device = Device::headless(&Options {
         adapter: Some("llvmpipe".into()),
+        atlas_budget: TINY_ATLAS,
         max_frame_bytes: budget,
         ..Options::default()
     })

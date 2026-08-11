@@ -172,7 +172,12 @@ pub struct Counters {
     /// 303 identical page-wide masks, because its key was a name (its ADR 0132; the
     /// same page collapses to 1 here).
     pub clip_distinct_regions: u32,
-    /// Tiles touched by the general path lane (M5; 0 until then).
+    /// Coverage tiles this frame placed on the scratch sheet — the general path lane's
+    /// output, and the GPU lane's, since both go through the one packer.
+    ///
+    /// Reported from M5's landing and honest since ADR 0024; it read zero for three
+    /// milestones after the lane that fills it shipped, which is the shape of counter a
+    /// `Frame` must not have.
     pub tiles: u32,
     /// Path segments processed (M5; 0 until then).
     pub segments: u32,

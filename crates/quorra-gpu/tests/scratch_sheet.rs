@@ -38,11 +38,18 @@ use quorra_scene::{
 const W: u32 = 1191;
 const H: u32 = 1684;
 
+/// The sheet is this file's subject, so the atlas must not stand in front of it: a
+/// 64 KiB atlas admits tiles of 8 KiB (ADR 0024's eighth), and every shape here is
+/// larger than that. Saying it with the budget rather than with a shape size states
+/// *why* these tiles reach the sheet, and survives the admission rule changing again.
+const TINY_ATLAS: u64 = 64 * 1024;
+
 fn device(coverage: Coverage, budget: u64) -> Device {
     Device::headless(&Options {
         adapter: Some("llvmpipe".into()),
         coverage,
         max_frame_bytes: budget,
+        atlas_budget: TINY_ATLAS,
         ..Options::default()
     })
     .expect("llvmpipe is present wherever this suite runs")

@@ -59,10 +59,17 @@ pub(crate) const RECT_INSTANCE_STRIDE: u64 = 32;
 /// `coverage.wgsl`.
 pub(crate) const QUAD_INSTANCE_STRIDE: u64 = 64;
 
-/// The largest tile the glyph lane caches, per side. Beyond it a fill takes the
-/// scratch path — still correct, merely uncached; the bound keeps one zoomed-in
-/// letterform from evicting a page's worth of text (ADR 0009 records the number).
-const MAX_GLYPH_DIM: f32 = 128.0;
+/// A shape's device extent along one axis, as the tile that would hold it: the same
+/// `floor`/`ceil` the rasteriser uses, so the number the atlas is asked about is the
+/// number of texels it would be given.
+fn tile_side(low: f32, high: f32) -> u32 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // clamped below
+    {
+        (high.ceil() - low.floor())
+            .max(0.0)
+            .min(f32::from(u16::MAX)) as u32
+    }
+}
 
 /// A clip rectangle that admits everything, for unclipped instances.
 const OPEN_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
@@ -259,6 +266,8 @@ pub(crate) struct Encoded {
     pub used_ramps: Vec<u32>,
     pub used_meshes: Vec<u32>,
     pub commands: u32,
+    /// Coverage tiles this frame placed on the scratch sheet, both lanes.
+    pub tiles: u32,
     pub clip_distinct_regions: u32,
     pub distinct_outlines: u32,
     pub atlas_distinct_keys: u32,
@@ -268,9 +277,13 @@ pub(crate) struct Encoded {
     /// The GPU lane's triangles and tiles for this frame; empty under `Coverage::Cpu`
     /// and for every command that took the CPU lane anyway.
     pub winding: crate::winding::Sheet,
-    /// Set when a glyph tile no longer fit the atlas and fell through to scratch:
-    /// the device resets the atlas after the frame so the next frame repacks fresh.
+    /// Set when a glyph tile no longer fit the atlas and fell through to scratch.
     pub atlas_pressure: bool,
+    /// Atlas bytes this frame's *distinct* keys asked for, whether they hit or missed.
+    /// A repack only helps when this fits the atlas; when it does not, the frame's
+    /// working set is simply larger than the cache and resetting would throw away the
+    /// part that does fit and hit (ADR 0024).
+    pub atlas_requested_bytes: u64,
     /// What the walk above spent its time on, when the caller asked for the
     /// subdivision (ADR 0023); empty otherwise.
     pub encode_phases: EncodeClock,
@@ -385,6 +398,9 @@ struct ScratchPacker {
     shelves: Vec<(u32, u32, u32)>, // (y, height, cursor)
     next_y: u32,
     data: Vec<u8>,
+    /// Tiles placed on the sheet, for `Counters::tiles` — the count both lanes feed,
+    /// since `reserve` is the one door onto the sheet.
+    placed: u32,
 }
 
 impl ScratchPacker {
@@ -395,6 +411,7 @@ impl ScratchPacker {
             shelves: Vec::new(),
             next_y: 0,
             data: Vec::new(),
+            placed: 0,
         }
     }
 
@@ -409,6 +426,7 @@ impl ScratchPacker {
         if width == 0 || height == 0 || width > self.width {
             return None;
         }
+        self.placed = self.placed.saturating_add(1);
         self.shelves
             .iter_mut()
             .find(|(_, shelf_height, cursor)| {
@@ -627,6 +645,8 @@ struct Encoder<'a> {
     /// Commands that could reach no pixel of the target, and so were never built.
     culled: u32,
     atlas_pressure: bool,
+    /// See `Encoded::atlas_requested_bytes`.
+    atlas_requested_bytes: u64,
     /// Sheet bytes already charged tile by tile, so the sheet's own extent can be
     /// charged once at the end without paying twice (ADR 0021).
     scratch_charged: u64,
@@ -693,6 +713,7 @@ pub(crate) fn encode(
         segments: 0,
         culled: 0,
         atlas_pressure: false,
+        atlas_requested_bytes: 0,
         scratch_charged: 0,
         clock: EncodeClock::new(instrument),
     };
@@ -709,7 +730,9 @@ pub(crate) fn encode(
     // frame whose sheet holds no GPU tiles is charged nothing here, because it
     // allocates nothing there: `Sheet::device_bytes` states that condition once.
     let mut winding = std::mem::take(&mut encoder.winding);
-    let scratch = std::mem::replace(&mut encoder.scratch, ScratchPacker::new(1, 1)).finish();
+    let packer = std::mem::replace(&mut encoder.scratch, ScratchPacker::new(1, 1));
+    let tiles = packer.placed;
+    let scratch = packer.finish();
     if let Some(sheet) = scratch.as_ref() {
         winding.width = sheet.width;
         winding.height = sheet.height;
@@ -750,6 +773,7 @@ pub(crate) fn encode(
         used_ramps: sorted(encoder.used_ramps),
         used_meshes: sorted(encoder.used_meshes),
         encode_phases: encoder.clock,
+        tiles,
         commands: u32::try_from(commands.len()).unwrap_or(u32::MAX),
         clip_distinct_regions: u32::try_from(distinct.len()).unwrap_or(u32::MAX),
         distinct_outlines: u32::try_from(encoder.distinct_outlines.len()).unwrap_or(u32::MAX),
@@ -758,6 +782,7 @@ pub(crate) fn encode(
         commands_culled: encoder.culled,
         winding,
         atlas_pressure: encoder.atlas_pressure,
+        atlas_requested_bytes: encoder.atlas_requested_bytes,
     })
 }
 
@@ -1279,9 +1304,12 @@ impl Encoder<'_> {
                     },
                 );
             }
+            // Cacheable is a question for the atlas — how much of it this tile would
+            // take — rather than a constant here (ADR 0024). A residue chain still
+            // takes the scratch path: the clip multiplies into the tile, so the tile is
+            // not the glyph and would poison the cache for every other placement of it.
             if resolved.residues.is_none()
-                && bx1 - bx0 <= MAX_GLYPH_DIM
-                && by1 - by0 <= MAX_GLYPH_DIM
+                && self.atlas.admits(tile_side(bx0, bx1), tile_side(by0, by1))
             {
                 return self.push_glyph(outline, &to_device, rule, color, &resolved, style, mask);
             }
@@ -1702,10 +1730,16 @@ impl Encoder<'_> {
                 to_device.d.to_bits(),
             ],
             phase,
+            rule,
         };
-        self.atlas_keys.insert(key);
+        let first_use = self.atlas_keys.insert(key);
 
         let entry = if let Some(entry) = self.atlas.get(&key) {
+            if first_use {
+                self.atlas_requested_bytes = self
+                    .atlas_requested_bytes
+                    .saturating_add(u64::from(entry.width).saturating_mul(u64::from(entry.height)));
+            }
             Some(entry)
         } else {
             {
@@ -1733,6 +1767,11 @@ impl Encoder<'_> {
                 self.charge_tile(width, height)?;
                 let tile = raster::fill_mask(&polylines, rule, left, top, width, height);
                 self.clock.geometry(span);
+                if first_use {
+                    self.atlas_requested_bytes = self
+                        .atlas_requested_bytes
+                        .saturating_add(u64::from(width).saturating_mul(u64::from(height)));
+                }
                 let span = self.clock.start();
                 let inserted = self.atlas.insert(key, &tile);
                 self.clock.staging(span);
