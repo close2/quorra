@@ -32,6 +32,18 @@ offscreen frame is three times faster: 4.94 → 1.65 ms**, and the remainder is 
 bandwidth. `tests/perf_gate.rs` has a readback gate now, with both numbers in its
 failure message.
 
+**What the three rounds are worth on the caller's own instrument**, their 957-page
+corpus gate run back to back on a quiet machine, their CPU backend in the same process
+as the control (1.97 s before, 1.95 s after — so the machine did not move): quorra's
+total goes **5.22 s → 4.79 s** and the **median page 2.17× → 1.90×** the CPU backend.
+§6.2 calls a third of that CPU time a success and a tenth a clear win, so this is
+progress rather than arrival. The next candidate is measured and not taken: at half-page
+size the readback is still 63% of a frame (0.366 ms of 0.58 ms), it is memory-bandwidth
+bound in one thread, and the baseline it is losing to is *multi-threaded* `tiny-skia` —
+splitting the conversion across threads is the largest remaining offscreen win, and it
+puts threads in a library that deliberately has none, so it is the owner's call rather
+than a quiet addition.
+
 **A frame's layer textures are a depth, not a count** (2026-08-11, ADR 0020): every plan
 renders into a ping-pong pair of full-target textures, and the compositor created one
 pair per plan — all of them at once, and priced that way. A plan is a group *or* an
