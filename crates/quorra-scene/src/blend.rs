@@ -144,6 +144,43 @@ pub enum Compose {
     /// has a diagonal edge on purpose — a scene of axis-aligned rectangles would agree
     /// while being wrong.
     Src,
+    /// Porter-Duff Destination-Out, weighted by **shape**: the backdrop is scaled by
+    /// `1 − shape`, and nothing is deposited.
+    ///
+    /// The first of §11.4.6's two stages when an element's shape is *not* its coverage
+    /// — a nested group, or an element under a soft mask, where §11.6.4.2 gives shape
+    /// from geometry alone while §11.6.4.3's mask and §11.6.4.4's constant alpha are
+    /// opacity. [`Compose::Src`] reads shape off the alpha a mark is drawn with, which
+    /// those elements contradict; this pair states the two quantities apart.
+    ///
+    /// **The weight is the shape, deliberately not the paint's alpha.** A mark's shape
+    /// here is its coverage under its clip — the same quantity the knockout erase pass
+    /// uses — so a caller draws the object with every source of opacity removed and
+    /// gets exactly §11.6.4.2's shape. Using the alpha instead would repeat the defect
+    /// this operator exists to fix.
+    ///
+    /// Safe where a bounding-box composite is not: at zero coverage it leaves the
+    /// destination exactly, so it cannot erase outside the shape.
+    DestOut,
+    /// Porter-Duff Plus: the source is **added** to the destination, premultiplied.
+    ///
+    /// §11.4.6's second stage, after [`Compose::DestOut`] has made room for it:
+    /// together the pair is `P' = (1 − f) × P + S` in one mark each.
+    ///
+    /// # This operator is only correct in that pair
+    ///
+    /// Source-over here is *not* the clause — it weights the backdrop a second time, by
+    /// `1 − shape × opacity` where §11.4.6 weights it by `1 − shape` alone, and the two
+    /// differ by **32 of 255** at a half-covered pixel under a half-opaque mark. That is
+    /// what the pair exists for. But addition alone saturates: `Plus` without the
+    /// matching `DestOut` before it drives a premultiplied channel past its alpha, and
+    /// no library can tell from one mark whether the other is coming. **The pairing is
+    /// the caller's obligation** — it is the one thing in this vocabulary a scene cannot
+    /// be refused for getting wrong, and it is stated here rather than discovered.
+    ///
+    /// At zero coverage it adds nothing, so like [`Compose::DestOut`] it cannot mark
+    /// outside the shape.
+    Plus,
 }
 
 /// Which of ISO 32000-2 §8.5.3.3's two rules decides the inside of a path.

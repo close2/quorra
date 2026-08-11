@@ -321,37 +321,33 @@ impl Executor<'_> {
             };
             let Some(buffer) = buffer else { continue };
             let bind = &self.lane_binds[&batch.mask];
-            match batch.style {
-                DrawStyle::Over => {
-                    let kind = match batch.kind {
-                        BatchKind::Rect => Kind::RectOver,
-                        BatchKind::Quad => Kind::CoverOver,
-                    };
-                    pass.set_pipeline(&pipelines[&kind]);
+            let (erase_kind, add_kind, over_kind) = match batch.kind {
+                BatchKind::Rect => (Kind::RectErase, Kind::RectAdd, Kind::RectOver),
+                BatchKind::Quad => (Kind::CoverErase, Kind::CoverAdd, Kind::CoverOver),
+            };
+            let draw =
+                |pass: &mut wgpu::RenderPass<'_>, kind: &Kind, range: std::ops::Range<u32>| {
+                    pass.set_pipeline(&pipelines[kind]);
                     pass.set_bind_group(0, &self.globals_bind, &[]);
                     pass.set_bind_group(1, bind, &[]);
                     pass.set_vertex_buffer(0, buffer.slice(..));
-                    pass.draw(0..4, batch.first..batch.first.saturating_add(batch.count));
-                }
+                    pass.draw(0..4, range);
+                };
+            let whole = batch.first..batch.first.saturating_add(batch.count);
+            match batch.style {
+                DrawStyle::Over => draw(&mut pass, &over_kind, whole),
+                // One stage of §11.4.6, asked for by name (ADR 0025): the batch is
+                // instanced like any other, because a single pass over independent
+                // marks needs no interleaving.
+                DrawStyle::DestOut => draw(&mut pass, &erase_kind, whole),
+                DrawStyle::Plus => draw(&mut pass, &add_kind, whole),
                 DrawStyle::Knockout => {
                     // §11.4.6 per element: erase by shape, then deposit — strictly
                     // interleaved, or overlapping elements compose wrongly
                     // (ADR 0010 carries the algebra).
-                    let (erase_kind, add_kind) = match batch.kind {
-                        BatchKind::Rect => (Kind::RectErase, Kind::RectAdd),
-                        BatchKind::Quad => (Kind::CoverErase, Kind::CoverAdd),
-                    };
-                    for i in batch.first..batch.first.saturating_add(batch.count) {
-                        pass.set_pipeline(&pipelines[&erase_kind]);
-                        pass.set_bind_group(0, &self.globals_bind, &[]);
-                        pass.set_bind_group(1, bind, &[]);
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        pass.draw(0..4, i..i.saturating_add(1));
-                        pass.set_pipeline(&pipelines[&add_kind]);
-                        pass.set_bind_group(0, &self.globals_bind, &[]);
-                        pass.set_bind_group(1, bind, &[]);
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        pass.draw(0..4, i..i.saturating_add(1));
+                    for i in whole {
+                        draw(&mut pass, &erase_kind, i..i.saturating_add(1));
+                        draw(&mut pass, &add_kind, i..i.saturating_add(1));
                     }
                 }
             }
@@ -669,20 +665,25 @@ impl Executor<'_> {
 }
 
 fn batch_kinds(batch: &Batch) -> Vec<Kind> {
-    match (batch.kind, batch.style) {
-        (BatchKind::Rect, DrawStyle::Over) => vec![Kind::RectOver],
-        (BatchKind::Rect, DrawStyle::Knockout) => vec![Kind::RectErase, Kind::RectAdd],
-        (BatchKind::Quad, DrawStyle::Over) => vec![Kind::CoverOver],
-        (BatchKind::Quad, DrawStyle::Knockout) => vec![Kind::CoverErase, Kind::CoverAdd],
-    }
+    let (over, erase, add) = match batch.kind {
+        BatchKind::Rect => (Kind::RectOver, Kind::RectErase, Kind::RectAdd),
+        BatchKind::Quad => (Kind::CoverOver, Kind::CoverErase, Kind::CoverAdd),
+    };
+    style_kinds(batch.style, over, erase, add)
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
-/// A single-quad op's pipelines for its style: over alone, or the knockout
-/// erase/add pair in ADR 0010's strict order.
+/// The pipelines one style needs, in the order they must run: over alone, the knockout
+/// erase/add pair in ADR 0010's strict order, or one half of that pair on its own when
+/// the scene asked for §11.4.6's stages by name (ADR 0025).
 fn style_kinds(style: DrawStyle, over: Kind, erase: Kind, add: Kind) -> [Option<Kind>; 2] {
     match style {
         DrawStyle::Over => [Some(over), None],
         DrawStyle::Knockout => [Some(erase), Some(add)],
+        DrawStyle::DestOut => [Some(erase), None],
+        DrawStyle::Plus => [Some(add), None],
     }
 }
 

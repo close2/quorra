@@ -15,6 +15,20 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**Feedback §14 is answered — §11.4.6's two stages can be asked for by name**
+(2026-08-11, ADR 0025): `Compose::Src` reads an element's shape off the alpha it is drawn
+with, which is right where they are the same quantity and wrong where §11.6.4.2's shape
+and §11.6.4.3's opacity differ — a nested group, or an element under a soft mask.
+`Compose::DestOut` and `Compose::Plus` let a caller write `P' = (1 − f) × P + S` in one
+mark each. The change is small because **the pipelines already existed**: the knockout
+lane is those two operators, `(Zero, OneMinusSrcAlpha)` through `fs_shape` and
+`(One, One)`, and this is a vocabulary that can ask for one alone. Measured on a diagonal
+edge under a half-opaque object, the pair is within **0.77 of 255** of the clause's line
+and source-over is **114.95** away from it. Two positions refuse a staged mark because
+they already stage the clause — under a blend mode, and inside a knockout group — and one
+thing cannot be refused: `Plus` alone saturates, so the pairing is the caller's
+obligation and is documented as the first such item in this vocabulary.
+
 **What the atlas admits is a share of it, and what it keys on now includes the fill
 rule** (2026-08-11, ADR 0024 — the atlas-policy question the culling work left recorded):
 `MAX_GLYPH_DIM` decided caching by a *dimension* while what it protected was a *budget*,

@@ -303,6 +303,23 @@ pub enum NonIsolatedReason {
     InsideKnockoutGroup,
 }
 
+/// Why one of §11.4.6's staged operators cannot be drawn where it was placed.
+///
+/// [`Compose::DestOut`] and [`Compose::Plus`] are a caller's own expansion of §11.4.6's
+/// second stage. Both positions below already *are* that stage by another route, so a
+/// staged mark inside them would apply it twice — a refusal rather than a guess (§5 of
+/// the brief).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedComposeReason {
+    /// The mark carries a blend mode other than [`BlendMode::Normal`], which wraps it in
+    /// an implicit one-element group (§11.3.5) — so the operator would compose the group
+    /// rather than the element, which is not where the clause puts it.
+    BlendNotNormal,
+    /// The mark is inside a knockout group, whose every element is already composited
+    /// with the group's initial backdrop by the erase-and-deposit pair of §11.4.6.
+    InsideKnockoutGroup,
+}
+
 /// Why the builder refused an input. Every variant names what was wrong with which
 /// value, because §4.7's refusal is only useful to a caller if it can be attributed.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -356,6 +373,14 @@ pub enum SceneError {
     GroupTooDeep {
         /// The bound that was hit.
         limit: usize,
+    },
+    /// One of §11.4.6's staged operators ([`Compose::DestOut`], [`Compose::Plus`]) in a
+    /// position that already stages the clause by another route.
+    StagedComposeUnsupported {
+        /// The operator that was asked for.
+        compose: Compose,
+        /// Which position refused it.
+        reason: StagedComposeReason,
     },
     /// A non-isolated group (§11.4.4) in a position where a one-accumulator raster
     /// cannot draw it. The reason names which of the three conditions failed; see
@@ -428,6 +453,23 @@ impl fmt::Display for SceneError {
             }
             Self::GroupTooDeep { limit } => {
                 write!(f, "group nesting exceeds the bound of {limit}")
+            }
+            Self::StagedComposeUnsupported { compose, reason } => {
+                let because = match reason {
+                    StagedComposeReason::BlendNotNormal => {
+                        "it also carries a blend mode, which puts it in an implicit \
+                         one-element group (§11.3.5)"
+                    }
+                    StagedComposeReason::InsideKnockoutGroup => {
+                        "it is inside a knockout group, which already stages §11.4.6 per \
+                         element"
+                    }
+                };
+                write!(
+                    f,
+                    "{compose:?} states §11.4.6's second stage, and cannot be drawn here \
+                     because {because}"
+                )
             }
             Self::NonIsolatedGroupUnsupported { reason } => {
                 let because = match reason {
@@ -642,6 +684,7 @@ impl SceneBuilder {
         Self::check_paint(paint)?;
         self.check_clip(clip)?;
         self.check_mask(mask)?;
+        self.check_staged_compose(compose, blend)?;
         self.push(Command::Fill {
             outline,
             transform,
@@ -952,6 +995,25 @@ impl SceneBuilder {
             });
         }
         Ok(())
+    }
+
+    /// §11.4.6's staged operators are the caller's own expansion of the clause, so the
+    /// two positions that already expand it refuse them (ADR 0025).
+    fn check_staged_compose(&self, compose: Compose, blend: BlendMode) -> Result<(), SceneError> {
+        if matches!(compose, Compose::SrcOver | Compose::Src) {
+            return Ok(());
+        }
+        let reason = if blend != BlendMode::Normal {
+            Some(StagedComposeReason::BlendNotNormal)
+        } else if self.inside_knockout() {
+            Some(StagedComposeReason::InsideKnockoutGroup)
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => Err(SceneError::StagedComposeUnsupported { compose, reason }),
+            None => Ok(()),
+        }
     }
 
     fn check_clip(&self, clip: Option<ClipId>) -> Result<(), SceneError> {

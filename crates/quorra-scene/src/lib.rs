@@ -45,5 +45,5 @@ pub use mesh::MeshSpec;
 pub use paint::{Color, LineCap, LineJoin, Paint, ShadingKind, Stop, Stroke};
 pub use scene::{
     ClipDef, Command, Cost, GroupSpec, ImageFilter, MAX_COORDINATE, MAX_GROUP_DEPTH, MaskDef,
-    NonIsolatedReason, Scene, SceneBuilder, SceneError,
+    NonIsolatedReason, Scene, SceneBuilder, SceneError, StagedComposeReason,
 };

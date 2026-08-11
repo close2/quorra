@@ -87,6 +87,12 @@ pub(crate) enum BatchKind {
 pub(crate) enum DrawStyle {
     Over,
     Knockout,
+    /// §11.4.6's first stage alone: scale the backdrop by `1 − shape` and deposit
+    /// nothing ([`Compose::DestOut`], ADR 0025). The same erase pass the knockout pair
+    /// opens with, asked for by name.
+    DestOut,
+    /// §11.4.6's second stage alone: add the mark, premultiplied ([`Compose::Plus`]).
+    Plus,
 }
 
 /// A run of consecutive instances in one lane with one style and one soft mask, in
@@ -1260,10 +1266,14 @@ impl Encoder<'_> {
                 mask,
             );
         }
-        let style = if compose_mode == Compose::Src {
-            DrawStyle::Knockout
-        } else {
-            self.style
+        // A staged operator names its own pass; anything else inherits the enclosing
+        // group's style, which is knockout or over (ADR 0025 refuses the combination at
+        // the builder, so these cases cannot overlap).
+        let style = match compose_mode {
+            Compose::Src => DrawStyle::Knockout,
+            Compose::DestOut => DrawStyle::DestOut,
+            Compose::Plus => DrawStyle::Plus,
+            Compose::SrcOver => self.style,
         };
         self.distinct_outlines.insert(outline.0);
         self.segments = self.segments.saturating_add(stored.segments.len() as u64);
