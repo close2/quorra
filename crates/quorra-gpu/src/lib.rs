@@ -40,6 +40,7 @@ mod encode;
 pub mod error;
 pub mod frame;
 mod instrument;
+mod keyhash;
 mod layers;
 pub mod mask;
 mod outline;

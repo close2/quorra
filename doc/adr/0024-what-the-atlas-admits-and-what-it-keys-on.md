@@ -66,7 +66,30 @@ and it began failing the moment admission changed. `tests/atlas_policy.rs` now h
 at 70 pixels, where it would have failed before this ADR too — verified by putting the
 defect back for one run.
 
-### 4. `Counters::tiles` counts
+### 4. The key that grew is hashed by a hasher that fits it
+
+Putting the rule in the key cost **0.19 ms** of `encode` on the dense page at 1× — a
+fifth of the phase, for one more field in a key hashed twice per glyph (once against the
+frame's distinct-key set, once against the atlas). A page of text hashes about twelve
+thousand times inside one `encode`, and the standard library's default is `SipHash` 1-3
+with a per-process random seed: the right default against hostile keys, and neither
+property is ours — these keys are our own encoder's `u32`s, and §4.6 wants a frame to be
+a function of its inputs rather than of a seed.
+
+`keyhash.rs` is a multiply-xor-rotate hasher for those two maps. Measured on the same
+page, `encode` alone, fastest of five on an idle machine:
+
+| | encode |
+|---|---|
+| before this ADR (no rule in the key) | 0.932 ms |
+| with the rule, `SipHash` | 1.125 ms |
+| with the rule, this hasher | **0.746 ms** |
+
+So the correctness fix is paid for twice over, and the page is faster than it was before
+either change. Nothing in this crate iterates those maps in a way that reaches the
+output, so this is speed and nothing else.
+
+### 5. `Counters::tiles` counts
 
 It was documented "M5; 0 until then", M5 shipped three milestones ago, and nothing ever
 set it: a frame that packed forty tiles reported zero. It now counts what the sheet

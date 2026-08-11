@@ -45,6 +45,7 @@ use quorra_scene::{
 use crate::atlas::{AtlasStore, GlyphKey, PhaseKey};
 use crate::error::RenderError;
 use crate::instrument::EncodeClock;
+use crate::keyhash::FastSet;
 use crate::raster::{self, DeviceTransform, Polyline, Rule};
 use crate::resources::ResourceStore;
 use crate::startup::Coverage;
@@ -643,7 +644,7 @@ struct Encoder<'a> {
     budget: u64,
     spent: u64,
     distinct_outlines: HashSet<u32>,
-    atlas_keys: HashSet<GlyphKey>,
+    atlas_keys: FastSet<GlyphKey>,
     used_images: HashSet<u32>,
     used_ramps: HashSet<u32>,
     used_meshes: HashSet<u32>,
@@ -712,7 +713,7 @@ pub(crate) fn encode(
         budget: frame_budget_bytes,
         spent: needed,
         distinct_outlines: HashSet::new(),
-        atlas_keys: HashSet::new(),
+        atlas_keys: FastSet::default(),
         used_images: HashSet::new(),
         used_ramps: HashSet::new(),
         used_meshes: HashSet::new(),

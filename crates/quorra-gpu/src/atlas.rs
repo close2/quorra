@@ -29,8 +29,7 @@
 //! not a hit rate (§6.3's lesson: a hit rate describes the lookups you made, never
 //! the ones you should have made).
 
-use std::collections::HashMap;
-
+use crate::keyhash::FastMap;
 use crate::raster::{CoverageMask, Rule};
 
 /// The largest share of the atlas one tile may take, as a divisor (ADR 0024).
@@ -114,7 +113,7 @@ pub(crate) struct AtlasStore {
     height: u32,
     shelves: Vec<Shelf>,
     next_shelf_y: u32,
-    entries: HashMap<GlyphKey, AtlasEntry>,
+    entries: FastMap<GlyphKey, AtlasEntry>,
     pending: Vec<AtlasUpload>,
     /// Bumped on every reset; the device recreates its bind group when it changes.
     pub generation: u64,
@@ -137,7 +136,7 @@ impl AtlasStore {
             height,
             shelves: Vec::new(),
             next_shelf_y: 0,
-            entries: HashMap::new(),
+            entries: FastMap::default(),
             pending: Vec::new(),
             generation: 0,
         }

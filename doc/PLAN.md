@@ -57,8 +57,12 @@ correctness fix: the same outline under §8.5.3.3's two rules is two pictures wh
 subpath nests, and the cache handed the first to the second — invisible until now only
 because the dimension bound kept such shapes out, and the suite's own fill-rule test uses
 a shape twelve pixels past the old cap. `Counters::tiles` counts at last, after reading
-zero for three milestones. The caller's 957-page gate is unmoved, differ list identical
-page for page.
+zero for three milestones. Putting the rule in the key cost 0.19 ms of encode on the
+dense page — a key hashed twice per glyph, twelve thousand times a frame — so the two
+hot maps got a deterministic multiply-xor-rotate hasher of our own (`keyhash.rs`): the
+same page's encode is **0.932 ms before this work, 1.125 with the rule under `SipHash`,
+0.746 with the rule under ours**, so the correctness fix is paid for twice over. The
+caller's 957-page gate is unmoved, differ list identical page for page.
 
 **Feedback §13 is answered — `encode` says what it spent its time on, and the phases say
 which clock they are on** (2026-08-11, ADR 0023): their trace put `encode` at 45% of a
