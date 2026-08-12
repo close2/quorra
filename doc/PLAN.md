@@ -15,6 +15,28 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A host can say what size is coming** (2026-08-13, ADR 0035): the rest of the caller's
+§9. ADR 0031 moved 2.4 ms of a first frame to device construction and wrote down that
+about six more scale with the target and cannot be warmed without knowing it. So a host
+says: `Device::warm_for(width, height)`, called where the device is constructed — off the
+critical path by §7's own advice, while a first frame is on it by definition. On a
+2 448 × 4 752 page with eight groups, six devices per configuration: **a first frame of
+24.7 ms becomes 10.3**, against steady frames of five. The pair it makes is held until the
+frame that wants it takes it and no longer — keeping pairs *between* frames was
+implemented and measured and moved nothing, so ADR 0012's per-frame pool stands. The
+shipped test asserts a property rather than a duration (a device warmed for this size, for
+another, or for none draws the same bytes), because a re-measurement under load read 19.9
+against 20.0 and that is contention, not a result.
+
+**What is next on this path is measured and not taken**: the compositor allocates a layer
+pair at the *full target*, and on the three corpus pages that refuse for bytes at 4× the
+plans using them cover **0.0 %, 0.1–0.4 % and 4–6.5 %** of the page — 279, 296 and 321 MB
+against a 268 MB budget, of which the pairs are 186, 296 and 257. Sizing a layer to its
+plan's device bounds is what those pages need, and it is the same "every stage learns the
+origin" change as ADR 0028's panes: two or three lines in each of six shaders, plus the
+plan bounds and the pool. The shape is known and the numbers are above; it wants a session
+of its own rather than the tail of one.
+
 **Shelves stay near one width, so the sheet stays near square** (2026-08-12, ADR 0034):
 the item ADR 0021 left — "the sheet's *height* … is a packer question with its own
 measurement" — measured at last. `issue16287.pdf` at 4× committed a **6 026 × 2 406 sheet

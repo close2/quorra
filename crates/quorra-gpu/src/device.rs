@@ -95,6 +95,9 @@ pub struct Device {
     coverage_samples: u32,
     /// The GPU lane's winding target, kept across frames (ADR 0016's measurement).
     winding_texture: crate::winding::WindingTexture,
+    /// A layer pair made ahead of the frame that will want it (ADR 0035), and held only
+    /// until that frame takes it — the pool itself stays per-frame, as ADR 0012 decided.
+    warmed_pair: Option<(u32, u32, layers::Pair)>,
     timestamps: Option<TimestampSupport>,
     /// The frame's two timestamps and their buffers, kept for the device's life
     /// (ADR 0031). Absent when the adapter has no timestamp queries, and absent for
@@ -389,6 +392,7 @@ impl Device {
             coverage: options.coverage,
             instrument_encode: options.instrument_encode,
             winding_texture: crate::winding::WindingTexture::default(),
+            warmed_pair: None,
             // Rounded to a square grid and bounded, here rather than at the call site:
             // an option is a request, and what the lane can actually sample is ours.
             coverage_samples: {
@@ -548,6 +552,44 @@ impl Device {
     #[must_use]
     pub fn is_warm(&self) -> bool {
         self.pipelines.is_warm()
+    }
+
+    /// Make the frame-sized resources a target of this size will need, now (ADR 0035).
+    ///
+    /// **What a first frame costs over its successors is mostly allocation**, and the
+    /// caller's `QUORRA_FEEDBACK.md` §9 measured it at 12 to 18 ms with the observation
+    /// that settling for a second between bring-up and the first render changes nothing:
+    /// the pipelines are ready long before anything asks. What is not ready is the
+    /// memory, and it cannot be until the size is known — which is why this takes the
+    /// size rather than happening on the warm-up thread by itself.
+    ///
+    /// Call it where the device is constructed. §7's advice already puts that off the
+    /// critical path (the caller's `main` spawns a thread for it at its first line),
+    /// while a first frame is on that path by definition. Calling it again with the same
+    /// size is free; with a different one it replaces what it held, because a viewer
+    /// draws one size at a time and a zoom replaces it.
+    ///
+    /// It is a hint and nothing depends on it: a frame of any size draws correctly
+    /// whether or not this was called, and what a `Frame` reports about its own bytes is
+    /// what the frame *needed*, not what happened to be resident already.
+    pub fn warm_for(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        // Held until the frame that wants it takes it, and no longer: the pool itself
+        // stays per-frame, because ADR 0012 declined to keep one and nothing measured
+        // here overturns that. Making the pair and dropping it immediately was tried and
+        // measures the same on this driver (11.3 ms against 10.3 for a first frame), but
+        // it relies on the driver keeping a freed allocation warm, which is a promise no
+        // API makes.
+        self.warmed_pair = Some((
+            width,
+            height,
+            [
+                layers::warm_texture(self, width, height),
+                layers::warm_texture(self, width, height),
+            ],
+        ));
     }
 
     /// Block until the warm set is compiled. Startup measurement support; a caller
@@ -775,14 +817,20 @@ impl Device {
         };
         let dummy_view = self.ensure_dummy();
         let mask_count = encoded.mask_plans.len();
+        // Taken, not borrowed: it belongs to the first frame of its size and to no other.
+        let warmed = match self.warmed_pair.take() {
+            Some((w, h, pair)) if (w, h) == (width, height) => Some(pair),
+            _ => None,
+        };
         let mut executor = Executor {
             device: self,
             encoded,
             width,
             height,
-            // Empty: a plan's pair is created on its first acquire, so a flat frame
-            // creates none at all (ADR 0020).
-            pool: LayerPool::new(),
+            // Empty unless a host called `warm_for` for this size, which puts one pair
+            // in it: a plan's pair is otherwise created on its first acquire, so a flat
+            // frame creates none at all (ADR 0020).
+            pool: LayerPool::warmed(warmed),
             mask_views: (0..mask_count).map(|_| None).collect(),
             rect_buffer: upload.rect_instances,
             quad_buffer: upload.quad_instances,

@@ -18,7 +18,8 @@
 // Test-file lint policy as in m1.rs.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use quorra_gpu::{Device, Options};
+use quorra_gpu::{Device, Options, Target, Viewport};
+use quorra_scene::{Affine, BlendMode, Color, Compose, GroupSpec, Point, Rect, SceneBuilder};
 
 /// Build a device on every adapter this machine has and drop each one at once —
 /// before the warm-up thread it started can plausibly have finished.
@@ -72,4 +73,68 @@ fn a_warm_device_drops_too() {
     device.wait_until_warm();
     assert!(device.is_warm());
     drop(device);
+}
+
+/// **A warmed device draws the same frame as a cold one** (ADR 0035).
+///
+/// `Device::warm_for` exists to move an allocation off the first frame, and the property
+/// that makes it safe to call — or not to call — is that it changes nothing else: the
+/// same scene at the same size gives the same bytes, whether it was warmed for that size,
+/// for another one, or not at all. A hint that changed a picture would be worse than the
+/// milliseconds it saves.
+#[test]
+fn warming_changes_the_timing_and_nothing_else() {
+    let scene = {
+        let mut builder = SceneBuilder::new();
+        builder
+            .group(
+                GroupSpec {
+                    alpha: 0.6,
+                    blend: BlendMode::Normal,
+                    clip: None,
+                    knockout: false,
+                    mask: None,
+                    isolated: true,
+                    compose: Compose::SrcOver,
+                },
+                |body| {
+                    body.rect(
+                        Rect::new(Point::new(4.0, 4.0), Point::new(48.0, 40.0)),
+                        Affine::IDENTITY,
+                        Color::new(0.2, 0.5, 0.9, 0.8),
+                        None,
+                        None,
+                    )
+                },
+            )
+            .expect("a group of one rect");
+        builder.finish()
+    };
+    let viewport = Viewport::full(64, 48, Affine::IDENTITY);
+    let draw = |warm: Option<(u32, u32)>| {
+        let mut device = Device::headless(&Options {
+            adapter: Some("llvmpipe".into()),
+            ..Options::default()
+        })
+        .expect("llvmpipe is present wherever this suite runs");
+        device.wait_until_warm();
+        if let Some((w, h)) = warm {
+            device.warm_for(w, h);
+        }
+        device
+            .render(&scene, &viewport, Target::Readback)
+            .expect("a group draws")
+            .into_raster()
+            .unwrap()
+            .into_pixels()
+    };
+
+    let cold = draw(None);
+    assert_eq!(draw(Some((64, 48))), cold, "warmed for this size");
+    assert_eq!(draw(Some((800, 600))), cold, "warmed for another size");
+    assert_eq!(
+        draw(Some((0, 0))),
+        cold,
+        "a zero size is a no-op, not a panic"
+    );
 }

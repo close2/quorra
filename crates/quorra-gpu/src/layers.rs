@@ -37,16 +37,34 @@ pub(crate) type Pair = [wgpu::Texture; 2];
 /// Not a cache: there is nothing to look up, and a pair carries no identity between
 /// tenants. It is a free list whose length is the answer to "how many did this frame
 /// need at once".
+#[derive(Debug)]
 pub(crate) struct LayerPool {
     free: Vec<Pair>,
     live: usize,
     peak: usize,
 }
 
+/// One layer-sized texture, for [`crate::device::Device::warm_for`] to make and let
+/// go (ADR 0035).
+///
+/// Here rather than at the call site so that what a warm-up allocates and what a
+/// frame allocates cannot drift apart: both are `WARM_FORMAT` at the target's size,
+/// and a warm-up of another format would warm nothing.
+pub(crate) fn warm_texture(device: &Device, width: u32, height: u32) -> wgpu::Texture {
+    device.create_internal_texture("quorra layer warm-up", width, height, WARM_FORMAT)
+}
+
 impl LayerPool {
-    pub(crate) const fn new() -> Self {
+    /// A pool for one frame, holding what a host warmed if anything (ADR 0035).
+    ///
+    /// Per frame, not per device: ADR 0012 declined to keep the compositor's textures
+    /// "until a measurement says otherwise", and the measurement that prompted this — a
+    /// first frame costing 25 ms against a steady 5 — turned out to be about the *first*
+    /// allocation of a size rather than about reuse. Keeping pairs between frames was
+    /// implemented and measured and moved nothing either way.
+    pub(crate) fn warmed(pair: Option<Pair>) -> Self {
         Self {
-            free: Vec::new(),
+            free: pair.into_iter().collect(),
             live: 0,
             peak: 0,
         }
