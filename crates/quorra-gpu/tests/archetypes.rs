@@ -550,13 +550,18 @@ fn the_generator_builds_the_shape_the_profile_states() {
 
 /// What the archetypes take on a cold device, printed always and gated loosely.
 ///
-/// A wall clock on a loaded runner is context rather than evidence, so this exists to
-/// put numbers in a log and to fail only on the kind of regression that is not
-/// arguable — the twentyfold sort this tree has shipped twice. Measured on llvmpipe,
+/// **Ignored by default, and that is the honest status.** A wall clock on a loaded
+/// machine is context rather than evidence: this file's counter gate passed unchanged
+/// under a load average of 32 while this test read sixteen seconds for an archetype
+/// recorded at 1.79 — the same code, the same scene, a neighbour compiling something.
+/// A gate that fails for that reason teaches people to ignore failures. Run it
+/// deliberately, on a quiet machine, when a number is what you want:
+/// `cargo test --release -p quorra-gpu --test archetypes -- --ignored --nocapture`. Measured on llvmpipe,
 /// release, cold device, 2026-08-12: median page 18 ms, dense text 41, artwork 160,
 /// image page 29, clip mountain 30, giant 27. Software rasterisation dominates every
 /// one of them, which is why the gate is a multiple rather than a bound.
 #[test]
+#[ignore = "a wall clock is a measurement here, not a gate; see the doc comment"]
 fn no_archetype_takes_absurdly_long() {
     // The rasteriser is a byte loop, so an unoptimised build is an order of magnitude
     // slower and one threshold cannot serve both. Measured 2026-08-12 on llvmpipe, cold

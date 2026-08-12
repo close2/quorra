@@ -15,6 +15,22 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**The coverage lane is chosen by what each lane would cost** (2026-08-12, ADR 0026): the
+corpus profile put `Coverage::Gpu` against the largest real page and it **refused the
+frame** — 922 MB, of which **821 MB was vertices**. The GPU lane costs an outline's
+triangles *per placement, whatever the tile's size*: a nine-pixel glyph is 12.4 KB of
+triangles against ~150 bytes of coverage, eighty times more, on the page shape most
+documents are made of. So the lane is now chosen per command by comparing the two costs
+the encoder already knows — `width × height` bytes against
+`triangle_count × 3 × stride` — and `Coverage::Gpu` means "where it pays" rather than
+"everywhere". A page of ordinary text stops paying 62.5 MB and twelve milliseconds to be
+drawn *worse*; the corpus's largest page draws instead of refusing; and 200 shapes of
+200 px — the shape ADR 0016 was built for — go from **121 ms of encode to 3**. What is
+left is the winding texture, sized from the whole sheet at eight bytes a texel, which
+still refuses a page of very large shapes: it is scratch, resolved and then dead, so
+banding it is the next piece of work on this lane and it wants its own tests, because it
+touches the pass that once drew the wrong glyph.
+
 **Our fixtures were invented, and the corpus says what pages are actually shaped like**
 (2026-08-12, `doc/corpus-profile.md` and `tests/archetypes.rs`): every performance
 fixture here was reasoned out rather than measured, and a measurement over the caller's

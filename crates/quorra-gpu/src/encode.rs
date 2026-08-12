@@ -1290,7 +1290,14 @@ impl Encoder<'_> {
             // polylines — which is the whole of why its cost does not grow with the
             // magnification: there is no flattening here to be done again at a new
             // scale, and no atlas in front of it to be cold (ADR 0016).
-            if self.gpu_lane(&resolved) && !stored.quads.is_empty() {
+            if !stored.quads.is_empty()
+                && self.gpu_lane(
+                    &resolved,
+                    tile_side(bx0, bx1),
+                    tile_side(by0, by1),
+                    stored.quads.triangle_count(),
+                )
+            {
                 let Some(tile) = self.visible_tile((bx0, by0, bx1, by1), &resolved) else {
                     return Ok(());
                 };
@@ -1849,8 +1856,17 @@ impl Encoder<'_> {
         style: DrawStyle,
         mask: Option<u32>,
     ) -> Result<(), RenderError> {
-        if self.gpu_lane(resolved)
-            && let Some(bounds) = raster::polyline_bounds(polylines)
+        // Already-flattened geometry — a stroke's expansion, an oblique rectangle — has
+        // one triangle per point, since `append_triangles` fans each polyline from its
+        // own start.
+        let flattened_triangles: usize = polylines.iter().map(|line| line.points.len()).sum();
+        if let Some(bounds) = raster::polyline_bounds(polylines)
+            && self.gpu_lane(
+                resolved,
+                tile_side(bounds.0, bounds.2),
+                tile_side(bounds.1, bounds.3),
+                flattened_triangles,
+            )
         {
             // Flattened already — a stroke was expanded on the CPU (§8.4.3) and an
             // oblique rectangle is four corners — so what moves to the device is the
@@ -1951,15 +1967,38 @@ impl Encoder<'_> {
         (width > 0 && height > 0).then_some((left, top, width, height))
     }
 
-    /// Whether this command can take the GPU lane at all.
+    /// Whether this command takes the GPU lane.
     ///
-    /// A residue clip is the one thing that stops it: a non-rectangular clip multiplies
-    /// into the coverage bytes on the CPU (`residue_product`), and there is no pass yet
-    /// that does the same on the device. Such a command takes the CPU lane and lands on
-    /// the same sheet beside the GPU's tiles, which is why the sheet has one layout and
-    /// two producers rather than two sheets (ADR 0016).
-    fn gpu_lane(&self, resolved: &ResolvedClip) -> bool {
-        self.coverage == Coverage::Gpu && resolved.residues.is_none()
+    /// Three conditions, and the third is ADR 0026's.
+    ///
+    /// **The caller asked for it.** [`Coverage::Gpu`] is a request; what follows decides
+    /// where honouring it is a win.
+    ///
+    /// **No residue clip.** A non-rectangular clip multiplies into the coverage bytes on
+    /// the CPU (`residue_product`), and there is no pass yet that does the same on the
+    /// device. Such a command takes the CPU lane and lands on the same sheet beside the
+    /// GPU's tiles, which is why the sheet has one layout and two producers rather than
+    /// two sheets (ADR 0016).
+    ///
+    /// **The tile is worth more than its triangles.** The two lanes cost different
+    /// things, and both are known here: the CPU lane's tile is `width × height` bytes of
+    /// coverage, while the GPU lane's is this outline's triangles — three vertices each,
+    /// [`WindingVertex::STRIDE`] apiece — **per placement, whatever the tile's size**.
+    /// So the crossover is not a dimension anybody chooses; it is where those two
+    /// numbers cross, and each shape decides its own. A nine-pixel glyph of eight curves
+    /// costs 12.4 KB of triangles against 150 bytes of coverage, which is why a page of
+    /// 66 309 of them asked for 821 MB of vertices and was refused; the same outline at
+    /// 300 pixels costs the same triangles against 90 KB of coverage, and the device
+    /// should draw it.
+    fn gpu_lane(&self, resolved: &ResolvedClip, width: u32, height: u32, triangles: usize) -> bool {
+        if self.coverage != Coverage::Gpu || resolved.residues.is_some() {
+            return false;
+        }
+        let coverage_bytes = u64::from(width).saturating_mul(u64::from(height));
+        let triangle_bytes = (triangles as u64)
+            .saturating_mul(3)
+            .saturating_mul(crate::outline::WindingVertex::STRIDE);
+        coverage_bytes >= triangle_bytes
     }
 
     /// Reserve a tile on the sheet and emit the quad that will sample it.

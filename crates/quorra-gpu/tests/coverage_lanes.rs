@@ -455,8 +455,12 @@ fn the_lane_can_change_between_frames_on_one_device() {
     })
     .expect("llvmpipe is present wherever this suite runs");
     device.wait_until_warm();
-    let scene = blob(&mut device);
-    let viewport = Viewport::full(SIZE, SIZE, Affine::IDENTITY);
+    // Large enough that the GPU lane takes it: ADR 0026 weighs a tile's coverage bytes
+    // against its triangles, and a 40-pixel blob is cheaper to rasterise than to
+    // triangulate — both lanes would answer it identically and the test could no longer
+    // tell them apart.
+    let scene = blob_at(&mut device, 300.0);
+    let viewport = Viewport::full(SIZE * 14, SIZE * 14, Affine::IDENTITY);
 
     // Alternate, twice each way, and keep what every frame drew.
     let mut frames = Vec::new();
@@ -587,4 +591,102 @@ fn only_the_lane_that_makes_the_winding_texture_pays_for_it() {
         }
         other => panic!("expected the GPU lane to be charged for its texture, got {other:?}"),
     }
+}
+
+/// The lane a command takes is decided by what the two lanes would cost it, not by a
+/// constant (ADR 0026).
+///
+/// The GPU lane's price is this outline's triangles — three vertices each, one stride
+/// apiece — **per placement, whatever the tile's size**. The CPU lane's is the tile's
+/// area in coverage bytes. So one shape at two scales takes two different lanes, and
+/// `Counters::tiles` says which: the GPU lane always packs a tile, the CPU lane packs
+/// one only when the atlas will not hold it.
+#[test]
+fn the_lane_follows_what_each_would_cost() {
+    let small = |device: &mut Device| blob_at(device, 9.0);
+    let large = |device: &mut Device| blob_at(device, 300.0);
+
+    // Small: the triangles cost more than the coverage, so the GPU lane declines and
+    // the tile goes to the atlas — nothing reaches the sheet.
+    let mut device = device_with(Coverage::Gpu);
+    let scene = small(&mut device);
+    let frame = device
+        .render(
+            &scene,
+            &Viewport::full(SIZE, SIZE, Affine::IDENTITY),
+            Target::Readback,
+        )
+        .expect("a page of small glyphs must draw on the GPU lane's setting");
+    assert_eq!(
+        frame.counters().tiles,
+        0,
+        "a nine-pixel glyph costs 12.4 KB of triangles against ~150 bytes of coverage; \
+         asking the device to draw it is what made a page of 66 309 of them refuse"
+    );
+
+    // Large: the coverage costs more than the triangles, so the device draws it.
+    let mut device = device_with(Coverage::Gpu);
+    let scene = large(&mut device);
+    let frame = device
+        .render(
+            &scene,
+            &Viewport::full(SIZE * 4, SIZE * 4, Affine::IDENTITY),
+            Target::Readback,
+        )
+        .expect("a large shape must draw");
+    assert!(
+        frame.counters().tiles > 0,
+        "at 300 pixels the same outline's coverage is 90 KB against the same triangles, \
+         and the lane ADR 0016 built for exactly this must take it"
+    );
+
+    // And the setting still decides: the same large shape under `Cpu` never reaches the
+    // GPU lane, whatever it would have cost.
+    let mut device = device_with(Coverage::Cpu);
+    let scene = large(&mut device);
+    let frame = device
+        .render(
+            &scene,
+            &Viewport::full(SIZE * 4, SIZE * 4, Affine::IDENTITY),
+            Target::Readback,
+        )
+        .expect("draws");
+    let _ = frame.into_raster();
+}
+
+/// One closed curve `side` pixels across, filled — the shape both lanes are asked about
+/// above.
+fn blob_at(device: &mut Device, side: f32) -> Scene {
+    let r = side * 0.5;
+    let centre = side;
+    let outline = device
+        .upload_outline(&[
+            Segment::MoveTo(Point::new(centre - r, centre)),
+            Segment::CubicTo {
+                c1: Point::new(centre - r, centre - r),
+                c2: Point::new(centre + r, centre - r),
+                to: Point::new(centre + r, centre),
+            },
+            Segment::CubicTo {
+                c1: Point::new(centre + r, centre + r),
+                c2: Point::new(centre - r, centre + r),
+                to: Point::new(centre - r, centre),
+            },
+            Segment::Close,
+        ])
+        .unwrap();
+    let mut builder = SceneBuilder::new();
+    builder
+        .fill(
+            outline,
+            Affine::IDENTITY,
+            FillRule::NonZero,
+            Paint::Solid(Color::new(0.2, 0.3, 0.7, 1.0)),
+            None,
+            BlendMode::Normal,
+            Compose::SrcOver,
+            None,
+        )
+        .unwrap();
+    builder.finish()
 }

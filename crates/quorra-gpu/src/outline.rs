@@ -207,7 +207,11 @@ impl QuadOutline {
     }
 
     /// Triangles this outline needs: one per segment, two per curved segment.
-    #[cfg(test)]
+    ///
+    /// Not merely instrumentation: it is what the encoder weighs the GPU lane against
+    /// the CPU one with (ADR 0026), because this count times three vertices times
+    /// [`WindingVertex::STRIDE`] is what a *placement* costs on the device, and the same
+    /// placement costs its tile's area in coverage bytes on the processor.
     #[allow(clippy::arithmetic_side_effects)] // a sum of two lengths of the same Vec
     pub(crate) fn triangle_count(&self) -> usize {
         self.contours
