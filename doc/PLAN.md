@@ -15,6 +15,23 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A clip chain is one region, so its links intersect** (2026-08-12, ADR 0030): the caller
+asked, in their `QUORRA_FEEDBACK.md` §18, what rule composes a chain here and whether
+§10.7.4 changes it. It was a product — so one clip restated *n* times raised its
+antialiased boundary to the *n*-th power, and their witness page painted an edge at 0.041
+where the geometry is 0.827. ISO 32000-2 §8.5.4 settles it without needing the
+measurement: the graphics state holds **one** clipping path, set to *the intersection of*
+the current path and the new one, and §11.3.7.2's NOTE 1 makes the fractions the
+rasterisation of that one hard-edged region. Nothing in the standard composes two
+fractional coverages; the place a genuine product of shape values lives is §11.5's soft
+mask, a different mechanism with its own clause. So the links take `min`, which is
+idempotent the way intersecting a region with itself is, and never below the exact area.
+Where the clip meets the *mark* the product stays, as a stated choice: those two
+boundaries are usually unrelated, which is the case a product estimates and `min` does
+not. On the corpus all three readings measure identically — 915/37/5, no page's numbers
+moving — so this is a clause decision that the measurement declines to arbitrate, and it
+is written down that way.
+
 **A shelf the CPU lane did not write was the tail of the wide layout** (2026-08-12, the
 caller's `QUORRA_FEEDBACK.md` §20.4.1): they measured the GPU lane against the corpus for
 the first time and found `transparency_group.pdf` differing by 31.7 of 255 in its worst

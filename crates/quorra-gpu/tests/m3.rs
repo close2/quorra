@@ -449,3 +449,91 @@ fn clip_refusals_are_named() {
     assert_eq!(pixel(7, 6), &[0, 0, 0, 0]);
     assert_eq!(pixel(0, 6), &[0, 0, 0, 0]);
 }
+
+/// **Restating a clip changes nothing** — ISO 32000-2 §8.5.4 (ADR 0030).
+///
+/// > After the path has been painted, the clipping path in the graphics state shall be
+/// > set to the intersection of the current clipping path and the newly constructed
+/// > path.
+///
+/// A chain is one region arrived at by intersecting paths, so intersecting it with a
+/// path it already contains is the same region — and a renderer that rasterises each
+/// link separately owes that identity to the clause. Composing the links by multiplying
+/// their coverages does not have it: an antialiased boundary at 0.5 raised to the *n*-th
+/// power is the same clip stated *n* times and answered differently each time, which is
+/// what the caller measured as a ladder halving at every rung
+/// (`QUORRA_FEEDBACK.md` §18).
+///
+/// The diagonal is what makes the test bite: every pixel along it carries a fraction, and
+/// only there do the two rules differ.
+#[test]
+fn a_clip_stated_again_admits_exactly_what_it_did() {
+    let mut device = Device::headless(&Options {
+        adapter: Some("llvmpipe".into()),
+        ..Options::default()
+    })
+    .expect("llvmpipe is present wherever this suite runs");
+    device.wait_until_warm();
+    let side = 64_u32;
+    let viewport = Viewport::full(side, side, Affine::IDENTITY);
+    let diagonal = device
+        .upload_outline(&[
+            Segment::MoveTo(Point::new(0.0, 0.0)),
+            Segment::LineTo(Point::new(64.0, 61.0)),
+            Segment::LineTo(Point::new(0.0, 64.0)),
+            Segment::Close,
+        ])
+        .expect("a triangle is a valid outline");
+
+    // The same clip, one to five times over, each time under the previous one.
+    let mut under = |links: u32| {
+        let mut builder = SceneBuilder::new();
+        let mut clip = None;
+        for _ in 0..links {
+            clip = Some(
+                builder
+                    .clip(diagonal, Affine::IDENTITY, FillRule::NonZero, clip)
+                    .expect("valid clip definition"),
+            );
+        }
+        builder
+            .rect(
+                Rect::new(Point::new(0.0, 0.0), Point::new(64.0, 64.0)),
+                Affine::IDENTITY,
+                Color::new(0.0, 0.0, 0.0, 1.0),
+                clip,
+                None,
+            )
+            .expect("valid rect");
+        device
+            .render(&builder.finish(), &viewport, Target::Readback)
+            .expect("a clipped rect draws")
+            .into_raster()
+            .unwrap()
+            .into_pixels()
+    };
+
+    let once = under(1);
+    for links in 2..=5 {
+        let again = under(links);
+        let worst = once
+            .iter()
+            .zip(&again)
+            .map(|(a, b)| i32::from(*a).abs_diff(i32::from(*b)))
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            worst, 0,
+            "the same clip stated {links} times admits something else: {worst} of 255"
+        );
+    }
+    // And the fixture has the fractional boundary the property is about: a diagonal
+    // edge, so the chain is not trivially 0 or 255 everywhere it is composed.
+    let edge = (0..side)
+        .filter(|y| {
+            let alpha = once[((y * side + 40) * 4 + 3) as usize];
+            alpha > 0 && alpha < 255
+        })
+        .count();
+    assert!(edge > 0, "the clip's boundary is antialiased somewhere");
+}

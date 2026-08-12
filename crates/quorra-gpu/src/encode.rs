@@ -1176,7 +1176,7 @@ impl Encoder<'_> {
         let height = (vy1.ceil() as i32 - top).max(1) as u32;
         self.charge_tile(width, height)?;
         // Present by construction: the residues Option was checked above.
-        let Some(mask) = self.residue_product(resolved, left, top, width, height)? else {
+        let Some(mask) = self.residue_intersection(resolved, left, top, width, height)? else {
             return Ok(([0.0; 4], [0.0; 2]));
         };
         let (sx, sy) = self.pack_scratch(&mask)?;
@@ -1186,12 +1186,22 @@ impl Encoder<'_> {
         ))
     }
 
-    /// The product of a chain's residue links over a region, as one coverage tile —
-    /// `None` when the chain has none. Per-pixel bytes multiply in the deterministic
-    /// rule `(a·b + 127) / 255`. The caller charges the region's bytes.
-    #[allow(clippy::cast_possible_truncation)] // the byte rule's product stays in u8
-    #[allow(clippy::arithmetic_side_effects)] // u16 byte products cannot overflow
-    fn residue_product(
+    /// A chain's residue links over a region, intersected into one coverage tile —
+    /// `None` when the chain has none. The caller charges the region's bytes.
+    ///
+    /// **The links intersect; they do not multiply** (ADR 0030). ISO 32000-2 §8.5.4 is
+    /// explicit that a chain is not a stack of boundaries at all:
+    ///
+    /// > After the path has been painted, the clipping path in the graphics state shall
+    /// > be set to the intersection of the current clipping path and the newly
+    /// > constructed path.
+    ///
+    /// One region, arrived at by intersecting paths — so rasterising each link on its
+    /// own is our implementation's convenience, and the rule that puts them back
+    /// together owes the clause an intersection. `min` is that: idempotent, so restating
+    /// a clip changes nothing the way intersecting a region with itself changes nothing,
+    /// and exact wherever two boundaries coincide or nest.
+    fn residue_intersection(
         &mut self,
         resolved: &ResolvedClip,
         left: i32,
@@ -1222,7 +1232,7 @@ impl Encoder<'_> {
                 None => link_mask,
                 Some(mut base) => {
                     for (m, l) in base.coverage.iter_mut().zip(&link_mask.coverage) {
-                        *m = ((u16::from(*m) * u16::from(*l) + 127) / 255) as u8;
+                        *m = (*m).min(*l);
                     }
                     base
                 }
@@ -1624,7 +1634,7 @@ impl Encoder<'_> {
         let height = (vy1.ceil() as i32 - top).max(1) as u32;
         let residue_origin = if resolved.residues.is_some() {
             self.charge_tile(width, height)?;
-            match self.residue_product(&resolved, left, top, width, height)? {
+            match self.residue_intersection(&resolved, left, top, width, height)? {
                 Some(product) => {
                     let (sx, sy) = self.pack_scratch(&product)?;
                     Some([sx as f32, sy as f32])
@@ -2040,9 +2050,19 @@ impl Encoder<'_> {
         let mut tile = raster::fill_mask(polylines, rule, left, top, width, height);
         self.clock.geometry(span);
 
-        // Residue links multiply in: coverage of clip ∧ shape, per pixel.
-        if let Some(product) = self.residue_product(resolved, left, top, width, height)? {
-            for (m, l) in tile.coverage.iter_mut().zip(&product.coverage) {
+        // The clip meets the mark here, and **this one still multiplies** — deliberately,
+        // and not for the reason the chain intersects (ADR 0030). §8.5.4 asks for an
+        // intersection of the object's shape with the clipping path, and *neither* `min`
+        // nor a product is that: the exact answer is the area of the two regions'
+        // intersection inside the pixel, which only a conflation-free rasteriser has.
+        // What separates the two estimates is whether the boundaries are related, and
+        // here they usually are not — where a chain's links are one region restated,
+        // which is what makes `min` exact for them and only an upper bound here.
+        // Measured, and it is the reason this is a choice rather than a conclusion:
+        // moving this site to `min` as well moves no page of the caller's corpus, in
+        // either direction, and no page's printed numbers.
+        if let Some(clip) = self.residue_intersection(resolved, left, top, width, height)? {
+            for (m, l) in tile.coverage.iter_mut().zip(&clip.coverage) {
                 *m = ((u16::from(*m) * u16::from(*l) + 127) / 255) as u8;
             }
         }
