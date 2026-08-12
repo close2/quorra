@@ -15,6 +15,21 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**Shelves stay near one width, so the sheet stays near square** (2026-08-12, ADR 0034):
+the item ADR 0021 left — "the sheet's *height* … is a packer question with its own
+measurement" — measured at last. `issue16287.pdf` at 4× committed a **6 026 × 2 406 sheet
+for 6.93 M texels of tiles, 48 % used**: the first shelf grew to the full width and the
+next three held one tile each, and a sheet is a rectangle, so those three paid 3 900 empty
+columns apiece. A shelf may now grow to `√(2 × placed area)` rather than to the packing
+width — the side of the square a shelf packing of that area fills, computed from what has
+been placed and floored at the widest tile. The same page commits **2 224 × 3 293, 95 %
+used**; a 29-tile page goes 50 % → 72 %. It buys bytes, which is the currency refusals are
+counted in, and postpones the 16 384 ceiling — and **it buys no measured time**: the page
+whose sheet falls by 18 M texels of per-frame upload reads 344 ms against 331, three runs
+each. No page of the corpus changes verdict or reason at either scale. The full answer is
+to place tiles by size rather than in encounter order, which needs positions assigned after
+the walk instead of during it, and that is a two-pass encode.
+
 **A group can be one stage of §11.4.6** (2026-08-12, ADR 0033): the other half of the
 caller's §14.2, and the reason three of their four refused pages needed more than
 ADR 0032. §11.3.7.2 makes a group's shape *the union of the shapes of the objects it

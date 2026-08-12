@@ -447,6 +447,10 @@ struct ScratchPacker {
     /// Tiles placed on the sheet, for `Counters::tiles` — the count both lanes feed,
     /// since `reserve` is the one door onto the sheet.
     placed: u32,
+    /// Tile texels placed so far, and the widest tile seen — the two inputs to
+    /// [`ScratchPacker::shelf_target`].
+    tile_area: u64,
+    widest: u32,
 }
 
 impl ScratchPacker {
@@ -458,6 +462,8 @@ impl ScratchPacker {
             next_y: 0,
             data: Vec::new(),
             placed: 0,
+            tile_area: 0,
+            widest: 0,
         }
     }
 
@@ -467,18 +473,44 @@ impl ScratchPacker {
     /// copies its bytes in, the GPU lane hands the position to a pass that draws there
     /// — which is what lets one sheet hold both kinds of tile without either knowing
     /// the other exists (ADR 0016).
+    /// How wide the packer lets a shelf grow *this* tile, which is not the same as the
+    /// width it may commit (ADR 0034).
+    ///
+    /// The sheet is a rectangle, so it costs the widest shelf's cursor times the sum of
+    /// every shelf's height — and a run that fills one shelf to 6 026 while three others
+    /// hold a single 2 100-wide tile pays 3 900 empty columns three times over. That is
+    /// half of `issue16287.pdf`'s sheet at 4×, and the page refuses 4 % over the frame
+    /// budget.
+    ///
+    /// Keeping every shelf near one target equalises them, and the target that minimises
+    /// `w × h` for a shelf packing of area `A` is about `√(2A)` — the square-ish sheet.
+    /// Online, `A` is what has been placed so far, so the target grows with the frame and
+    /// a shelf packed under an earlier, smaller one is never invalidated: a cursor that
+    /// has stopped growing only leaves room a later tile may still take.
+    fn shelf_target(&self) -> u32 {
+        #[allow(clippy::cast_possible_truncation)] // isqrt of an area bounded by the
+        // device dimension squared, which is inside u32 after the root
+        let square = self.tile_area.saturating_mul(2).isqrt() as u32;
+        square.max(self.widest).clamp(1, self.width)
+    }
+
     #[allow(clippy::arithmetic_side_effects)] // bounded by width/max_height checks
     fn reserve(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
         if width == 0 || height == 0 || width > self.width {
             return None;
         }
+        self.widest = self.widest.max(width);
+        let target = self.shelf_target();
         self.placed = self.placed.saturating_add(1);
+        self.tile_area = self
+            .tile_area
+            .saturating_add(u64::from(width).saturating_mul(u64::from(height)));
         self.shelves
             .iter_mut()
             .find(|(_, shelf_height, cursor)| {
                 *shelf_height >= height
                     && *shelf_height <= height.saturating_mul(2)
-                    && cursor + width <= self.width
+                    && cursor + width <= target
             })
             .map(|(y, _, cursor)| {
                 let position = (*cursor, *y);
@@ -2468,6 +2500,52 @@ mod tests {
             .filter(|byte| **byte != 0)
             .count();
         assert_eq!(stray, 0, "{stray} texels of somebody else's coverage");
+    }
+
+    /// **Shelves stay near one width, so the sheet stays near square** (ADR 0034).
+    ///
+    /// Six tiles of roughly 2 000 × 500 — `issue16287.pdf` at 4×, which is where this was
+    /// found. Filling one shelf to its full width and leaving the rest holding a single
+    /// tile each costs the sheet three times over, because a sheet is a rectangle and
+    /// pays its widest shelf for every row. The property is stated as occupancy rather
+    /// than as a layout, so a better packer passes it too — and as *no overlap*, because
+    /// a packer that reached 95 % by putting two tiles in one place would satisfy the
+    /// first half alone.
+    #[test]
+    fn the_sheet_stays_near_square_and_its_tiles_never_overlap() {
+        let sizes = [
+            (2042_u32, 541_u32),
+            (2038, 490),
+            (2115, 566),
+            (2172, 624),
+            (2224, 675),
+            (1946, 397),
+        ];
+        let mut packer = ScratchPacker::new(16384, 16384);
+        let mut placed = Vec::new();
+        let mut area = 0_u64;
+        for (width, height) in sizes {
+            let at = packer.reserve(width, height).expect("the sheet has room");
+            placed.push((at.0, at.1, width, height));
+            area += u64::from(width) * u64::from(height);
+        }
+        for (i, a) in placed.iter().enumerate() {
+            for b in placed.iter().skip(i + 1) {
+                let apart =
+                    a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1;
+                assert!(apart, "tiles {a:?} and {b:?} overlap");
+            }
+        }
+        let scratch = packer.finish().expect("six tiles");
+        let sheet = u64::from(scratch.width) * u64::from(scratch.height);
+        let occupancy = 100 * area / sheet;
+        assert!(
+            occupancy >= 90,
+            "the sheet is {}x{} for {area} texels of tiles — {occupancy}% used, and the \
+             shelf-per-tile layout this replaced was 48%",
+            scratch.width,
+            scratch.height
+        );
     }
 
     fn no_resources() -> ResourceStore {
