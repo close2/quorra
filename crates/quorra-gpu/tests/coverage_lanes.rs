@@ -30,7 +30,15 @@ use quorra_scene::{
     SceneBuilder, Segment, Stroke,
 };
 
-const SIZE: u32 = 48;
+/// The fixtures are written in a 48-unit square and drawn at [`MAGNIFY`] times it, so
+/// their tiles are past [`GPU_LANE_MIN_AREA`] and the GPU lane actually takes them —
+/// otherwise every comparison below would be the CPU lane against itself, passing
+/// without testing anything (ADR 0027). Probe coordinates are in device pixels, so they
+/// carry the same factor.
+const UNITS: u32 = 48;
+/// See [`UNITS`]. Sixteen makes a fixture's largest tile roughly 590 000 texels.
+const MAGNIFY: u32 = 16;
+const SIZE: u32 = UNITS * MAGNIFY;
 
 /// A small atlas, so the shapes below reach the scratch sheet rather than being
 /// cached in front of it: 64 KiB admits tiles of 8 KiB (ADR 0024's eighth), and this
@@ -55,7 +63,7 @@ fn render(coverage: Coverage, build: impl Fn(&mut Device) -> Scene) -> Vec<u8> {
     device
         .render(
             &scene,
-            &Viewport::full(SIZE, SIZE, Affine::IDENTITY),
+            &Viewport::full(SIZE, SIZE, Affine::scale(MAGNIFY as f32, MAGNIFY as f32)),
             Target::Readback,
         )
         .expect("the scene is inside every budget")
@@ -64,8 +72,15 @@ fn render(coverage: Coverage, build: impl Fn(&mut Device) -> Scene) -> Vec<u8> {
         .into_pixels()
 }
 
+/// The alpha of one device pixel.
 fn alpha(pixels: &[u8], x: u32, y: u32) -> u8 {
     pixels[((y * SIZE + x) * 4 + 3) as usize]
+}
+
+/// A probe written in fixture units: the raster is [`MAGNIFY`] times larger, and the
+/// middle of unit cell `(x, y)` is the same place in the shape at either scale.
+fn at_unit(pixels: &[u8], x: u32, y: u32) -> u8 {
+    alpha(pixels, x * MAGNIFY + MAGNIFY / 2, y * MAGNIFY + MAGNIFY / 2)
 }
 
 fn black() -> Paint {
@@ -265,21 +280,21 @@ fn both_lanes_read_the_fill_rules_the_same_way() {
         let non_zero = render(coverage, nested(FillRule::NonZero));
         let even_odd = render(coverage, nested(FillRule::EvenOdd));
         assert_eq!(
-            alpha(&non_zero, 24, 24),
+            at_unit(&non_zero, 24, 24),
             255,
             "{coverage:?}: winding two is not zero (§8.5.3.3.2)"
         );
         assert_eq!(
-            alpha(&even_odd, 24, 24),
+            at_unit(&even_odd, 24, 24),
             0,
             "{coverage:?}: winding two is even (§8.5.3.3.3)"
         );
         assert_eq!(
-            alpha(&non_zero, 10, 24),
+            at_unit(&non_zero, 10, 24),
             255,
             "{coverage:?}: the outer ring"
         );
-        assert_eq!(alpha(&even_odd, 10, 24), 255);
+        assert_eq!(at_unit(&even_odd, 10, 24), 255);
     }
 }
 
@@ -301,7 +316,9 @@ fn a_stroke_draws_the_same_band_in_both_lanes() {
                 outline,
                 Affine::IDENTITY,
                 Stroke {
-                    width: 8.0,
+                    // Device-space (§4.5), so it carries `MAGNIFY` like the geometry
+                    // does — an 8-unit band drawn at 16x is 128 device pixels.
+                    width: 8.0 * MAGNIFY as f32,
                     cap: LineCap::Butt,
                     join: LineJoin::Miter,
                     miter_limit: 4.0,
@@ -317,11 +334,11 @@ fn a_stroke_draws_the_same_band_in_both_lanes() {
     let cpu = render(Coverage::Cpu, scene);
     let gpu = render(Coverage::Gpu, scene);
     for y in [21, 24, 27] {
-        assert_eq!(alpha(&gpu, 24, y), 255, "inside the band at row {y}");
-        assert_eq!(alpha(&cpu, 24, y), 255);
+        assert_eq!(at_unit(&gpu, 24, y), 255, "inside the band at row {y}");
+        assert_eq!(at_unit(&cpu, 24, y), 255);
     }
-    assert_eq!(alpha(&gpu, 24, 19), 0, "a row above the band");
-    assert_eq!(alpha(&gpu, 9, 24), 0, "before the butt cap");
+    assert_eq!(at_unit(&gpu, 24, 19), 0, "a row above the band");
+    assert_eq!(at_unit(&gpu, 9, 24), 0, "before the butt cap");
 }
 
 /// **A clip the GPU lane cannot honour sends its command to the CPU lane**, and the
@@ -373,8 +390,12 @@ fn a_residue_clip_falls_back_and_still_draws() {
         gpu, cpu,
         "the command took the CPU lane in both devices, so the frames are the same bytes"
     );
-    assert_eq!(alpha(&gpu, 24, 24), 255, "the middle of the clipped square");
-    assert_eq!(alpha(&gpu, 10, 10), 0, "a corner the diamond clips away");
+    assert_eq!(
+        at_unit(&gpu, 24, 24),
+        255,
+        "the middle of the clipped square"
+    );
+    assert_eq!(at_unit(&gpu, 10, 10), 0, "a corner the diamond clips away");
 }
 
 /// Both kinds of tile on one sheet: a residue-clipped fill (CPU) beside an unclipped
@@ -436,9 +457,13 @@ fn one_sheet_carries_both_producers() {
         builder.finish()
     };
     let gpu = render(Coverage::Gpu, scene);
-    assert_eq!(alpha(&gpu, 12, 12), 255, "the CPU lane's tile survived");
-    assert_eq!(alpha(&gpu, 33, 36), 255, "and the GPU lane's tile is there");
-    assert_eq!(alpha(&gpu, 24, 6), 0, "with nothing between them");
+    assert_eq!(at_unit(&gpu, 12, 12), 255, "the CPU lane's tile survived");
+    assert_eq!(
+        at_unit(&gpu, 33, 36),
+        255,
+        "and the GPU lane's tile is there"
+    );
+    assert_eq!(at_unit(&gpu, 24, 6), 0, "with nothing between them");
 }
 
 /// The lane is chosen per frame, on one device, and each frame is the frame that lane
@@ -459,8 +484,8 @@ fn the_lane_can_change_between_frames_on_one_device() {
     // against its triangles, and a 40-pixel blob is cheaper to rasterise than to
     // triangulate — both lanes would answer it identically and the test could no longer
     // tell them apart.
-    let scene = blob_at(&mut device, 300.0);
-    let viewport = Viewport::full(SIZE * 14, SIZE * 14, Affine::IDENTITY);
+    let scene = blob_at(&mut device, 800.0);
+    let viewport = Viewport::full(1600, 2200, Affine::IDENTITY);
 
     // Alternate, twice each way, and keep what every frame drew.
     let mut frames = Vec::new();
@@ -492,26 +517,31 @@ fn the_lane_can_change_between_frames_on_one_device() {
     );
 }
 
-/// The side of the target `wide_blob` is drawn at.
-const WIDE: u32 = 240;
+/// The side of the target `wide_blob` is drawn at. Past [`GPU_LANE_MIN_AREA`], so the
+/// GPU lane takes the tile and can be charged for the target it then needs (ADR 0027).
+const WIDE: u32 = 800;
 
 /// `blob`'s curve, scaled past what the test devices' small atlas will take (ADR 0024)
 /// — so no atlas stands in front of it and its coverage lands on the frame's scratch
 /// sheet under either lane, which is the only condition under which the sheet has an
 /// extent to be charged for at all.
 fn wide_blob(device: &mut Device) -> Scene {
+    // Written in the same proportions as `blob`, scaled to fill the target — so the
+    // tile is `WIDE` across whatever `WIDE` is, and the centre probe is inside it.
+    let unit = f32::from(u16::try_from(WIDE).unwrap_or(u16::MAX)) / 240.0;
+    let at = |x: f32, y: f32| Point::new(x * unit, y * unit);
     let outline = device
         .upload_outline(&[
-            Segment::MoveTo(Point::new(20.0, 20.0)),
+            Segment::MoveTo(at(20.0, 20.0)),
             Segment::CubicTo {
-                c1: Point::new(220.0, 4.0),
-                c2: Point::new(236.0, 160.0),
-                to: Point::new(120.0, 220.0),
+                c1: at(220.0, 4.0),
+                c2: at(236.0, 160.0),
+                to: at(120.0, 220.0),
             },
             Segment::CubicTo {
-                c1: Point::new(40.0, 236.0),
-                c2: Point::new(4.0, 120.0),
-                to: Point::new(20.0, 20.0),
+                c1: at(40.0, 236.0),
+                c2: at(4.0, 120.0),
+                to: at(20.0, 20.0),
             },
             Segment::Close,
         ])

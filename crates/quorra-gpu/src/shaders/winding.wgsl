@@ -44,6 +44,17 @@ struct Globals {
     // fragment stage so that one pipeline serves all four: a channel this draw does
     // not own receives exactly zero and additive blending leaves it alone.
     channel: vec4f,
+    // The band of the sheet this pass is drawing: first row, and how many rows.
+    //
+    // The winding target holds one band at a time, not the whole sheet (ADR 0027): it
+    // is scratch — accumulated, resolved, and dead — so its size is a choice rather
+    // than a consequence of the page. Sheet row `band.x` is row 0 of the attachment,
+    // which both stages have to agree about: the vertex stage subtracts the origin
+    // before mapping to clip space, and `fs_resolve` subtracts it again when it reads
+    // back. They are the same subtraction and getting one without the other is the
+    // §11 defect with a different offset.
+    band: vec2f,
+    _pad: vec2f,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -74,9 +85,13 @@ fn vs_winding(input: WindingIn) -> WindingOut {
     // grid — no per-fragment arithmetic, and the offset cannot drift between the
     // triangle test and the coverage test because there is only one of them.
     let placed = input.position - globals.sample_offset;
+    // Sheet space to band space: the attachment holds rows `band.x ..< band.x + band.y`
+    // of the sheet, so a triangle outside them maps outside clip space and is dropped by
+    // the rasteriser — which is what makes one draw of every vertex per band correct
+    // without sorting the vertices.
     let ndc = vec2f(
         placed.x / globals.sheet_size.x * 2.0 - 1.0,
-        1.0 - placed.y / globals.sheet_size.y * 2.0,
+        1.0 - (placed.y - globals.band.x) / globals.band.y * 2.0,
     );
     out.position = vec4f(ndc, 0.0, 1.0);
     out.uv = input.uv;
@@ -158,7 +173,11 @@ fn inside(winding: f32, rule: f32) -> bool {
 
 @fragment
 fn fs_resolve(input: TileOut) -> @location(0) vec4f {
-    let windings = textureLoad(winding_tex, vec2i(input.position.xy), 0);
+    // The quad is positioned in *sheet* space, because that is what the coverage sheet
+    // is; the winding texture holds this band alone, so the read is the same pixel less
+    // the band's origin (ADR 0027).
+    let texel = vec2i(input.position.xy) - vec2i(0, i32(globals.band.x));
+    let windings = textureLoad(winding_tex, texel, 0);
     var covered = 0.0;
     for (var channel = 0u; channel < 4u; channel = channel + 1u) {
         if inside(windings[channel], input.rule_and_samples.x) {

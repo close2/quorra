@@ -72,6 +72,16 @@ fn tile_side(low: f32, high: f32) -> u32 {
     }
 }
 
+/// The smallest tile the GPU coverage lane takes: half a megapixel, measured
+/// (ADR 0027).
+///
+/// Below it the device's per-tile overheads — its vertices, its bind groups, its share
+/// of a winding pass — outweigh what its parallelism saves. The table in
+/// `Encoder::take_gpu_lane` is the measurement, and it brackets the crossover between
+/// 325 000 texels, where the processor is twice as fast, and 637 000, where the device
+/// is nearly four times as fast. Half a megapixel sits between them.
+const GPU_LANE_MIN_AREA: u64 = 512 * 1024;
+
 /// A clip rectangle that admits everything, for unclipped instances.
 const OPEN_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
 
@@ -1290,12 +1300,13 @@ impl Encoder<'_> {
             // polylines — which is the whole of why its cost does not grow with the
             // magnification: there is no flattening here to be done again at a new
             // scale, and no atlas in front of it to be cold (ADR 0016).
+            let triangles = stored.quads.triangle_count();
             if !stored.quads.is_empty()
-                && self.gpu_lane(
+                && self.take_gpu_lane(
                     &resolved,
                     tile_side(bx0, bx1),
                     tile_side(by0, by1),
-                    stored.quads.triangle_count(),
+                    triangles,
                 )
             {
                 let Some(tile) = self.visible_tile((bx0, by0, bx1, by1), &resolved) else {
@@ -1861,7 +1872,7 @@ impl Encoder<'_> {
         // own start.
         let flattened_triangles: usize = polylines.iter().map(|line| line.points.len()).sum();
         if let Some(bounds) = raster::polyline_bounds(polylines)
-            && self.gpu_lane(
+            && self.take_gpu_lane(
                 resolved,
                 tile_side(bounds.0, bounds.2),
                 tile_side(bounds.1, bounds.3),
@@ -1969,36 +1980,51 @@ impl Encoder<'_> {
 
     /// Whether this command takes the GPU lane.
     ///
-    /// Three conditions, and the third is ADR 0026's.
+    /// Four conditions, and every one of them is a measurement rather than a taste.
     ///
-    /// **The caller asked for it.** [`Coverage::Gpu`] is a request; what follows decides
+    /// **The caller asked for it.** [`Coverage::Gpu`] is a request; the rest decides
     /// where honouring it is a win.
     ///
     /// **No residue clip.** A non-rectangular clip multiplies into the coverage bytes on
     /// the CPU (`residue_product`), and there is no pass yet that does the same on the
-    /// device. Such a command takes the CPU lane and lands on the same sheet beside the
-    /// GPU's tiles, which is why the sheet has one layout and two producers rather than
-    /// two sheets (ADR 0016).
+    /// device (ADR 0016).
     ///
-    /// **The tile is worth more than its triangles.** The two lanes cost different
-    /// things, and both are known here: the CPU lane's tile is `width × height` bytes of
-    /// coverage, while the GPU lane's is this outline's triangles — three vertices each,
-    /// [`WindingVertex::STRIDE`] apiece — **per placement, whatever the tile's size**.
-    /// So the crossover is not a dimension anybody chooses; it is where those two
-    /// numbers cross, and each shape decides its own. A nine-pixel glyph of eight curves
-    /// costs 12.4 KB of triangles against 150 bytes of coverage, which is why a page of
-    /// 66 309 of them asked for 821 MB of vertices and was refused; the same outline at
-    /// 300 pixels costs the same triangles against 90 KB of coverage, and the device
-    /// should draw it.
-    fn gpu_lane(&self, resolved: &ResolvedClip, width: u32, height: u32, triangles: usize) -> bool {
+    /// **The tile is worth more than its triangles.** The GPU lane costs an outline's
+    /// triangles *per placement, whatever the tile's size* — a nine-pixel glyph is
+    /// 12.4 KB of them against ~150 bytes of coverage — so a page of small glyphs asked
+    /// for 821 MB of vertices and was refused (ADR 0026).
+    ///
+    /// **And the tile is large enough for the device to be the faster one.** Both lanes
+    /// cost roughly the area they cover; what differs is the constant, and the GPU
+    /// lane's per-tile overheads — its vertices, its bind groups, its share of a winding
+    /// pass — only amortise once a tile is big. Measured on RADV at sixteen samples,
+    /// whole frames, both lanes:
+    ///
+    /// | tile | texels | CPU lane | GPU lane |
+    /// |---|---|---|---|
+    /// | 200 × 260 | 52 000 | 73 ms | 275 ms |
+    /// | 500 × 650 | 325 000 | 71 ms | 146 ms |
+    /// | 700 × 910 | 637 000 | 95 ms | **26 ms** |
+    /// | 900 × 1170 | 1 053 000 | 111 ms | **19 ms** |
+    ///
+    /// [`GPU_LANE_MIN_AREA`] sits in the bracket those four rows leave. It is a
+    /// constant — ADR 0026 tried to avoid one and could not, because the trade is CPU
+    /// *time* against device *bandwidth* and no count of bytes expresses it.
+    fn take_gpu_lane(
+        &self,
+        resolved: &ResolvedClip,
+        width: u32,
+        height: u32,
+        triangles: usize,
+    ) -> bool {
         if self.coverage != Coverage::Gpu || resolved.residues.is_some() {
             return false;
         }
-        let coverage_bytes = u64::from(width).saturating_mul(u64::from(height));
+        let area = u64::from(width).saturating_mul(u64::from(height));
         let triangle_bytes = (triangles as u64)
             .saturating_mul(3)
             .saturating_mul(crate::outline::WindingVertex::STRIDE);
-        coverage_bytes >= triangle_bytes
+        area >= GPU_LANE_MIN_AREA && area >= triangle_bytes
     }
 
     /// Reserve a tile on the sheet and emit the quad that will sample it.

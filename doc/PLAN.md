@@ -15,6 +15,21 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**The winding target holds a band, and the lane's crossover is measured** (2026-08-12,
+ADR 0027): the target is scratch — accumulated, resolved into the R8 sheet, dead — so it
+never needed to hold the whole sheet at eight bytes a texel, which is what refused sixty
+shapes of 500 pixels at 359 MB. It holds one band now, aimed at 16 MiB, with both shader
+stages subtracting the band's origin — the same agreement that, in another form, once drew
+the right glyph in the wrong place. And banding made both lanes measurable on the same
+pages, which showed ADR 0026's criterion wrong in magnitude: at 200 and 500 pixels the GPU
+lane was two to four times *slower*, because its winding traffic follows the sheet and its
+per-tile overheads only amortise once a tile is big. The crossover is now a measured
+constant — half a megapixel, bracketed by 325 000 texels where the processor wins twice
+over and 637 000 where the device wins nearly four times. **40 shapes of 700 px: 97 ms →
+26. 24 of 900 px: 113 → 20.** What is left is that a band still spans the *sheet's* width,
+which both lanes share, so a page of 1 200-pixel shapes still refuses where the CPU lane
+draws it.
+
 **The coverage lane is chosen by what each lane would cost** (2026-08-12, ADR 0026): the
 corpus profile put `Coverage::Gpu` against the largest real page and it **refused the
 frame** — 922 MB, of which **821 MB was vertices**. The GPU lane costs an outline's

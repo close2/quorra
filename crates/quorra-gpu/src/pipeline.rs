@@ -474,11 +474,12 @@ impl PipelineStore {
                 ],
             ),
             blit: make("quorra blit", &[texture_entry(0)]),
-            // Both stages read it: the vertex stage for the sheet's size, the resolve
-            // fragment for the fill rule and the sample grid.
-            // 32 bytes: the sheet size, this draw's sample offset, and the channel
-            // mask it accumulates into.
-            winding: make("quorra winding", &[uniform_entry(0, 32, quad_uniform)]),
+            // Both stages read it: the vertex stage for the sheet's size and the band
+            // it is drawing, the resolve fragment for the fill rule, the sample grid and
+            // the same band.
+            // 48 bytes: the sheet size, this draw's sample offset, the channel mask it
+            // accumulates into, and the band's origin and height (ADR 0027).
+            winding: make("quorra winding", &[uniform_entry(0, 48, quad_uniform)]),
         }
     }
 

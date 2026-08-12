@@ -50,7 +50,91 @@ pub(crate) struct Sheet {
     pub height: u32,
 }
 
+/// One horizontal slice of the sheet: the rows the winding target holds at a time, and
+/// the run of tiles whose coverage they resolve (ADR 0027).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Band {
+    /// First sheet row this band covers.
+    pub origin: u32,
+    /// How many rows — at least the tallest tile in it, since a tile may not be split.
+    pub height: u32,
+    /// The band's tiles, as a range into the *sorted* tile order `Buffers` uploads.
+    pub first_tile: u32,
+    pub tile_count: u32,
+}
+
+/// How many bytes of winding target a frame may hold at once.
+///
+/// The target is scratch — accumulated, resolved into the R8 sheet, and dead — so its
+/// size is a choice, and before ADR 0027 the choice was "the whole sheet", at eight
+/// bytes a texel. That refused a page of sixty large shapes at 359 MB. Sixteen mebibytes
+/// is two thousand rows of a page-wide sheet and one row of a 16 384-wide one; a band is
+/// never smaller than its tallest tile, so this is a target rather than a bound.
+const BAND_BYTES: u64 = 16 * 1024 * 1024;
+
 impl Sheet {
+    /// The bands this sheet's tiles fall into, in sheet order.
+    ///
+    /// Greedy over tiles sorted by their top row: a band grows until adding the next
+    /// tile would take it past [`BAND_BYTES`], and never splits one — a tile taller than
+    /// the budget is a band of its own, which is why the winding target is sized from
+    /// the tallest band rather than from the constant.
+    ///
+    /// The returned ranges index the sorted order, which is what [`Buffers`] uploads:
+    /// the *vertices* are not sorted and do not need to be, since every band draws all
+    /// of them and the shader maps the ones outside it out of clip space.
+    pub(crate) fn bands(&self) -> Vec<Band> {
+        let mut order: Vec<usize> = (0..self.tiles.len()).collect();
+        order.sort_by(|a, b| {
+            self.tiles[*a].rect[1]
+                .total_cmp(&self.tiles[*b].rect[1])
+                .then_with(|| self.tiles[*a].rect[0].total_cmp(&self.tiles[*b].rect[0]))
+        });
+        // Sheet coordinates are integers stored as floats — the packer places tiles on
+        // whole texels — so this narrowing is exact for every value that reaches it.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let row = |value: f32| value.max(0.0) as u32;
+        let budget_rows = BAND_BYTES
+            .checked_div(u64::from(self.width.max(1)).saturating_mul(8))
+            .unwrap_or(1)
+            .max(1);
+        let mut bands: Vec<Band> = Vec::new();
+        for (position, index) in order.iter().enumerate() {
+            let tile = &self.tiles[*index];
+            let (top, bottom) = (row(tile.rect[1]), row(tile.rect[3].ceil()));
+            match bands.last_mut() {
+                // Fits the open band, or is taller than any budget and so extends it:
+                // either way the band grows to hold it whole.
+                Some(open)
+                    if u64::from(bottom.saturating_sub(open.origin)) <= budget_rows
+                        || open.tile_count == 0 =>
+                {
+                    open.height = bottom.saturating_sub(open.origin).max(open.height);
+                    open.tile_count = open.tile_count.saturating_add(1);
+                }
+                _ => bands.push(Band {
+                    origin: top,
+                    height: bottom.saturating_sub(top).max(1),
+                    // A frame with more tiles than a `u32` counts was refused by the
+                    // budget long before it packed them.
+                    first_tile: u32::try_from(position).unwrap_or(u32::MAX),
+                    tile_count: 1,
+                }),
+            }
+        }
+        bands
+    }
+
+    /// The tallest band, which is what the winding target must hold.
+    pub(crate) fn band_rows(&self) -> u32 {
+        self.bands()
+            .iter()
+            .map(|band| band.height)
+            .max()
+            .unwrap_or(self.height)
+            .min(self.height.max(1))
+    }
+
     /// Adds a tile and the triangles that fill it.
     pub(crate) fn push_tile(&mut self, tile: Tile, vertices: &[crate::outline::WindingVertex]) {
         // A tile with no triangles is not a tile: it would resolve to transparent,
@@ -95,7 +179,8 @@ impl Sheet {
         // so a sheet too large to size must come back too large rather than wrap to
         // something affordable. That is principle 3's rule about allocations derived
         // from scene content, applied to the arithmetic that describes them.
-        let texels = u64::from(self.width).saturating_mul(u64::from(self.height));
+        // The winding target holds one *band*, not the sheet (ADR 0027).
+        let texels = u64::from(self.width).saturating_mul(u64::from(self.band_rows()));
         let winding = texels.saturating_mul(8); // rgba16float
         let vertices = (self.vertices.len() as u64).saturating_mul(4);
         let tiles = (self.tiles.len() as u64).saturating_mul(TILE_STRIDE);
@@ -153,9 +238,11 @@ pub(crate) fn render_into(
             limit: max_dimension,
         });
     }
+    // One band at a time (ADR 0027): the target is scratch, so it is sized by what a
+    // pass holds rather than by what the page came to.
     let extent = wgpu::Extent3d {
         width: sheet.width.max(1),
-        height: sheet.height.max(1),
+        height: sheet.band_rows().max(1),
         depth_or_array_layers: 1,
     };
     // **Kept between frames**, which ADR 0012 declined to do for the compositor's
@@ -166,7 +253,7 @@ pub(crate) fn render_into(
     // larger one and never shrunk while the device lives.
     let winding_view = reuse.view_for(gpu, extent).clone();
 
-    let buffers = Buffers::new(gpu, queue, pipelines, sheet, samples);
+    let buffers = Buffers::new(gpu, queue, sheet, samples);
     let (winding_pipeline, _) = pipelines.get(Kind::Winding, WINDING_FORMAT);
     let (resolve_pipeline, _) = pipelines.get(Kind::WindingResolve, wgpu::TextureFormat::R8Unorm);
     let texture_layout = pipelines.blit_layout();
@@ -182,24 +269,32 @@ pub(crate) fn render_into(
     let mut encoder = gpu.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("quorra coverage"),
     });
-    for (round, group) in buffers.groups.iter().enumerate() {
-        accumulate(
-            &mut encoder,
-            &winding_view,
-            &winding_pipeline,
-            &buffers,
-            group,
-            extent,
-        );
-        resolve(
-            &mut encoder,
-            coverage_view,
-            &resolve_pipeline,
-            &buffers,
-            group,
-            &winding_source,
-            clear && round == 0,
-        );
+    for (index, band) in buffers.bands.iter().enumerate() {
+        for (round, group) in buffers.groups.iter().enumerate() {
+            let globals = group.for_band(gpu, queue, pipelines, sheet, *band);
+            accumulate(
+                &mut encoder,
+                &winding_view,
+                &winding_pipeline,
+                &buffers,
+                &globals,
+                sheet.width.max(1),
+                band.height.max(1),
+            );
+            resolve(
+                &mut encoder,
+                coverage_view,
+                &resolve_pipeline,
+                &buffers,
+                &globals,
+                *band,
+                &winding_source,
+                // The coverage sheet is cleared once, by the first pass that touches
+                // it, and only when this lane owns it: every later band and round adds
+                // to what is there.
+                clear && index == 0 && round == 0,
+            );
+        }
     }
     queue.submit([encoder.finish()]);
     Ok(())
@@ -277,8 +372,9 @@ fn accumulate(
     winding_view: &wgpu::TextureView,
     pipeline: &wgpu::RenderPipeline,
     buffers: &Buffers,
-    group: &Group,
-    sheet: wgpu::Extent3d,
+    globals: &BandGlobals,
+    width: u32,
+    height: u32,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("quorra winding"),
@@ -310,10 +406,14 @@ fn accumulate(
     // and back drew one glyph's coverage under another glyph's quad — the right place,
     // the right size, the wrong letter — because the resolve read the sheet's
     // coordinates out of a texture the winding pass had stretched over a larger one.
-    pass.set_viewport(0.0, 0.0, sheet.width as f32, sheet.height as f32, 0.0, 1.0);
+    //
+    // With bands (ADR 0027) the viewport is the *band's* extent at the target's origin,
+    // and `vs_winding` subtracts the band's first row before mapping — the same
+    // agreement, one subtraction deeper.
+    pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
     pass.set_pipeline(pipeline);
     pass.set_vertex_buffer(0, buffers.vertices.slice(..));
-    for bind_group in &group.samples {
+    for bind_group in &globals.samples {
         pass.set_bind_group(0, bind_group, &[]);
         pass.draw(0..buffers.vertex_count, 0..1);
     }
@@ -321,12 +421,14 @@ fn accumulate(
 
 /// One round's resolve: each tile's quad turns four samples into a quarter of its
 /// coverage, added to whatever earlier rounds contributed.
+#[allow(clippy::too_many_arguments)] // the pass's inputs, named once at the one call
 fn resolve(
     encoder: &mut wgpu::CommandEncoder,
     coverage_view: &wgpu::TextureView,
     pipeline: &wgpu::RenderPipeline,
     buffers: &Buffers,
-    group: &Group,
+    globals: &BandGlobals,
+    band: Band,
     winding_source: &wgpu::BindGroup,
     first: bool,
 ) {
@@ -353,15 +455,51 @@ fn resolve(
         multiview_mask: None,
     });
     pass.set_pipeline(pipeline);
-    pass.set_bind_group(0, &group.resolve, &[]);
+    pass.set_bind_group(0, &globals.resolve, &[]);
     pass.set_bind_group(1, winding_source, &[]);
     pass.set_vertex_buffer(0, buffers.tiles.slice(..));
-    pass.draw(0..4, 0..buffers.tile_count);
+    // This band's tiles, and only those: the winding target holds this band's rows, so
+    // another band's quad would read a row that belongs to somebody else.
+    let first_tile = band.first_tile;
+    pass.draw(0..4, first_tile..first_tile.saturating_add(band.tile_count));
 }
 
-/// One group of four samples: a bind group per sample for the winding pass, and one
-/// for the resolve that follows it.
+/// One group of four samples, as the offsets they place their geometry by.
+///
+/// The bind groups are built per band rather than held here (ADR 0027): the uniform
+/// carries the band, so one per sample would be one per band per sample, and building
+/// them where they are used keeps the band from having to be threaded into a field.
 struct Group {
+    offsets: Vec<[f32; 2]>,
+}
+
+impl Group {
+    /// This group's uniforms for one band: one per sample for the winding pass, and one
+    /// for the resolve, which reads the sheet size and the band and nothing else.
+    fn for_band(
+        &self,
+        gpu: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipelines: &PipelineStore,
+        sheet: &Sheet,
+        band: Band,
+    ) -> BandGlobals {
+        let layout = pipelines.winding_layout();
+        let samples = self
+            .offsets
+            .iter()
+            .enumerate()
+            .map(|(channel, offset)| {
+                globals_bind_group(gpu, queue, &layout, sheet, *offset, channel, band)
+            })
+            .collect();
+        let resolve = globals_bind_group(gpu, queue, &layout, sheet, [0.0, 0.0], 0, band);
+        BandGlobals { samples, resolve }
+    }
+}
+
+/// One group's uniforms, bound to one band.
+struct BandGlobals {
     samples: Vec<wgpu::BindGroup>,
     resolve: wgpu::BindGroup,
 }
@@ -371,8 +509,10 @@ struct Buffers {
     vertices: wgpu::Buffer,
     vertex_count: u32,
     tiles: wgpu::Buffer,
-    tile_count: u32,
     groups: Vec<Group>,
+    /// The sheet's rows, sliced into what the winding target holds at once, with each
+    /// band's tiles a contiguous run of the instance buffer below (ADR 0027).
+    bands: Vec<Band>,
 }
 
 impl Buffers {
@@ -380,13 +520,7 @@ impl Buffers {
     #[allow(clippy::cast_possible_truncation)] // a frame with 2^32 vertices was refused
     // by the budget long before it reached this cast
     #[allow(clippy::arithmetic_side_effects)] // a Vec length times its element count
-    fn new(
-        gpu: &wgpu::Device,
-        queue: &wgpu::Queue,
-        pipelines: &PipelineStore,
-        sheet: &Sheet,
-        samples: u32,
-    ) -> Self {
+    fn new(gpu: &wgpu::Device, queue: &wgpu::Queue, sheet: &Sheet, samples: u32) -> Self {
         let vertices = create_buffer(
             gpu,
             queue,
@@ -394,8 +528,20 @@ impl Buffers {
             &to_bytes(&sheet.vertices),
             wgpu::BufferUsages::VERTEX,
         );
+        // Tiles go up in band order, so a band's instances are one contiguous range and
+        // its resolve is one draw. The vertices are *not* reordered: every band draws
+        // all of them and the shader maps the ones outside it out of clip space, which
+        // costs vertex work and saves a permutation of the largest buffer in the frame.
+        let bands = sheet.bands();
+        let mut order: Vec<usize> = (0..sheet.tiles.len()).collect();
+        order.sort_by(|a, b| {
+            sheet.tiles[*a].rect[1]
+                .total_cmp(&sheet.tiles[*b].rect[1])
+                .then_with(|| sheet.tiles[*a].rect[0].total_cmp(&sheet.tiles[*b].rect[0]))
+        });
         let mut tile_data: Vec<f32> = Vec::with_capacity(sheet.tiles.len() * 6);
-        for tile in &sheet.tiles {
+        for index in &order {
+            let tile = &sheet.tiles[*index];
             tile_data.extend_from_slice(&tile.rect);
             tile_data.push(if tile.even_odd { 1.0 } else { 0.0 });
             tile_data.push(samples as f32);
@@ -408,36 +554,24 @@ impl Buffers {
             wgpu::BufferUsages::VERTEX,
         );
 
-        let layout = pipelines.winding_layout();
-        let offsets = sample_offsets(samples);
-        let groups = offsets
+        let groups = sample_offsets(samples)
             .chunks(SAMPLES_PER_PASS as usize)
-            .map(|chunk| {
-                let samples = chunk
-                    .iter()
-                    .enumerate()
-                    .map(|(channel, offset)| {
-                        globals_bind_group(gpu, queue, &layout, sheet, *offset, channel)
-                    })
-                    .collect();
-                // The resolve reads the sheet size only; the offset and channel are
-                // the winding pass's business, so any of the group's values will do.
-                let resolve = globals_bind_group(gpu, queue, &layout, sheet, [0.0, 0.0], 0);
-                Group { samples, resolve }
+            .map(|chunk| Group {
+                offsets: chunk.to_vec(),
             })
             .collect();
 
         Self {
             vertex_count: (sheet.vertices.len() / 8) as u32,
             vertices,
-            tile_count: sheet.tiles.len() as u32,
             tiles,
             groups,
+            bands,
         }
     }
 }
 
-/// The 32-byte uniform one winding draw reads.
+/// The 48-byte uniform one winding draw reads.
 #[allow(clippy::cast_precision_loss)] // sheet extents are far below f32's exact range
 fn globals_bind_group(
     gpu: &wgpu::Device,
@@ -446,6 +580,7 @@ fn globals_bind_group(
     sheet: &Sheet,
     offset: [f32; 2],
     channel: usize,
+    band: Band,
 ) -> wgpu::BindGroup {
     let mut mask = [0.0_f32; 4];
     mask[channel.min(3)] = 1.0;
@@ -458,6 +593,10 @@ fn globals_bind_group(
         mask[1],
         mask[2],
         mask[3],
+        band.origin as f32,
+        band.height.max(1) as f32,
+        0.0,
+        0.0,
     ];
     let buffer = create_buffer(
         gpu,
