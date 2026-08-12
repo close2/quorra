@@ -15,6 +15,27 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**Our fixtures were invented, and the corpus says what pages are actually shaped like**
+(2026-08-12, `doc/corpus-profile.md` and `tests/archetypes.rs`): every performance
+fixture here was reasoned out rather than measured, and a measurement over the caller's
+995 first pages found three things that matter. **Not one page emits a
+`Command::Rect`** — our flagship gate draws 5 933 of them, so it prices a lane no
+document takes. **Glyph reuse is 1.33 placements per distinct outline at the median**,
+not the 55 the brief's one dense page suggests, so a cold atlas is the normal state of a
+page turn and every fixture that measured a warm one was flattering itself. And **the
+median page is twelve commands**: the mass is trivial pages and everything interesting is
+in the tail — one page holds 66 309 commands, another 15 004 clips.
+
+Six archetypes now stand for those shapes, generated here from the counts and rendered on
+a **fresh device** each time. What gates them is `Counters`, not clocks: every field is an
+exact function of the scene and the viewport, so the baseline compares by **equality on
+any machine**, needs no threshold and cannot flake — `tiles` would have caught the atlas
+cliff, `bytes_uploaded` the sheet at maximum width, `layer_textures` the pair-per-plan
+frame. Each recorded number is explained beside it, because a baseline nobody can account
+for is one nobody can defend. What is checked in is counts and nothing else: no document,
+no display list, no reference to that project — delete it from the machine and the file
+still compiles and means the same thing.
+
 **Feedback §17 is answered with no change at all — two rasters of one page already
 work** (2026-08-11): §11.4.7 puts a colour space under the whole page, and a
 four-component one is three plus one, so the page is interpreted twice and the two
