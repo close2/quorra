@@ -28,14 +28,20 @@ shipped test asserts a property rather than a duration (a device warmed for this
 another, or for none draws the same bytes), because a re-measurement under load read 19.9
 against 20.0 and that is contention, not a result.
 
-**What is next on this path is measured and not taken**: the compositor allocates a layer
-pair at the *full target*, and on the three corpus pages that refuse for bytes at 4× the
-plans using them cover **0.0 %, 0.1–0.4 % and 4–6.5 %** of the page — 279, 296 and 321 MB
-against a 268 MB budget, of which the pairs are 186, 296 and 257. Sizing a layer to its
-plan's device bounds is what those pages need, and it is the same "every stage learns the
-origin" change as ADR 0028's panes: two or three lines in each of six shaders, plus the
-plan bounds and the pool. The shape is known and the numbers are above; it wants a session
-of its own rather than the tail of one.
+**A layer is as big as its plan** (2026-08-13, ADR 0036, **half landed**): the compositor
+allocates a layer pair at the *full target*, and on the three corpus pages that refuse for
+bytes at 4× the plans using them cover **0.0 %, 0.1–0.4 % and 4–6.5 %** of the page — 279,
+296 and 321 MB against a 268 MB budget, of which the pairs are 186, 296 and 257. So a page
+is refused for a hundred times the memory its groups need. Sizing a layer to its plan's
+bounds is the fix, and it is ADR 0028's mechanism with ADR 0028's hazard: a pane taught
+three places to subtract its origin, shipped with one missing, and drew nothing for every
+band after the first. **In the tree now: the origin, plumbed through every stage that
+renders into a layer, with the value zero** — a change whose correctness is checkable
+exactly, and which is checked (207 tests; the corpus at 915/37/5, unchanged). It has
+already earned its keep by catching what a compiler cannot: the globals uniform was
+vertex-visible only, and reading it from a fragment stage refuses every pipeline. **Not yet
+in the tree: the plan bounds and the allocation that uses them**, which is the commit that
+makes the origin non-zero and those three pages draw.
 
 **Shelves stay near one width, so the sheet stays near square** (2026-08-12, ADR 0034):
 the item ADR 0021 left — "the sheet's *height* … is a packer question with its own

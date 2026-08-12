@@ -12,7 +12,16 @@
 
 struct Globals {
     target_size: vec2f,
-    _pad: vec2f,
+    // The device-space corner this attachment's texel (0, 0) is (ADR 0036).
+    //
+    // A plan renders into a texture the size of *its own* content rather than the
+    // target's, so device space and attachment space differ by this. Two places have to
+    // agree about it and they are the whole of the mapping: the vertex stage subtracts it
+    // before dividing by `target_size`, and the fragment stage adds it back to recover
+    // the device pixel it is shading — clip rectangles, tile lookups and masks are all
+    // stated in device space and would otherwise be read at the wrong place. Zero for the
+    // frame's root, which renders into the target itself.
+    origin: vec2f,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -52,8 +61,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: Instance) -> VsOu
     let corner = vec2f(f32(vertex_index & 1u), f32(vertex_index >> 1u));
     let pos = instance.dest_min + corner * instance.size;
     let ndc = vec2f(
-        pos.x / globals.target_size.x * 2.0 - 1.0,
-        1.0 - pos.y / globals.target_size.y * 2.0,
+        (pos.x - globals.origin.x) / globals.target_size.x * 2.0 - 1.0,
+        1.0 - (pos.y - globals.origin.y) / globals.target_size.y * 2.0,
     );
     var out: VsOut;
     out.position = vec4f(ndc, 0.0, 1.0);
@@ -68,7 +77,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: Instance) -> VsOu
 // clip-rectangle overlap of the pixel's unit cell (same formula as rect.wgsl,
 // ADR 0005/0007).
 fn coverage_at(in: VsOut) -> f32 {
-    let p = floor(in.position.xy);
+    let p = floor(in.position.xy) + globals.origin;
     let local = vec2i(p - in.dest_min);
     let texel = vec2i(in.tex_origin_source.xy) + local;
     var cov: f32;

@@ -431,7 +431,13 @@ impl PipelineStore {
         BindLayouts {
             globals: make(
                 "quorra globals",
-                &[uniform_entry(0, 16, wgpu::ShaderStages::VERTEX)],
+                // Both stages, since ADR 0036: the vertex stage subtracts the
+                // attachment's device origin before mapping to clip space and the
+                // fragment stage adds it back to recover the device pixel it is
+                // shading. Declaring it vertex-only is a validation error rather than a
+                // wrong picture, which is the good kind — wgpu refused every pipeline
+                // that read it from a fragment stage.
+                &[uniform_entry(0, 16, quad_uniform)],
             ),
             textures: make(
                 "quorra lane sources",

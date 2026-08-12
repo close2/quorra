@@ -17,7 +17,16 @@
 struct Globals {
     // Target size in pixels. Only the vertex stage needs it, for the NDC mapping.
     target_size: vec2<f32>,
-    _pad: vec2<f32>,
+    // The device-space corner this attachment's texel (0, 0) is (ADR 0036).
+    //
+    // A plan renders into a texture the size of *its own* content rather than the
+    // target's, so device space and attachment space differ by this. Two places have to
+    // agree about it and they are the whole of the mapping: the vertex stage subtracts it
+    // before dividing by `target_size`, and the fragment stage adds it back to recover
+    // the device pixel it is shading — clip rectangles, tile lookups and masks are all
+    // stated in device space and would otherwise be read at the wrong place. Zero for the
+    // frame's root, which renders into the target itself.
+    origin: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -54,8 +63,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: Instance) -> VsOu
     // transform, including the page's y flip, was applied on the CPU; this is only the
     // fixed pixels-to-NDC map.
     let ndc = vec2<f32>(
-        pos.x / globals.target_size.x * 2.0 - 1.0,
-        1.0 - pos.y / globals.target_size.y * 2.0,
+        (pos.x - globals.origin.x) / globals.target_size.x * 2.0 - 1.0,
+        1.0 - (pos.y - globals.origin.y) / globals.target_size.y * 2.0,
     );
     var out: VsOut;
     out.position = vec4<f32>(ndc, 0.0, 1.0);
@@ -70,7 +79,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: Instance) -> VsOu
 fn coverage_at(in: VsOut) -> f32 {
     // position.xy is the pixel centre (k + 0.5 exactly); floor recovers the pixel's
     // integer corner, and the pixel's cell is [px, px+1) × [py, py+1).
-    let px = floor(in.position.xy);
+    let px = floor(in.position.xy) + globals.origin;
     let overlap_min = max(in.rect.xy, px);
     let overlap_max = min(in.rect.zw, px + vec2<f32>(1.0, 1.0));
     let extent = max(overlap_max - overlap_min, vec2<f32>(0.0, 0.0));

@@ -34,7 +34,16 @@ struct Params {
     // Residue-clip source: origin.xy in scratch, use_scratch, axis-preserving flag.
     coverage: vec4f,
     target_size: vec2f,
-    _pad: vec2f,
+    // The device-space corner this attachment's texel (0, 0) is (ADR 0036).
+    //
+    // A plan renders into a texture the size of *its own* content rather than the
+    // target's, so device space and attachment space differ by this. Two places have to
+    // agree about it and they are the whole of the mapping: the vertex stage subtracts it
+    // before dividing by `target_size`, and the fragment stage adds it back to recover
+    // the device pixel it is shading — clip rectangles, tile lookups and masks are all
+    // stated in device space and would otherwise be read at the wrong place. Zero for the
+    // frame's root, which renders into the target itself.
+    origin: vec2f,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -55,8 +64,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
     let pos = mix(params.dest.xy, params.dest.zw, corner);
     var out: VsOut;
     out.position = vec4f(
-        pos.x / params.target_size.x * 2.0 - 1.0,
-        1.0 - pos.y / params.target_size.y * 2.0,
+        (pos.x - params.origin.x) / params.target_size.x * 2.0 - 1.0,
+        1.0 - (pos.y - params.origin.y) / params.target_size.y * 2.0,
         0.0,
         1.0,
     );
@@ -101,7 +110,7 @@ fn shape_at(p: vec2f, uv: vec2f) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
-    let p = floor(in.position.xy);
+    let p = floor(in.position.xy) + params.origin;
     let uv = to_unit(p + vec2f(0.5, 0.5));
     let shape = shape_at(p, uv);
     // §8.9.5: top row at v = 1.
@@ -123,7 +132,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 // The knockout erase pass wants the shape alone (§11.4.6 with ADR 0010's algebra).
 @fragment
 fn fs_shape(in: VsOut) -> @location(0) vec4f {
-    let p = floor(in.position.xy);
+    let p = floor(in.position.xy) + params.origin;
     let uv = to_unit(p + vec2f(0.5, 0.5));
     return vec4f(0.0, 0.0, 0.0, shape_at(p, uv));
 }
