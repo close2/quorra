@@ -23,6 +23,16 @@
 //! phase, for one more field in a key hashed twice per glyph — and this takes 0.38 ms
 //! back, leaving the page faster than it was before either change.
 //!
+//! **And a page of 65 978 *distinct* glyphs is where the first version of this hasher
+//! was wrong.** A cheap accumulator without a final avalanche leaves its low bits weak,
+//! which is exactly where `hashbrown` takes the bucket index; a table of hundreds never
+//! notices and a table of tens of thousands clusters. The corpus's largest page went
+//! from 394 ms before this work to 468 with the weak version and **397 with the
+//! avalanche** — level with where it started, while an ordinary page of the same size
+//! went 56 ms to 43. The lesson is in the shape of the test rather than the constant: a
+//! hasher measured only on the fixture it was written for is measured at one table
+//! size.
+//!
 //! # The algorithm, and why it is allowed to be this simple
 //!
 //! One multiply-xor-rotate per 8 bytes — the shape `rustc` itself uses for its interned
@@ -63,7 +73,17 @@ impl KeyHasher {
 impl Hasher for KeyHasher {
     #[inline]
     fn finish(&self) -> u64 {
-        self.0
+        // A final avalanche, and it is not decoration. Multiplication propagates
+        // entropy leftwards, so the accumulator's *low* bits stay weak — and those are
+        // the bits `hashbrown` takes the bucket index from, while the high ones become
+        // its control byte. A table of a few hundred keys never notices; a table of
+        // sixty-six thousand clusters, which is where a page of that many distinct
+        // glyphs found it. Two multiplies and two shifts, once per lookup.
+        let mut x = self.0;
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        x ^= x >> 29;
+        x.wrapping_mul(0xc4ce_b9fe_1a85_ec53)
     }
 
     #[inline]
