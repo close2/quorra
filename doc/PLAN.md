@@ -15,6 +15,21 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**The staged pair belongs where the clause puts it** (2026-08-12, ADR 0032): ADR 0025 gave
+the caller §11.4.6's two operators and then refused them inside a knockout group, on the
+reading that a group already staging the clause per element would apply it twice. It does
+not — §11.4.6 weights each element by *its own* source shape, so a staged element replaces
+the group's erase for itself — and the refusal made the operators unusable for the case
+they were added for: `Command::Shaped` appears **only** as a direct element of a knockout
+group, because that is the only clause that uses shape and opacity apart. The position is
+accepted now, `StagedComposeReason::InsideKnockoutGroup` is deleted rather than left
+unreachable (a breaking change their own test anticipates), and the blend-mode refusal
+stands. Measured on a soft-masked wedge inside a knockout group, worst premultiplied
+deviation from the clause's line: **0.77 of 255 for the pair against 108.29 for the same
+element written as one mark**. What is left is §14.2's second ask — a compositing operator
+on a *group* mark, which three of their four refused pages need because a nested group's
+shape is the union of its elements'.
+
 **The timestamp instrument is made with the device, not with the frame** (2026-08-12,
 ADR 0031): the caller's §9 reports a first frame costing 12-18 ms more than its
 successors, flat across target sizes and not pipeline compilation. Reproduced here at

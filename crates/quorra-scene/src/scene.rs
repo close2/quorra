@@ -306,18 +306,21 @@ pub enum NonIsolatedReason {
 /// Why one of §11.4.6's staged operators cannot be drawn where it was placed.
 ///
 /// [`Compose::DestOut`] and [`Compose::Plus`] are a caller's own expansion of §11.4.6's
-/// second stage. Both positions below already *are* that stage by another route, so a
-/// staged mark inside them would apply it twice — a refusal rather than a guess (§5 of
-/// the brief).
+/// second stage, and one position still refuses them because it already *is* that stage
+/// by another route — a refusal rather than a guess (§5 of the brief).
+///
+/// **A knockout group is no longer one of them** (ADR 0032). It was, on the reading that
+/// a group whose elements are staged per element cannot also have an element stage
+/// itself; the clause says otherwise, weighting each element by *its own* source shape,
+/// so a staged element replaces the group's erase-by-coverage for itself. That position
+/// is where §11.4.6 puts the pair, and it was the only position the caller's interpreter
+/// emits it from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StagedComposeReason {
     /// The mark carries a blend mode other than [`BlendMode::Normal`], which wraps it in
     /// an implicit one-element group (§11.3.5) — so the operator would compose the group
     /// rather than the element, which is not where the clause puts it.
     BlendNotNormal,
-    /// The mark is inside a knockout group, whose every element is already composited
-    /// with the group's initial backdrop by the erase-and-deposit pair of §11.4.6.
-    InsideKnockoutGroup,
 }
 
 /// Why the builder refused an input. Every variant names what was wrong with which
@@ -459,10 +462,6 @@ impl fmt::Display for SceneError {
                     StagedComposeReason::BlendNotNormal => {
                         "it also carries a blend mode, which puts it in an implicit \
                          one-element group (§11.3.5)"
-                    }
-                    StagedComposeReason::InsideKnockoutGroup => {
-                        "it is inside a knockout group, which already stages §11.4.6 per \
-                         element"
                     }
                 };
                 write!(
@@ -684,7 +683,7 @@ impl SceneBuilder {
         Self::check_paint(paint)?;
         self.check_clip(clip)?;
         self.check_mask(mask)?;
-        self.check_staged_compose(compose, blend)?;
+        Self::check_staged_compose(compose, blend)?;
         self.push(Command::Fill {
             outline,
             transform,
@@ -999,17 +998,15 @@ impl SceneBuilder {
 
     /// §11.4.6's staged operators are the caller's own expansion of the clause, so the
     /// two positions that already expand it refuse them (ADR 0025).
-    fn check_staged_compose(&self, compose: Compose, blend: BlendMode) -> Result<(), SceneError> {
+    fn check_staged_compose(compose: Compose, blend: BlendMode) -> Result<(), SceneError> {
         if matches!(compose, Compose::SrcOver | Compose::Src) {
             return Ok(());
         }
-        let reason = if blend != BlendMode::Normal {
-            Some(StagedComposeReason::BlendNotNormal)
-        } else if self.inside_knockout() {
-            Some(StagedComposeReason::InsideKnockoutGroup)
-        } else {
-            None
-        };
+        // Inside a knockout group is where §11.4.6 *puts* this pair, and refusing it
+        // there is what ADR 0025 got wrong (ADR 0032): the clause weights each element
+        // by its own source shape, so a staged element replaces the group's
+        // erase-by-coverage for itself rather than applying it twice.
+        let reason = (blend != BlendMode::Normal).then_some(StagedComposeReason::BlendNotNormal);
         match reason {
             Some(reason) => Err(SceneError::StagedComposeUnsupported { compose, reason }),
             None => Ok(()),

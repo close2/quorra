@@ -24,13 +24,15 @@
     clippy::panic,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::cast_precision_loss
+    clippy::cast_precision_loss,
+    // Pixel indexing and the clause's own arithmetic, over rasters this file just drew.
+    clippy::arithmetic_side_effects
 )]
 
 use quorra_gpu::{Device, Options, Target, Viewport};
 use quorra_scene::{
-    Affine, BlendMode, Color, Compose, FillRule, GroupSpec, OutlineId, Paint, Point, Scene,
-    SceneBuilder, SceneError, Segment, StagedComposeReason,
+    Affine, BlendMode, Color, Compose, FillRule, GroupSpec, MaskKind, OutlineId, Paint, Point,
+    Scene, SceneBuilder, SceneError, Segment, StagedComposeReason,
 };
 
 const SIZE: u32 = 64;
@@ -258,9 +260,10 @@ fn the_two_positions_that_already_stage_the_clause_refuse() {
         }
     );
 
-    // Inside a knockout group, every element is already staged per §11.4.6.
+    // And inside a knockout group it is *accepted*, which is where §11.4.6 puts it
+    // (ADR 0032). `the_pair_inside_a_knockout_group_is_the_clause` draws it.
     let mut builder = SceneBuilder::new();
-    let error = builder
+    builder
         .group(
             GroupSpec {
                 alpha: 1.0,
@@ -272,14 +275,7 @@ fn the_two_positions_that_already_stage_the_clause_refuse() {
             },
             |body| fill(body, outline, colour, Compose::DestOut),
         )
-        .expect_err("a knockout group already stages the clause for its elements");
-    assert_eq!(
-        error,
-        SceneError::StagedComposeUnsupported {
-            compose: Compose::DestOut,
-            reason: StagedComposeReason::InsideKnockoutGroup,
-        }
-    );
+        .expect("§11.4.6 weights each element by its own shape, staged or not");
 
     // And the ordinary operators are unaffected in both positions.
     let mut builder = SceneBuilder::new();
@@ -295,4 +291,191 @@ fn the_two_positions_that_already_stage_the_clause_refuse() {
             None,
         )
         .expect("Compose::Src under a blend mode is untouched by ADR 0025");
+}
+
+/// A half-transparent alpha soft mask over the whole target.
+///
+/// What makes the knockout fixture discriminating: §11.6.4.3's mask is *opacity* and
+/// §11.6.4.2's shape is geometry, so a masked element's shape is its outline and its alpha
+/// is half of it. An element whose shape *is* its coverage — an ordinary solid fill — is
+/// staged correctly by a knockout group on its own, and a fixture built from one would
+/// pass whatever ADR 0032 decided.
+fn half(builder: &mut SceneBuilder) -> Result<quorra_scene::MaskId, SceneError> {
+    builder.mask(MaskKind::Alpha, None, |body| {
+        body.rect(
+            quorra_scene::Rect::new(Point::new(0.0, 0.0), Point::new(SIZE as f32, SIZE as f32)),
+            Affine::IDENTITY,
+            Color::new(1.0, 1.0, 1.0, 0.5),
+            None,
+            None,
+        )
+    })
+}
+
+/// The wedge under that mask, composed as asked.
+fn masked(
+    builder: &mut SceneBuilder,
+    outline: OutlineId,
+    colour: Color,
+    mask: quorra_scene::MaskId,
+    compose: Compose,
+) -> Result<(), SceneError> {
+    builder.fill(
+        outline,
+        Affine::IDENTITY,
+        FillRule::NonZero,
+        Paint::Solid(colour),
+        None,
+        BlendMode::Normal,
+        compose,
+        Some(mask),
+    )
+}
+
+/// The worst premultiplied deviation from §11.4.6's line `P' = (1 − f) × P + S`, and how
+/// many pixels of the fixture are partially covered.
+///
+/// Its own function because the test that uses it reads three rasters out of the device
+/// and would otherwise be one long block of indexing: `before` is the group's content
+/// under the element, `shape` carries `f` in its alpha, `deposit` is the element drawn
+/// onto transparency, and `actual` is the frame under test.
+fn deviation_from_the_clause(
+    before: &[u8],
+    shape: &[u8],
+    deposit: &[u8],
+    actual: &[u8],
+) -> (f32, u32) {
+    let premul = |raster: &[u8], at: usize, channel: usize| {
+        f32::from(raster[at + channel]) * f32::from(raster[at + 3]) / 255.0
+    };
+    let (mut worst, mut partial) = (0.0_f32, 0_u32);
+    for pixel in 0..(SIZE * SIZE) as usize {
+        let at = pixel * 4;
+        let f = f32::from(shape[at + 3]) / 255.0;
+        if f > 0.0 && f < 1.0 {
+            partial += 1;
+        }
+        for channel in 0..3 {
+            let expected =
+                (1.0 - f).mul_add(premul(before, at, channel), premul(deposit, at, channel));
+            worst = worst.max((premul(actual, at, channel) - expected).abs());
+        }
+    }
+    (worst, partial)
+}
+
+/// **The pair inside a knockout group is the clause's line for that element** (ADR 0032).
+///
+/// ISO 32000-2 §11.4.6 composites each element with the group's initial backdrop and then
+/// takes a weighted average with the immediate backdrop, *weighted by the element's own
+/// source shape*:
+///
+/// > 𝛼gi = (1 − 𝑓si) × 𝛼gi−1 + 𝑓si × 𝛼t
+///
+/// So the group's per-element rule and the staged pair are the same formula, and an
+/// element that states the pair states its own `𝑓si` instead of having it read off the
+/// alpha it is drawn with. That is the whole of why the pair belongs here — a nested
+/// group or a soft-masked element has a shape the coverage does not carry — and it is
+/// why the pair *replaces* the group's erase for that element rather than doubling it.
+///
+/// The group's first element is opaque and covers the target, so the group buffer is
+/// opaque everywhere and compositing it over the page is a copy: what the probe reads is
+/// the group's own arithmetic rather than the composite's.
+#[test]
+fn the_pair_inside_a_knockout_group_is_the_clause() {
+    let mut device = device();
+    let outline = wedge(&mut device);
+    let under = Color::new(0.9, 0.2, 0.1, 1.0);
+    // Half-opaque, so shape and opacity are different numbers.
+    let object = Color::new(0.1, 0.4, 0.9, 0.5);
+
+    let knockout = GroupSpec {
+        alpha: 1.0,
+        blend: BlendMode::Normal,
+        clip: None,
+        knockout: true,
+        mask: None,
+        isolated: true,
+    };
+    let cover = |builder: &mut SceneBuilder| {
+        builder
+            .rect(
+                quorra_scene::Rect::new(Point::new(0.0, 0.0), Point::new(SIZE as f32, SIZE as f32)),
+                Affine::IDENTITY,
+                under,
+                None,
+                None,
+            )
+            .unwrap();
+    };
+
+    // What the group holds before the staged element: the opaque cover alone.
+    let mut before = SceneBuilder::new();
+    before
+        .group(knockout, |body| {
+            cover(body);
+            Ok(())
+        })
+        .unwrap();
+    let before = render(&mut device, &before.finish());
+
+    // The two quantities the clause's line is written in, read from the device.
+    let onto_transparency = |device: &mut Device, colour: Color, compose: Compose| {
+        let mut builder = SceneBuilder::new();
+        fill(&mut builder, outline, colour, compose).unwrap();
+        render(device, &builder.finish())
+    };
+    let shape = onto_transparency(
+        &mut device,
+        Color::new(1.0, 1.0, 1.0, 1.0),
+        Compose::SrcOver,
+    );
+    let deposit = onto_transparency(&mut device, object, Compose::SrcOver);
+
+    let mut staged = SceneBuilder::new();
+    staged
+        .group(knockout, |body| {
+            cover(body);
+            fill(
+                body,
+                outline,
+                Color::new(0.0, 0.0, 0.0, 1.0),
+                Compose::DestOut,
+            )?;
+            fill(body, outline, object, Compose::Plus)
+        })
+        .unwrap();
+    let staged = render(&mut device, &staged.finish());
+
+    // And the same element written the way a caller has to write it without the pair:
+    // one mark, which reads its shape off the alpha it is drawn with.
+    let mut plain = SceneBuilder::new();
+    let mask = half(&mut plain).unwrap();
+    plain
+        .group(knockout, |body| {
+            cover(body);
+            masked(body, outline, object, mask, Compose::SrcOver)
+        })
+        .unwrap();
+    let plain = render(&mut device, &plain.finish());
+
+    let (worst_staged, partial_pixels) =
+        deviation_from_the_clause(&before, &shape, &deposit, &staged);
+    let (worst_plain, _) = deviation_from_the_clause(&before, &shape, &deposit, &plain);
+
+    eprintln!("knockout: worst staged {worst_staged:.2}, worst single mark {worst_plain:.2}");
+    assert!(
+        partial_pixels > 30,
+        "the fixture must have partially covered pixels: {partial_pixels}"
+    );
+    assert!(
+        worst_staged <= 3.0,
+        "the pair must be §11.4.6's line inside a knockout group too; worst premultiplied \
+         deviation {worst_staged}"
+    );
+    assert!(
+        worst_plain >= 16.0,
+        "and the single mark must not be — it is the defect the pair exists to fix, and a \
+         fixture where the two agree tests nothing: {worst_plain}"
+    );
 }
