@@ -96,6 +96,11 @@ pub struct Device {
     /// The GPU lane's winding target, kept across frames (ADR 0016's measurement).
     winding_texture: crate::winding::WindingTexture,
     timestamps: Option<TimestampSupport>,
+    /// The frame's two timestamps and their buffers, kept for the device's life
+    /// (ADR 0031). Absent when the adapter has no timestamp queries, and absent for
+    /// one frame after a read fails, which is what returns a poisoned map buffer to a
+    /// fresh one.
+    pass_query: Option<PassQuery>,
     surface: Option<SurfaceState>,
     /// The blocking startup steps, each measured on its own (§7, and the caller's
     /// feedback §8.1: one number that measured three could not be attributed).
@@ -354,6 +359,10 @@ impl Device {
             ..Default::default()
         });
 
+        // Before the device is assembled, because the constructor owns `gpu` until then
+        // — and this is the point of making it here at all (ADR 0031).
+        let pass_query_at_startup = timestamps.map(|_| PassQuery::new(&gpu));
+
         let max_dimension = gpu.limits().max_texture_dimension_2d;
         let limits = Limits {
             max_target_size: max_dimension,
@@ -387,6 +396,11 @@ impl Device {
                 side.saturating_mul(side)
             },
             timestamps,
+            // Made here rather than on the frame that first wants it: the driver charges
+            // 2.43 ms for a `QuerySet` and its two buffers the first time, and a device is
+            // constructed off the critical path by every host that follows §7's advice
+            // — where a first frame is on it by definition (ADR 0031).
+            pass_query: pass_query_at_startup,
             surface: surface_state,
             startup: StartupSteps {
                 instance_creation: pre.instance_creation,
@@ -662,7 +676,7 @@ impl Device {
         let bound = self.bind_target(&into, viewport)?;
         let acquire = acquire_started.elapsed();
 
-        let query = self.make_pass_query();
+        let query = self.take_pass_query();
         let encode_phases = encoded.encode_phases.phases(encode_time);
         let (execute_wall, mut phases, layer_textures) =
             match self.run_frame(&encoded, &bound, upload, query.as_ref(), &damage) {
@@ -690,6 +704,11 @@ impl Device {
             "content pass",
             &mut phases,
         )?;
+        // Read, so the buffers are unmapped and the set is the next frame's to use.
+        // Reached only on the `?` above succeeding, which is the whole condition: a
+        // query whose read failed is dropped here instead, and the frame after it makes
+        // a fresh one.
+        self.pass_query = query;
 
         let (payload, readback) = self.resolve_payload(readback_source, viewport)?;
 
@@ -1274,8 +1293,25 @@ impl Device {
 
     /// The query set and buffers for one frame's timestamps, when the adapter has
     /// them.
-    fn make_pass_query(&self) -> Option<PassQuery> {
-        self.timestamps.map(|_| PassQuery::new(&self.gpu))
+    /// This frame's timestamp query, taken out of the device for the duration.
+    ///
+    /// **Taken rather than borrowed**, because the frame it belongs to needs `&mut self`
+    /// for everything else it does; and taken rather than made, because making one costs
+    /// **2.43 ms on a device's first frame** — a `QuerySet` and two sixteen-byte buffers,
+    /// which the driver charges for once and then hands back from a pool. That was a
+    /// fifth of the eleven milliseconds a first frame pays over its successors
+    /// (`QUORRA_FEEDBACK.md` §9), spent on an instrument rather than on the page.
+    ///
+    /// It goes back at the end of a frame that read it, and does not after one that
+    /// could not: a map that failed may leave the buffer mapped, and the next frame's
+    /// `map_async` on it would be a validation error rather than a number.
+    fn take_pass_query(&mut self) -> Option<PassQuery> {
+        self.timestamps?;
+        Some(
+            self.pass_query
+                .take()
+                .unwrap_or_else(|| PassQuery::new(&self.gpu)),
+        )
     }
 
     /// A frame-internal texture: layer, mask, or ping-pong scratch.

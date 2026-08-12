@@ -15,6 +15,22 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**The timestamp instrument is made with the device, not with the frame** (2026-08-12,
+ADR 0031): the caller's §9 reports a first frame costing 12-18 ms more than its
+successors, flat across target sizes and not pipeline compilation. Reproduced here at
+11.2-11.9 ms against 0.9, and timing the inside of `Device::render` found **2.43 ms of it
+making the frame's `QuerySet` and two sixteen-byte buffers** — an instrument, charged to
+the frame a person waits for. The driver pools them after the first: 2.35-3.34 ms for the
+first on five fresh devices, 0.018-0.036 for the second. So one query lives with the
+device now and each frame borrows it, giving it back only if its read succeeded — a
+failed read can leave the map buffer mapped, and the frame after would get a validation
+error instead of a number. **What is left of the first frame is about 6 ms and is not ours
+to warm**: it is inside `run_frame` and scales with the target, so it is page-sized
+textures and the driver's first touch of a heap that size, and a warm-up thread cannot
+allocate them before the viewport exists. That makes the remainder an API question — a
+size hint, or `Device::warm_for` — and it is the caller's contract, so it is written down
+rather than taken.
+
 **A clip chain is one region, so its links intersect** (2026-08-12, ADR 0030): the caller
 asked, in their `QUORRA_FEEDBACK.md` §18, what rule composes a chain here and whether
 §10.7.4 changes it. It was a product — so one clip restated *n* times raised its

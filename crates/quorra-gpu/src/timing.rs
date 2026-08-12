@@ -21,6 +21,7 @@ pub(crate) struct TimestampSupport {
 }
 
 /// The query set and buffers that carry one pass's two timestamps home.
+#[derive(Debug)]
 pub(crate) struct PassQuery {
     pub set: wgpu::QuerySet,
     pub resolve: wgpu::Buffer,

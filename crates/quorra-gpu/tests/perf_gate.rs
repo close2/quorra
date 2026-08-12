@@ -243,3 +243,45 @@ fn the_gpu_lane_draws_and_culls_the_same_frame() {
         "the cull is the encoder's, so both lanes reject exactly the same commands"
     );
 }
+
+/// **The timestamp instrument is made once and survives being reused** (ADR 0031).
+///
+/// A `QuerySet` and its two buffers cost 2.35 to 3.34 ms the first time a device asks
+/// the driver for them, and 0.02 to 0.04 ms after — so quorra makes them with the device
+/// and lends them to each frame, where it used to make a set per frame and pay that on
+/// the first one, which is a fifth of the eleven milliseconds a first frame costs over
+/// its successors (`QUORRA_FEEDBACK.md` §9).
+///
+/// What that risks is the instrument rather than the picture: a map buffer is read and
+/// unmapped every frame, and a set that came back wrong would quietly downgrade
+/// `execute` to a wall clock. So the property under test is not a duration — it is that
+/// ten consecutive frames each report a *timestamp-query* `execute`, and that none of
+/// them reports zero.
+#[test]
+fn the_timestamp_query_survives_a_device_full_of_frames() {
+    let mut device = Device::headless(&Options::default()).expect("some adapter must exist");
+    device.wait_until_warm();
+    let scene = dense_scene();
+    let viewport = Viewport::full(1191, 1684, Affine::scale(1.0, 1.0));
+    let first = device
+        .render(&scene, &viewport, Target::Readback)
+        .expect("the dense page draws");
+    if first.timings().execute_provenance != TimingProvenance::TimestampQueries {
+        eprintln!("skipped: this adapter has no timestamp queries");
+        return;
+    }
+    for frame in 0..10 {
+        let drawn = device
+            .render(&scene, &viewport, Target::Readback)
+            .expect("the dense page draws");
+        assert_eq!(
+            drawn.timings().execute_provenance,
+            TimingProvenance::TimestampQueries,
+            "frame {frame} lost the instrument"
+        );
+        assert!(
+            drawn.timings().execute > Duration::ZERO,
+            "frame {frame} timed the pass at zero, which no pass takes"
+        );
+    }
+}
