@@ -34,6 +34,7 @@
 #![forbid(unsafe_code)]
 
 pub mod atlas;
+mod census;
 mod compose;
 pub mod device;
 mod encode;

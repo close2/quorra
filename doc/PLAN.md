@@ -15,6 +15,23 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A cache is worth what it is used for, not what it will accept** (2026-08-12,
+ADR 0029): ADR 0028 asked the atlas whether it *would hold* a tile. The better question
+is what it would *do* with one, and the scene can answer it — `crate::census` counts a
+page's solid fills by outline, scale and rule before the walk, and a shape the page places
+**once** is one the cache would rasterise, upload and read a single time. The corpus
+median is 1.33 placements per distinct outline, so that is the ordinary page and not a
+pathology: **its first frame went from 40.3 ms to 14.7** at 200-pixel tiles, 2.5-3× at
+every size measured, with no later frame slower and a page of shared glyphs untouched at
+0.4 ms. The count is deliberately loose — it ignores the sub-pixel phase, so "placed once"
+is a fact and "reused" is a guess in the direction of the cache. Two things were built,
+measured and **removed**: a one-frame memory of what the cache declined (it would have
+made the third frame of a static page a different picture from the first) and a `has_room`
+question to go with `admits` (with the census in place, the atlas stops filling with tiles
+nobody reuses, and asking moved nothing on four page shapes or the corpus). What is left
+is that the census cannot see the phase, and that a caller who redraws one page for many
+frames would still rather have the atlas.
+
 **The winding target spans the lane's own tiles, and the lane is the one the atlas
 leaves** (2026-08-12, ADR 0028): ADR 0027's band bounded the target's height and left its
 width the *sheet's*, which both lanes share — so thirty shapes of 1 200 pixels still

@@ -4,6 +4,14 @@ Status: accepted, 2026-08-12. Takes the piece ADR 0027 recorded as what it did n
 repairs a defect that ADR shipped with, and replaces its measured constant with the
 question the atlas already answers.
 
+*Extended, 2026-08-12 (ADR 0029), in both of the costs recorded below.* The first — a
+page whose outlines are each placed once — is now part of the criterion: the lane asks
+what the cache will *do* with a tile rather than what it will accept. The second — that
+`AtlasStore::admits` answers a question about size and not about room — was implemented,
+measured on four page shapes and the caller's corpus, found to move nothing, and removed;
+ADR 0029 records the numbers, and the reason is that the first fix makes the second
+unnecessary.
+
 ## Context
 
 ADR 0027 cut the winding target into horizontal bands, which bounded its *height*. Its
@@ -151,14 +159,17 @@ against the 13-20 ms the forced GPU lane took. Warm they are within noise of eac
 because by then the atlas has them. The criterion is deliberately blind to *how many
 times* an outline will be placed, and the scene knows: counting placements per outline in
 a pre-pass would let the lane be chosen on cache value rather than cache eligibility.
-That is the next question on this lane, and it now has a number attached.
+That is the next question on this lane, and it now has a number attached. *(Taken the
+same day, ADR 0029: the first frame of such a page went from 40.3 ms to 14.7.)*
 
 **`AtlasStore::admits` answers a question about size, not about room.** A page of 3 960
 distinct 50-pixel glyphs asks for 12.9 MB of an 8 MiB atlas: every tile is admissible,
 a third of them do not fit, and those fall back to CPU scratch rasterisation rather than
 to this lane. Making the miss fall through to the GPU lane needs the lane decision to
 happen after the atlas attempt rather than before it, which is a larger change than this
-ADR takes.
+ADR takes. *(Tried and rejected, ADR 0029: with placement counts in the criterion the
+atlas stops filling with tiles nobody reuses, and asking about room then moved nothing on
+four page shapes or on the corpus.)*
 
 **A pane is still cut greedily in sheet order.** Tiles that the shelf packer placed far
 apart make a pane wider than its tiles need. Nothing measured says this costs anything
@@ -166,7 +177,7 @@ yet; it is written down so the next person does not mistake it for a design.
 
 ## Revisit when
 
-Placement counts are available at lane-choice time (the first item above), or the atlas
-learns to report *why* it refused, which would let a miss reach this lane. Either changes
-the criterion; re-derive the table with `tests/lane_crossover.rs` rather than reasoning
-from this one, since it has now moved twice.
+Both of the first two items are settled by ADR 0029 — one taken, one measured and
+refused. What is left here is the third: a pane cut in sheet order rather than by what
+would pack tightest. Re-derive any of it with `tests/lane_crossover.rs` rather than
+reasoning from this table, since the criterion has now moved three times.

@@ -907,3 +907,90 @@ fn a_page_of_large_shapes_fits_a_budget_no_band_of_the_sheet_could() {
         "and the last shape of the page is on it"
     );
 }
+
+/// **A shape the page places once takes the device lane; the same shape placed again
+/// takes the atlas** (ADR 0029).
+///
+/// Both fixtures draw a 300-pixel blob on a device with the *default* 8 MiB atlas, where
+/// a 90 000-texel tile is well inside what `AtlasStore::admits` allows — so the atlas
+/// would accept either of them, and what separates the two is only how many times the
+/// page asks for the tile. `Counters::tiles` says which lane answered: the GPU lane
+/// always packs a tile on the sheet, and a cached glyph packs none.
+///
+/// The repeats are placed at whole-pixel offsets on purpose. The census counts a shape
+/// by its outline and scale and deliberately not by its sub-pixel phase, so three
+/// placements at arbitrary offsets would be three atlas keys used once each — the count
+/// is an upper bound on reuse, and a fixture that leaned on the loose direction would be
+/// asserting the bound rather than the behaviour.
+#[test]
+fn the_lane_follows_how_often_the_page_places_the_shape() {
+    let placements = |count: u32| {
+        move |device: &mut Device| {
+            let side = 300.0_f32;
+            let r = side * 0.5;
+            let outline = device
+                .upload_outline(&[
+                    Segment::MoveTo(Point::new(0.0, r)),
+                    Segment::CubicTo {
+                        c1: Point::new(0.0, 0.0),
+                        c2: Point::new(side, 0.0),
+                        to: Point::new(side, r),
+                    },
+                    Segment::CubicTo {
+                        c1: Point::new(side, side),
+                        c2: Point::new(0.0, side),
+                        to: Point::new(0.0, r),
+                    },
+                    Segment::Close,
+                ])
+                .unwrap();
+            let mut builder = SceneBuilder::new();
+            for index in 0..count {
+                builder
+                    .fill(
+                        outline,
+                        Affine::translate((index * 320) as f32, 0.0),
+                        FillRule::NonZero,
+                        black(),
+                        None,
+                        BlendMode::Normal,
+                        Compose::SrcOver,
+                        None,
+                    )
+                    .unwrap();
+            }
+            builder.finish()
+        }
+    };
+    let tiles_for = |count: u32| {
+        let mut device = Device::headless(&Options {
+            adapter: Some("llvmpipe".into()),
+            coverage: Coverage::Gpu,
+            ..Options::default()
+        })
+        .expect("llvmpipe is present wherever this suite runs");
+        device.wait_until_warm();
+        let scene = placements(count)(&mut device);
+        device
+            .render(
+                &scene,
+                &Viewport::full(count * 320, 400, Affine::IDENTITY),
+                Target::Readback,
+            )
+            .expect("the fixture is inside every budget")
+            .counters()
+            .tiles
+    };
+    assert_eq!(
+        tiles_for(1),
+        1,
+        "one placement: the entry would be written once and read once, so the device \
+         draws it and the atlas keeps nothing"
+    );
+    assert_eq!(
+        tiles_for(3),
+        0,
+        "three placements of one tile: the first rasterisation pays for the other two, \
+         which is a price no lane beats"
+    );
+}

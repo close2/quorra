@@ -42,7 +42,8 @@ use quorra_scene::{
     OutlineId, Paint, Point, Rect, Scene, ShadingKind,
 };
 
-use crate::atlas::{AtlasStore, GlyphKey, PhaseKey};
+use crate::atlas::{AtlasStore, CacheProspect, GlyphKey, GlyphPlacement};
+use crate::census::Census;
 use crate::error::RenderError;
 use crate::instrument::EncodeClock;
 use crate::keyhash::FastSet;
@@ -70,6 +71,41 @@ fn tile_side(low: f32, high: f32) -> u32 {
             .max(0.0)
             .min(f32::from(u16::MAX)) as u32
     }
+}
+
+/// One solid fill, resolved as far as the lane choice needs it.
+///
+/// A struct rather than nine parameters: the arm that draws it asks the cache one
+/// question and then hands the same fill to whichever of three lanes answers, and
+/// threading the fill's own description through each of them by hand is how two of them
+/// come to disagree about it.
+struct SolidFill {
+    outline: OutlineId,
+    /// The scene's transform, which is what the census counted by.
+    transform: Affine,
+    /// The same transform composed with the viewport, which is what the tile is
+    /// rasterised and keyed by.
+    to_device: DeviceTransform,
+    rule: Rule,
+    color: quorra_scene::Color,
+    /// Device bounds: min x, min y, max x, max y.
+    bounds: (f32, f32, f32, f32),
+    style: DrawStyle,
+    mask: Option<u32>,
+}
+
+/// The linear part of a transform as the bits a census counts by.
+///
+/// The *scene's* transform, not the device's: the two differ by the viewport, which is
+/// one affine for the whole frame, so equal scene linear parts compose to equal device
+/// ones and the census can be taken before a viewport is in hand.
+fn linear_bits(transform: Affine) -> [u32; 4] {
+    [
+        transform.a.to_bits(),
+        transform.b.to_bits(),
+        transform.c.to_bits(),
+        transform.d.to_bits(),
+    ]
 }
 
 /// A clip rectangle that admits everything, for unclipped instances.
@@ -626,6 +662,8 @@ struct Encoder<'a> {
     coverage: Coverage,
     /// The GPU lane's triangles and tiles, empty under [`Coverage::Cpu`].
     winding: crate::winding::Sheet,
+    /// How often the scene places each shape, taken before the walk (ADR 0029).
+    census: Census,
     resources: &'a ResourceStore,
     atlas: &'a mut AtlasStore,
     quantum: Option<u16>,
@@ -694,6 +732,22 @@ pub(crate) fn encode(
         visible: target_rect(viewport),
         coverage,
         winding: crate::winding::Sheet::default(),
+        // One pass over the commands before the walk: the lane a fill takes depends on
+        // how many *other* fills share its tile, which is not knowable from the fill.
+        // One pass over the commands before the walk: the lane a fill takes depends on
+        // how many *other* fills share its tile, which is not knowable from the fill
+        // (ADR 0029).
+        //
+        // **Only the GPU lane reads it**, and `take_gpu_lane` answers `false` on sight
+        // under `Coverage::Cpu` — so the caller's default configuration must not pay for
+        // the walk. Measured at 25 µs on a 5 933-command page against an encode of 80,
+        // which is a quarter of a phase this project measures in microseconds. An empty
+        // census answers "not placed once" to every shape, which is the lane every fill
+        // would have taken anyway.
+        census: match coverage {
+            Coverage::Gpu => Census::of(scene),
+            Coverage::Cpu => Census::default(),
+        },
         resources,
         atlas,
         quantum,
@@ -1283,59 +1337,20 @@ impl Encoder<'_> {
             FillRule::EvenOdd => Rule::EvenOdd,
         };
         if let Paint::Solid(color) = paint {
-            let Some((bx0, by0, bx1, by1)) = bounds else {
+            let Some(bounds) = bounds else {
                 return Ok(()); // no geometry: draws nothing
             };
-            // The GPU lane takes the outline as it was uploaded — quadratics, not
-            // polylines — which is the whole of why its cost does not grow with the
-            // magnification: there is no flattening here to be done again at a new
-            // scale, and no atlas in front of it to be cold (ADR 0016).
-            let triangles = stored.quads.triangle_count();
-            if !stored.quads.is_empty()
-                && self.take_gpu_lane(
-                    &resolved,
-                    tile_side(bx0, bx1),
-                    tile_side(by0, by1),
-                    triangles,
-                )
-            {
-                let Some(tile) = self.visible_tile((bx0, by0, bx1, by1), &resolved) else {
-                    return Ok(());
-                };
-                let quads = &stored.quads;
-                let device = to_device;
-                return self.push_gpu_tile(
-                    tile,
-                    rule,
-                    color,
-                    &resolved,
-                    style,
-                    mask,
-                    |out, origin, clip| {
-                        quads.append_triangles(
-                            |p| {
-                                let q = apply(&device, p);
-                                [q.x + origin[0], q.y + origin[1]]
-                            },
-                            clip,
-                            out,
-                        );
-                    },
-                );
-            }
-            // Cacheable is a question for the atlas — how much of it this tile would
-            // take — rather than a constant here (ADR 0024). A residue chain still
-            // takes the scratch path: the clip multiplies into the tile, so the tile is
-            // not the glyph and would poison the cache for every other placement of it.
-            if resolved.residues.is_none()
-                && self.atlas.admits(tile_side(bx0, bx1), tile_side(by0, by1))
-            {
-                return self.push_glyph(outline, &to_device, rule, color, &resolved, style, mask);
-            }
-            let span = self.clock.start();
-            let polylines = raster::flatten(&stored.segments, to_device);
-            self.clock.geometry(span);
-            return self.push_coverage_styled(&polylines, rule, color, &resolved, style, mask);
+            let placement = SolidFill {
+                outline,
+                transform,
+                to_device,
+                rule,
+                color,
+                bounds,
+                style,
+                mask,
+            };
+            return self.fill_solid(&placement, &resolved);
         }
         // Shading or mesh paint (§8.7.4.5): one quad over a coverage source. The
         // rect-hinted case needs no scratch tile — analytic coverage, mirroring the
@@ -1359,6 +1374,94 @@ impl Encoder<'_> {
         let polylines = raster::flatten(&stored.segments, to_device);
         self.clock.geometry(span);
         self.push_shaded_coverage(geometry, &polylines, rule, &resolved, style, mask)
+    }
+
+    /// The solid arm of the fill walk: three lanes, and the cache decides between them.
+    ///
+    /// In order of preference, and each condition is stated where it is asked:
+    /// [`Encoder::take_gpu_lane`] for a tile the cache is no use for, the glyph lane for
+    /// one it will hold and re-read, the scratch path for everything left — a residue
+    /// clip, or a tile too large for the atlas whose triangles cost more than its
+    /// coverage.
+    fn fill_solid(&mut self, fill: &SolidFill, resolved: &ResolvedClip) -> Result<(), RenderError> {
+        let stored = self
+            .resources
+            .outline(fill.outline)
+            .ok_or(RenderError::UnknownOutline {
+                outline: fill.outline,
+            })?;
+        let (bx0, by0, bx1, by1) = fill.bounds;
+        let (tile_width, tile_height) = (tile_side(bx0, bx1), tile_side(by0, by1));
+        // What the cache would do with this placement, asked once and answered by the
+        // atlas and the census together (ADR 0029). Both lanes below read this one
+        // answer: a lane chosen on one reading of the cache and taken on another is how
+        // a tile ends up rasterised twice, or not at all.
+        let cache = self.atlas.prospect(
+            GlyphPlacement::of(fill.outline, &fill.to_device, fill.rule, self.quantum),
+            tile_width,
+            tile_height,
+            self.census
+                .placed_once(fill.outline.0, linear_bits(fill.transform), fill.rule),
+        );
+        // The GPU lane takes the outline as it was uploaded — quadratics, not polylines
+        // — which is the whole of why its cost does not grow with the magnification:
+        // there is no flattening here to be done again at a new scale, and no atlas in
+        // front of it to be cold (ADR 0016).
+        if !stored.quads.is_empty()
+            && self.take_gpu_lane(
+                resolved,
+                cache,
+                tile_width,
+                tile_height,
+                stored.quads.triangle_count(),
+            )
+        {
+            let Some(tile) = self.visible_tile(fill.bounds, resolved) else {
+                return Ok(());
+            };
+            let quads = &stored.quads;
+            let device = fill.to_device;
+            return self.push_gpu_tile(
+                tile,
+                fill.rule,
+                fill.color,
+                resolved,
+                fill.style,
+                fill.mask,
+                |out, origin, clip| {
+                    quads.append_triangles(
+                        |p| {
+                            let q = apply(&device, p);
+                            [q.x + origin[0], q.y + origin[1]]
+                        },
+                        clip,
+                        out,
+                    );
+                },
+            );
+        }
+        // Cacheable is a question for the atlas — how much of it this tile would take —
+        // rather than a constant here (ADR 0024). A residue chain still takes the
+        // scratch path: the clip multiplies into the tile, so the tile is not the glyph
+        // and would poison the cache for every other placement of it.
+        if let (None, Some(placement)) = (resolved.residues.as_ref(), cache.placement()) {
+            return self.push_glyph(
+                fill.outline,
+                &fill.to_device,
+                &placement,
+                fill.rule,
+                fill.color,
+                resolved,
+                fill.style,
+                fill.mask,
+            );
+        }
+        let span = self.clock.start();
+        let polylines = raster::flatten(&stored.segments, fill.to_device);
+        self.clock.geometry(span);
+        self.push_coverage_styled(
+            &polylines, fill.rule, fill.color, resolved, fill.style, fill.mask,
+        )
     }
 
     /// §11.3.5 for a single element: the implicit one-element group a blended fill
@@ -1715,42 +1818,21 @@ impl Encoder<'_> {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
     #[allow(clippy::too_many_arguments)] // one draw's parameters, threaded once
+    #[allow(clippy::too_many_arguments)] // one draw's parameters, threaded once
     fn push_glyph(
         &mut self,
         outline: OutlineId,
         to_device: &DeviceTransform,
+        placement: &GlyphPlacement,
         rule: Rule,
         color: quorra_scene::Color,
         resolved: &ResolvedClip,
         style: DrawStyle,
         mask: Option<u32>,
     ) -> Result<(), RenderError> {
-        let (ix, fx) = (to_device.e.floor(), to_device.e - to_device.e.floor());
-        let (iy, fy) = (to_device.f.floor(), to_device.f - to_device.f.floor());
-        let (phase, px, py) = match self.quantum {
-            Some(q) => {
-                let fq = f32::from(q);
-                let nx = (fx * fq).round() as u16 % q;
-                let ny = (fy * fq).round() as u16 % q;
-                (
-                    PhaseKey::Quantised(nx, ny),
-                    f32::from(nx) / fq,
-                    f32::from(ny) / fq,
-                )
-            }
-            None => (PhaseKey::Exact(fx.to_bits(), fy.to_bits()), fx, fy),
-        };
-        let key = GlyphKey {
-            outline: outline.0,
-            linear: [
-                to_device.a.to_bits(),
-                to_device.b.to_bits(),
-                to_device.c.to_bits(),
-                to_device.d.to_bits(),
-            ],
-            phase,
-            rule,
-        };
+        let [ix, iy] = placement.origin;
+        let [px, py] = placement.phase;
+        let key = placement.key;
         let first_use = self.atlas_keys.insert(key);
 
         let entry = if let Some(entry) = self.atlas.get(&key) {
@@ -1861,9 +1943,17 @@ impl Encoder<'_> {
         // one triangle per point, since `append_triangles` fans each polyline from its
         // own start.
         let flattened_triangles: usize = polylines.iter().map(|line| line.points.len()).sum();
+        // **No cache is in play here**, whatever the tile's size: this geometry is
+        // already flattened — a stroke's expansion, an oblique rectangle, a fill the
+        // glyph lane declined — and the atlas caches outlines by key, not polylines. So
+        // the lane is decided by the triangle floor alone (ADR 0026), which is the whole
+        // of the comparison when neither side can cache. Asking the atlas whether it
+        // *would* admit a tile it will never be offered is what ADR 0028 did here, and
+        // it kept small strokes on the CPU lane for a cache that was never an option.
         if let Some(bounds) = raster::polyline_bounds(polylines)
             && self.take_gpu_lane(
                 resolved,
+                CacheProspect::TooLarge,
                 tile_side(bounds.0, bounds.2),
                 tile_side(bounds.1, bounds.3),
                 flattened_triangles,
@@ -1984,14 +2074,17 @@ impl Encoder<'_> {
     /// 12.4 KB of them against ~150 bytes of coverage — so a page of small glyphs asked
     /// for 821 MB of vertices and was refused (ADR 0026).
     ///
-    /// **And the atlas will not hold the tile.** This is the condition ADR 0027 stated
-    /// as a measured constant and ADR 0028 replaced with the question the atlas already
-    /// answers, because the constant was wrong on both sides of itself. What the CPU
-    /// lane has that the device has not is the *cache*: a tile [`AtlasStore::admits`] is
-    /// rasterised once and reused by every later placement and every later frame, and
-    /// nothing this lane can do competes with not doing the work. A tile the atlas
-    /// refuses is rasterised into the scratch sheet again on every frame, and there the
-    /// device wins at every size measured.
+    /// **And the cache is not worth using for this placement.** This is the condition
+    /// ADR 0027 stated as a measured constant, ADR 0028 replaced with what the atlas
+    /// *allows*, and ADR 0029 sharpened to what the atlas will *do* —
+    /// [`CacheProspect::worth_caching`], which is the atlas's admission rule and the
+    /// scene's census of placements in one answer. What the CPU lane has that the device
+    /// has not is the cache: a tile rasterised once and read by every later placement and
+    /// every later frame, which nothing this lane can do competes with. A tile the atlas
+    /// refuses is rasterised into the scratch sheet again on every frame, and one the
+    /// scene places a single time is rasterised, uploaded and read once — the cache's
+    /// whole cost and none of its benefit. In both of those the device wins at every
+    /// size measured.
     ///
     /// Measured on RADV at sixteen samples by `tests/lane_crossover.rs`, with the lane
     /// forced either way — a page of star outlines at 3 600 × 3 600, drawn to a texture
@@ -2016,18 +2109,16 @@ impl Encoder<'_> {
     /// ADR 0027's 512 KiB sat below the atlas's admission threshold on the default
     /// budget, which is how one constant managed to be wrong in both directions at once.
     ///
-    /// [`AtlasStore::admits`]: crate::atlas::AtlasStore::admits
+    /// [`CacheProspect::worth_caching`]: crate::atlas::CacheProspect::worth_caching
     fn take_gpu_lane(
         &self,
         resolved: &ResolvedClip,
+        cache: CacheProspect,
         width: u32,
         height: u32,
         triangles: usize,
     ) -> bool {
-        if self.coverage != Coverage::Gpu
-            || resolved.residues.is_some()
-            || self.atlas.admits(width, height)
-        {
+        if self.coverage != Coverage::Gpu || resolved.residues.is_some() || cache.worth_caching() {
             return false;
         }
         let area = u64::from(width).saturating_mul(u64::from(height));

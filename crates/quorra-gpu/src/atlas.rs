@@ -30,7 +30,8 @@
 //! the ones you should have made).
 
 use crate::keyhash::FastMap;
-use crate::raster::{CoverageMask, Rule};
+use crate::raster::{CoverageMask, DeviceTransform, Rule};
+use quorra_scene::OutlineId;
 
 /// The largest share of the atlas one tile may take, as a divisor (ADR 0024).
 ///
@@ -70,6 +71,122 @@ pub(crate) struct GlyphKey {
     /// and invisible only because the dimension cap kept most such shapes out of the
     /// atlas entirely.
     pub rule: Rule,
+}
+
+/// One placement of an outline, resolved into the key it would be cached under and the
+/// two parts its translation splits into.
+///
+/// The split is the whole of what the quantum does: a tile is rasterised at the
+/// *quantised fractional* offset and then drawn at the *integer* one, so every placement
+/// sharing a phase bucket shares one rasterisation and lands where its own translation
+/// says. Computed once per solid fill, because both the lane choice and the atlas path
+/// need the same answer and computing it twice is how two readings of one number begin.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GlyphPlacement {
+    /// What the tile is cached under.
+    pub key: GlyphKey,
+    /// The integer part of the device translation: where the tile's pixels go.
+    pub origin: [f32; 2],
+    /// The quantised fractional part: the offset the tile is rasterised at.
+    pub phase: [f32; 2],
+}
+
+impl GlyphPlacement {
+    /// Splits a placement's translation and builds its key.
+    ///
+    /// `quantum` is §4.5's fifth decision, the one that is ours to expose: `Some(q)`
+    /// rounds the phase to `1/q` of a pixel so that repeats collide, `None` keys the
+    /// exact bits so that only exact repeats do.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // a fraction
+    // times a `u16`, both bounded: `fx` is in `0..1` by construction below
+    #[allow(clippy::arithmetic_side_effects)] // `q` is non-zero (`Options` validates it)
+    pub(crate) fn of(
+        outline: OutlineId,
+        to_device: &DeviceTransform,
+        rule: Rule,
+        quantum: Option<u16>,
+    ) -> Self {
+        let (ix, fx) = (to_device.e.floor(), to_device.e - to_device.e.floor());
+        let (iy, fy) = (to_device.f.floor(), to_device.f - to_device.f.floor());
+        let (phase, px, py) = match quantum {
+            Some(q) => {
+                let fq = f32::from(q);
+                let nx = (fx * fq).round() as u16 % q;
+                let ny = (fy * fq).round() as u16 % q;
+                (
+                    PhaseKey::Quantised(nx, ny),
+                    f32::from(nx) / fq,
+                    f32::from(ny) / fq,
+                )
+            }
+            None => (PhaseKey::Exact(fx.to_bits(), fy.to_bits()), fx, fy),
+        };
+        Self {
+            key: GlyphKey {
+                outline: outline.0,
+                linear: [
+                    to_device.a.to_bits(),
+                    to_device.b.to_bits(),
+                    to_device.c.to_bits(),
+                    to_device.d.to_bits(),
+                ],
+                phase,
+                rule,
+            },
+            origin: [ix, iy],
+            phase: [px, py],
+        }
+    }
+}
+
+/// What the atlas would do for one placement — the question the coverage lane is chosen
+/// by (ADR 0029).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CacheProspect {
+    /// A tile this size may not be cached at all: it does not fit the texture, or it
+    /// would take more than [`MAX_TILE_SHARE`] of it (ADR 0024).
+    ///
+    /// A tile the atlas would take but has no *room* for is deliberately not a case
+    /// here. Asking about room was implemented and measured, and it moved nothing on any
+    /// page shape tried — the census keeps single-use tiles out of the atlas, so a full
+    /// atlas is one holding tiles that are being reused, and those are worth their space.
+    /// The ADR records the numbers.
+    TooLarge,
+    /// It may be cached, under this key.
+    Admitted {
+        placement: GlyphPlacement,
+        /// The entry exists already, so this placement costs a lookup and a quad.
+        resident: bool,
+        /// The scene places this shape exactly once, so an entry made for it would be
+        /// written and read one time each.
+        once: bool,
+    },
+}
+
+impl CacheProspect {
+    /// Whether putting this placement through the atlas buys anything.
+    ///
+    /// Three ways to answer no, and each is a measurement rather than a taste
+    /// (`tests/lane_crossover.rs`): a tile the atlas refuses is rasterised into the
+    /// scratch sheet on **every** frame, where the device is two to three times faster;
+    /// a tile placed once is rasterised, uploaded and read once, which is the atlas's
+    /// whole cost and none of its benefit. Yes has one shape — an entry that is read
+    /// more than it is written — and it is worth twenty to sixty times what either lane
+    /// can do, which is why the test is asked in this direction.
+    pub(crate) fn worth_caching(self) -> bool {
+        match self {
+            Self::TooLarge => false,
+            Self::Admitted { resident, once, .. } => resident || !once,
+        }
+    }
+
+    /// The key and offsets this placement would use, when the atlas would take it.
+    pub(crate) fn placement(self) -> Option<GlyphPlacement> {
+        match self {
+            Self::TooLarge => None,
+            Self::Admitted { placement, .. } => Some(placement),
+        }
+    }
 }
 
 /// A resident tile: where it sits in the atlas, and how the tile's pixels relate to
@@ -144,6 +261,38 @@ impl AtlasStore {
 
     pub(crate) fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// What this atlas would do for one placement of a tile this size (ADR 0029).
+    ///
+    /// The coverage lane turns on this rather than on the tile's area, so it is answered
+    /// in one place and by the atlas itself: whether a tile that size may be cached at
+    /// all, whether the entry exists already, and whether a scene that places it once
+    /// has now done so twice running. What one *scene* does with the entry is the half
+    /// the atlas cannot know, and the caller supplies it as `placed_once`.
+    ///
+    /// **The answer depends on nothing but this frame**, which is a property rather than
+    /// an accident: a placement takes the same lane every time an unchanged scene is
+    /// drawn, so a page redrawn on a scroll tick is the same pixels as the page that was
+    /// there. A version of this that remembered which keys the *previous* frame declined
+    /// to cache was measured and rejected — see the ADR; it made the third frame of a
+    /// static page a different picture from the first.
+    pub(crate) fn prospect(
+        &self,
+        placement: GlyphPlacement,
+        width: u32,
+        height: u32,
+        placed_once: bool,
+    ) -> CacheProspect {
+        if !self.admits(width, height) {
+            return CacheProspect::TooLarge;
+        }
+        let resident = self.entries.contains_key(&placement.key);
+        CacheProspect::Admitted {
+            resident,
+            once: placed_once && !resident,
+            placement,
+        }
     }
 
     /// Whether a tile of this size may be cached at all (ADR 0024).
@@ -246,7 +395,7 @@ impl AtlasStore {
 #[cfg(test)]
 #[allow(clippy::arithmetic_side_effects)] // test tile sizes are tiny and literal
 mod tests {
-    use super::{AtlasStore, GlyphKey, PhaseKey};
+    use super::{AtlasStore, GlyphKey, GlyphPlacement, PhaseKey};
     use crate::raster::{CoverageMask, Rule};
 
     fn key(outline: u32, phase: (u16, u16)) -> GlyphKey {
@@ -296,5 +445,26 @@ mod tests {
         assert_eq!(atlas.entry_count(), 0);
         assert!(atlas.generation > generation);
         assert!(atlas.insert(key(3, (0, 0)), &tile(16, 16)).is_some());
+    }
+
+    /// The census's half: a shape the scene places once is not worth an entry, and one
+    /// it places again is — which is the whole of ADR 0029's criterion, on an atlas with
+    /// room to spare so that nothing else can be the cause.
+    #[test]
+    fn a_single_placement_is_not_worth_an_entry() {
+        let atlas = AtlasStore::new(64 * 1024, 256);
+        let placement = GlyphPlacement {
+            key: key(1, (0, 0)),
+            origin: [0.0, 0.0],
+            phase: [0.0, 0.0],
+        };
+        assert!(
+            !atlas.prospect(placement, 16, 16, true).worth_caching(),
+            "written once, read once: the cache's whole cost and none of its benefit"
+        );
+        assert!(
+            atlas.prospect(placement, 16, 16, false).worth_caching(),
+            "placed more than once, so the second placement reads what the first wrote"
+        );
     }
 }
