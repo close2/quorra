@@ -3,6 +3,14 @@
 Status: accepted, 2026-08-12. Takes the piece ADR 0026 recorded as the next work on this
 lane, and re-derives that ADR's criterion against the measurement banding made possible.
 
+*Superseded in part, 2026-08-12 (ADR 0028), in both of its decisions.* §1's band is now a
+**pane**, bounded in width as well as height — and the band shipped with a defect: only
+two of the three places that must subtract the band's origin did so, and every band after
+the first discarded every fragment and drew nothing. §2's measured constant is gone; the
+table below was taken with that defect present and with every band drawing every vertex
+in the frame, and neither the numbers nor the criterion they support survived re-deriving
+them. The lane is now chosen by whether the atlas will hold the tile.
+
 ## Context
 
 ADR 0026 stopped the GPU coverage lane from taking tiny glyphs, and named what was left:
@@ -82,3 +90,6 @@ straight edge, 96 for a curved one, unchanged at the new scale.
 The width question above is taken, which changes what a band costs and so may move the
 crossover again. Re-derive the table rather than keeping the constant: it is a
 measurement, and it has already moved once.
+
+*Taken, 2026-08-12 (ADR 0028). The instruction was the right one: re-deriving the table
+moved the criterion off tile area altogether.*

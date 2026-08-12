@@ -44,6 +44,7 @@ mod keyhash;
 mod layers;
 pub mod mask;
 mod outline;
+mod pane;
 pub mod pipeline;
 mod raster;
 mod readback;

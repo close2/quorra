@@ -72,16 +72,6 @@ fn tile_side(low: f32, high: f32) -> u32 {
     }
 }
 
-/// The smallest tile the GPU coverage lane takes: half a megapixel, measured
-/// (ADR 0027).
-///
-/// Below it the device's per-tile overheads — its vertices, its bind groups, its share
-/// of a winding pass — outweigh what its parallelism saves. The table in
-/// `Encoder::take_gpu_lane` is the measurement, and it brackets the crossover between
-/// 325 000 texels, where the processor is twice as fast, and 637 000, where the device
-/// is nearly four times as fast. Half a megapixel sits between them.
-const GPU_LANE_MIN_AREA: u64 = 512 * 1024;
-
 /// A clip rectangle that admits everything, for unclipped instances.
 const OPEN_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
 
@@ -1994,22 +1984,39 @@ impl Encoder<'_> {
     /// 12.4 KB of them against ~150 bytes of coverage — so a page of small glyphs asked
     /// for 821 MB of vertices and was refused (ADR 0026).
     ///
-    /// **And the tile is large enough for the device to be the faster one.** Both lanes
-    /// cost roughly the area they cover; what differs is the constant, and the GPU
-    /// lane's per-tile overheads — its vertices, its bind groups, its share of a winding
-    /// pass — only amortise once a tile is big. Measured on RADV at sixteen samples,
-    /// whole frames, both lanes:
+    /// **And the atlas will not hold the tile.** This is the condition ADR 0027 stated
+    /// as a measured constant and ADR 0028 replaced with the question the atlas already
+    /// answers, because the constant was wrong on both sides of itself. What the CPU
+    /// lane has that the device has not is the *cache*: a tile [`AtlasStore::admits`] is
+    /// rasterised once and reused by every later placement and every later frame, and
+    /// nothing this lane can do competes with not doing the work. A tile the atlas
+    /// refuses is rasterised into the scratch sheet again on every frame, and there the
+    /// device wins at every size measured.
     ///
-    /// | tile | texels | CPU lane | GPU lane |
+    /// Measured on RADV at sixteen samples by `tests/lane_crossover.rs`, with the lane
+    /// forced either way — a page of star outlines at 3 600 × 3 600, drawn to a texture
+    /// target, milliseconds for the fastest of nine frames (a readback is excluded: its
+    /// 15-20 ms of copy-out is paid identically by both lanes and hides the comparison):
+    ///
+    /// | tile | texels | atlas holds it | atlas refuses it |
     /// |---|---|---|---|
-    /// | 200 × 260 | 52 000 | 73 ms | 275 ms |
-    /// | 500 × 650 | 325 000 | 71 ms | 146 ms |
-    /// | 700 × 910 | 637 000 | 95 ms | **26 ms** |
-    /// | 900 × 1170 | 1 053 000 | 111 ms | **19 ms** |
+    /// | | | CPU / GPU | CPU / GPU |
+    /// | 50 × 65 | 3 250 | **1.0** / 20.2 | 54.8 / **21.2** |
+    /// | 200 × 260 | 52 000 | **0.4** / 16.0 | 35.5 / **15.0** |
+    /// | 500 × 650 | 325 000 | **0.3** / 9.9 | 32.8 / **13.7** |
+    /// | 700 × 910 | 637 000 | **0.2** / 11.1 | 26.0 / **12.6** |
+    /// | 900 × 1170 | 1 053 000 | **0.4** / 13.3 | 33.9 / **15.0** |
+    /// | 1 200 × 1 560 | 1 872 000 | — | 32.1 / **9.6** |
     ///
-    /// [`GPU_LANE_MIN_AREA`] sits in the bracket those four rows leave. It is a
-    /// constant — ADR 0026 tried to avoid one and could not, because the trade is CPU
-    /// *time* against device *bandwidth* and no count of bytes expresses it.
+    /// The left column is one outline placed many times on the default atlas, the right
+    /// the same page on an atlas too small to hold any of it. Twenty to sixty times the
+    /// wrong answer on the left, two to three times the wrong answer on the right — and
+    /// **no tile area distinguishes the columns**: the same 52 000-texel tile is in
+    /// both, answered by different lanes. So the criterion is not a size at all.
+    /// ADR 0027's 512 KiB sat below the atlas's admission threshold on the default
+    /// budget, which is how one constant managed to be wrong in both directions at once.
+    ///
+    /// [`AtlasStore::admits`]: crate::atlas::AtlasStore::admits
     fn take_gpu_lane(
         &self,
         resolved: &ResolvedClip,
@@ -2017,14 +2024,17 @@ impl Encoder<'_> {
         height: u32,
         triangles: usize,
     ) -> bool {
-        if self.coverage != Coverage::Gpu || resolved.residues.is_some() {
+        if self.coverage != Coverage::Gpu
+            || resolved.residues.is_some()
+            || self.atlas.admits(width, height)
+        {
             return false;
         }
         let area = u64::from(width).saturating_mul(u64::from(height));
         let triangle_bytes = (triangles as u64)
             .saturating_mul(3)
             .saturating_mul(crate::outline::WindingVertex::STRIDE);
-        area >= GPU_LANE_MIN_AREA && area >= triangle_bytes
+        area >= triangle_bytes
     }
 
     /// Reserve a tile on the sheet and emit the quad that will sample it.
@@ -2062,13 +2072,8 @@ impl Encoder<'_> {
         ];
         let mut vertices = Vec::new();
         triangles(&mut vertices, origin, clip);
-        self.winding.push_tile(
-            crate::winding::Tile {
-                rect: clip,
-                even_odd: rule == Rule::EvenOdd,
-            },
-            &vertices,
-        );
+        self.winding
+            .push_tile(clip, rule == Rule::EvenOdd, &vertices);
         self.push_quad_instance(
             Point::new(left as f32, top as f32),
             width as f32,

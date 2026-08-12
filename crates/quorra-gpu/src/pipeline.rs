@@ -665,7 +665,7 @@ impl PipelineStore {
                 vertex: "vs_resolve",
                 entry: "fs_resolve",
                 blend: Some(add),
-                buffer: Some((crate::winding::TILE_STRIDE, &resolve_attributes)),
+                buffer: Some((crate::pane::TILE_STRIDE, &resolve_attributes)),
                 step: wgpu::VertexStepMode::Instance,
                 strip: true,
             },

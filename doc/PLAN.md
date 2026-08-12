@@ -15,6 +15,34 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**The winding target spans the lane's own tiles, and the lane is the one the atlas
+leaves** (2026-08-12, ADR 0028): ADR 0027's band bounded the target's height and left its
+width the *sheet's*, which both lanes share — so thirty shapes of 1 200 pixels still
+refused at 194 MB. The target is a **pane** now, a rectangle over this lane's tiles with
+its extent fixed from the budget *before* the panes are cut, which is what makes 16 MiB a
+bound rather than a hope: those thirty shapes need 16.7 MB. And the band shipped with a
+defect nobody could see — `fs_winding` tested a fragment against its tile in *sheet*
+coordinates while the fragment's own coordinate had already been moved by the band, so
+**every band after the first drew nothing at all** and the frame reported `Ok`. That is
+principle 6's failure, it is the third appearance of this one agreement, and the two
+end-to-end tests that now cover it draw panes offset in both axes. It was not
+hypothetical: on the caller's corpus under `Coverage::Gpu`, `issue9418.pdf` differed from
+the oracle by **191 of 255 in its worst tile** and now agrees, and `issue1905.pdf` was
+refused for *400 681 916 bytes against a 268 435 456 budget* and now draws — the two real
+pages this ADR's halves each fix, found by attributing every verdict the corpus moved.
+
+Then re-deriving ADR 0027's crossover — as that ADR instructed — moved it off tile area
+altogether. What the CPU lane has is the **atlas**: a tile it admits is rasterised once
+for every placement there will ever be (0.4 ms a page against 16 on the device), and a
+tile it refuses is rasterised again every frame (35.5 ms against 15.0). The same
+52 000-texel tile is in both rows, so no area separates them. `GPU_LANE_MIN_AREA` is
+deleted; the lane is what the atlas leaves, with ADR 0026's triangle floor beneath it.
+**A page of 1 200 px tiles: 32.1 ms → 9.6. A page of 200 px tiles the atlas has no room
+for: 35.5 → 15.0. A page of cached glyphs under `Coverage::Gpu`: 16 ms → 0.4.** What is
+left is that the criterion cannot see how *often* an outline is placed — on a page whose
+outlines are each used once, the atlas is admitted to and buys nothing, and the cold
+frame pays 38-44 ms where the device would have taken 13-20.
+
 **The winding target holds a band, and the lane's crossover is measured** (2026-08-12,
 ADR 0027): the target is scratch — accumulated, resolved into the R8 sheet, dead — so it
 never needed to hold the whole sheet at eight bytes a texel, which is what refused sixty
@@ -302,10 +330,15 @@ findings the measurement forced: **the winding texture is kept between frames** 
 zero-init was 10.7 ms of a 15 ms frame), and the conversion tolerance is relative to
 the outline rather than absolute.
 
-Where the lanes differ is stated rather than hoped: they agree **exactly** where no
-edge crosses a pixel; a straight edge differs by at most the sample grid's eighth of a
-pixel (32 of 255, measured 12); and a curved edge differs by up to 96 — **because the
-CPU lane flattens to a quarter pixel and the GPU lane does not flatten at all**.
+Where the lanes differ is stated rather than hoped: on a **straight-edged** shape they
+agree exactly where no edge crosses a pixel, and differ by at most the sample grid's
+eighth of a pixel where one does (32 of 255, measured 12); on a curved one they differ
+by up to 96 anywhere in the frame — **because the CPU lane flattens to a quarter pixel
+and the GPU lane does not flatten at all**, so a pixel the CPU lane calls wholly empty
+can still be clipped by the quadratic the device draws. (Corrected 2026-08-12: the
+exact-agreement claim was stated of every shape, and its test used a curved fixture that
+had been taking the CPU lane in *both* devices — ADR 0028's criterion is what put the
+GPU lane under it and the claim was wrong within a frame.)
 Tightening `FLATTEN_TOLERANCE` to 0.004 takes the worst difference to zero pixels over
 20, which identifies the flattening as the whole of it. The GPU lane is the more
 accurate about the shape and the less accurate about the pixel. Still on the CPU lane:

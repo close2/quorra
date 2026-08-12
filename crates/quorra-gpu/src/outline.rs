@@ -323,6 +323,11 @@ impl WindingVertex {
     /// Bytes one vertex occupies in the buffer the winding pass reads.
     pub(crate) const STRIDE: u64 = 32;
 
+    /// Floats one vertex occupies, which is [`WindingVertex::STRIDE`] in the unit the
+    /// sheet's buffer is built in — a tile's vertex range is counted in vertices, and
+    /// the two must not drift apart.
+    pub(crate) const FLOATS: usize = 8;
+
     fn solid(position: [f32; 2], clip: [f32; 4]) -> Self {
         Self {
             position,

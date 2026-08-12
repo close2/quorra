@@ -28,13 +28,11 @@
 //   identical on every adapter — the promise ADR 0006 measured and ADR 0008 protects.
 
 struct Globals {
-    // The winding sheet's size in pixels, for the NDC mapping.
+    // The scratch sheet's size in pixels, which `vs_resolve` maps its tile quads into.
     //
-    // The sheet, not the attachment: the winding target is kept between frames and is
-    // at least as large as any sheet it has held, so the two are equal only by
-    // accident. The host sets a viewport of exactly this size at the target's origin,
-    // which is what makes a pixel of the sheet the same pixel in both passes — see
-    // `winding::accumulate`.
+    // The R8 sheet both coverage lanes share, and the resolve pass's attachment — not
+    // the winding target, whose size is `pane_size` below and whose relationship to the
+    // sheet is `pane_origin`. The accumulate pass has no use for this number at all.
     sheet_size: vec2f,
     // Where this draw's sample sits inside the pixel, in pixels, relative to its
     // centre. The ordered grid lives on the CPU (`outline::sample_offsets`), because
@@ -44,17 +42,20 @@ struct Globals {
     // fragment stage so that one pipeline serves all four: a channel this draw does
     // not own receives exactly zero and additive blending leaves it alone.
     channel: vec4f,
-    // The band of the sheet this pass is drawing: first row, and how many rows.
+    // The rectangle of the sheet this pass is drawing: its top-left corner in sheet
+    // texels, and its extent.
     //
-    // The winding target holds one band at a time, not the whole sheet (ADR 0027): it
+    // The winding target holds one pane at a time, not the whole sheet (ADR 0028): it
     // is scratch — accumulated, resolved, and dead — so its size is a choice rather
-    // than a consequence of the page. Sheet row `band.x` is row 0 of the attachment,
-    // which both stages have to agree about: the vertex stage subtracts the origin
-    // before mapping to clip space, and `fs_resolve` subtracts it again when it reads
-    // back. They are the same subtraction and getting one without the other is the
-    // §11 defect with a different offset.
-    band: vec2f,
-    _pad: vec2f,
+    // than a consequence of the page. Sheet texel `pane_origin` is texel (0, 0) of the
+    // attachment, and **three** places have to agree about that: `vs_winding` subtracts
+    // it before mapping to clip space, `fs_winding` adds it back to test a fragment
+    // against its own tile, and `fs_resolve` subtracts it again when it reads back.
+    // Any one of them alone is the caller's §11 defect wearing a different offset —
+    // ADR 0027 shipped with the second missing, and every band after the first drew
+    // nothing at all.
+    pane_origin: vec2f,
+    pane_size: vec2f,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -84,14 +85,16 @@ fn vs_winding(input: WindingIn) -> WindingOut {
     // by plus it, and this way the rasteriser's own pixel centres stay the sample
     // grid — no per-fragment arithmetic, and the offset cannot drift between the
     // triangle test and the coverage test because there is only one of them.
-    let placed = input.position - globals.sample_offset;
-    // Sheet space to band space: the attachment holds rows `band.x ..< band.x + band.y`
-    // of the sheet, so a triangle outside them maps outside clip space and is dropped by
-    // the rasteriser — which is what makes one draw of every vertex per band correct
-    // without sorting the vertices.
+    let placed = input.position - globals.sample_offset - globals.pane_origin;
+    // Sheet space to pane space: the attachment holds the rectangle at `pane_origin` of
+    // `pane_size` texels, so a triangle belonging to another pane maps outside clip
+    // space and is dropped by the rasteriser. The host draws only this pane's tiles'
+    // triangles, so that is a backstop rather than the mechanism — but a chord triangle
+    // fans from an anchor and may reach a long way outside its own tile, which is
+    // exactly what the backstop is for.
     let ndc = vec2f(
-        placed.x / globals.sheet_size.x * 2.0 - 1.0,
-        1.0 - (placed.y - globals.band.x) / globals.band.y * 2.0,
+        placed.x / globals.pane_size.x * 2.0 - 1.0,
+        1.0 - placed.y / globals.pane_size.y * 2.0,
     );
     out.position = vec4f(ndc, 0.0, 1.0);
     out.uv = input.uv;
@@ -111,7 +114,13 @@ fn fs_winding(input: WindingOut, @builtin(front_facing) front: bool) -> @locatio
     // Outside its own tile this triangle is somebody else's business. The test is on
     // the fragment's own coordinate, which the offset above already moved, so a tile
     // boundary falls in the same place for every sample of the frame.
-    let p = input.position.xy;
+    //
+    // The fragment's coordinate is in the *attachment*, so the pane's origin goes back
+    // on before it is compared with a tile stated in sheet texels. Leaving it off is
+    // not a small error: every tile of every pane but the first sits below the pane's
+    // own origin, fails this test at every fragment, and draws nothing (ADR 0028 —
+    // ADR 0027 shipped exactly that).
+    let p = input.position.xy + globals.pane_origin;
     if p.x < input.clip.x || p.y < input.clip.y || p.x >= input.clip.z || p.y >= input.clip.w {
         discard;
     }
@@ -174,9 +183,9 @@ fn inside(winding: f32, rule: f32) -> bool {
 @fragment
 fn fs_resolve(input: TileOut) -> @location(0) vec4f {
     // The quad is positioned in *sheet* space, because that is what the coverage sheet
-    // is; the winding texture holds this band alone, so the read is the same pixel less
-    // the band's origin (ADR 0027).
-    let texel = vec2i(input.position.xy) - vec2i(0, i32(globals.band.x));
+    // is; the winding texture holds this pane alone, so the read is the same texel less
+    // the pane's origin (ADR 0028).
+    let texel = vec2i(input.position.xy) - vec2i(globals.pane_origin);
     let windings = textureLoad(winding_tex, texel, 0);
     var covered = 0.0;
     for (var channel = 0u; channel < 4u; channel = channel + 1u) {

@@ -31,12 +31,13 @@ use quorra_scene::{
 };
 
 /// The fixtures are written in a 48-unit square and drawn at [`MAGNIFY`] times it, so
-/// their tiles are past [`GPU_LANE_MIN_AREA`] and the GPU lane actually takes them —
-/// otherwise every comparison below would be the CPU lane against itself, passing
-/// without testing anything (ADR 0027). Probe coordinates are in device pixels, so they
-/// carry the same factor.
+/// their tiles are ones [`TINY_ATLAS`] will not hold and the GPU lane actually takes
+/// them — otherwise every comparison below would be the CPU lane against itself,
+/// passing without testing anything (ADR 0028). Probe coordinates are in device pixels,
+/// so they carry the same factor.
 const UNITS: u32 = 48;
-/// See [`UNITS`]. Sixteen makes a fixture's largest tile roughly 590 000 texels.
+/// See [`UNITS`]. Sixteen makes a fixture's largest tile roughly 590 000 texels, which
+/// is seventy times what this file's atlas admits.
 const MAGNIFY: u32 = 16;
 const SIZE: u32 = UNITS * MAGNIFY;
 
@@ -125,10 +126,17 @@ fn blob(device: &mut Device) -> Scene {
 /// Pixels no edge crosses are not a matter of opinion: wholly covered is 255 and
 /// wholly uncovered is 0 in both lanes, and a difference there would be a defect in
 /// one of them rather than the sampling.
+///
+/// **On a straight-edged fixture**, and that qualification is the whole of what makes
+/// the claim true. Where an edge is a curve the two lanes do not draw the same shape:
+/// the CPU lane flattens to `FLATTEN_TOLERANCE` and a chord cuts inside a convex curve,
+/// so a pixel it calls wholly empty can still be crossed by the quadratic the GPU lane
+/// draws. That difference is bounded rather than absent, and
+/// [`a_curved_edge_differs_by_the_cpu_lane_s_flattening_too`] is where it is bounded.
 #[test]
 fn the_lanes_agree_exactly_where_no_edge_crosses() {
-    let cpu = render(Coverage::Cpu, blob);
-    let gpu = render(Coverage::Gpu, blob);
+    let cpu = render(Coverage::Cpu, straight);
+    let gpu = render(Coverage::Gpu, straight);
     let mut interior = 0;
     let mut exterior = 0;
     for y in 0..SIZE {
@@ -164,12 +172,13 @@ fn the_lanes_agree_exactly_where_no_edge_crosses() {
 fn a_straight_edge_differs_by_the_sample_grid_and_no_more() {
     let cpu = render(Coverage::Cpu, straight);
     let gpu = render(Coverage::Gpu, straight);
-    let (edges, worst) = compare(&cpu, &gpu);
+    let (edges, worst_edge, worst) = compare(&cpu, &gpu);
     assert!(edges > 40, "the fixture has an antialiased edge: {edges}");
     assert!(
-        worst <= 32,
-        "a 4x4 ordered grid answers a straight edge to within an eighth of a pixel; \
-         worst difference was {worst}"
+        worst_edge <= 32 && worst == worst_edge,
+        "a 4x4 ordered grid answers a straight edge to within an eighth of a pixel, and \
+         nothing away from an edge differs at all; worst difference was {worst_edge} on \
+         an edge and {worst} anywhere"
     );
 }
 
@@ -190,29 +199,36 @@ fn a_straight_edge_differs_by_the_sample_grid_and_no_more() {
 fn a_curved_edge_differs_by_the_cpu_lane_s_flattening_too() {
     let cpu = render(Coverage::Cpu, blob);
     let gpu = render(Coverage::Gpu, blob);
-    let (edges, worst) = compare(&cpu, &gpu);
+    let (edges, worst_edge, worst) = compare(&cpu, &gpu);
     assert!(edges > 40, "the fixture has an antialiased edge: {edges}");
     assert!(
         worst <= 96,
         "an eighth of a pixel for the grid and a quarter for the flattening bound this \
-         at 96 of 255; worst difference was {worst}"
+         at 96 of 255; worst difference was {worst_edge} on a pixel the CPU lane called \
+         antialiased and {worst} over the whole frame"
     );
 }
 
-/// Antialiased pixels, and the largest disagreement among them.
-fn compare(cpu: &[u8], gpu: &[u8]) -> (u32, i32) {
-    let mut edges = 0;
-    let mut worst = 0_i32;
+/// Antialiased pixels, the largest disagreement among them, and the largest anywhere.
+///
+/// The third number is there because "antialiased for the CPU lane" is not the same set
+/// of pixels as "crossed by an edge": on a curve the CPU lane's flattened chord can miss
+/// a pixel the true quadratic clips a corner off, and that pixel reads 0 on one lane and
+/// a sample or two on the other. Counting only the pixels one lane called antialiased
+/// would leave exactly those out of the comparison.
+fn compare(cpu: &[u8], gpu: &[u8]) -> (u32, i32, i32) {
+    let (mut edges, mut worst_edge, mut worst) = (0, 0_i32, 0_i32);
     for y in 0..SIZE {
         for x in 0..SIZE {
             let (a, b) = (i32::from(alpha(cpu, x, y)), i32::from(alpha(gpu, x, y)));
             if a > 0 && a < 255 {
                 edges += 1;
-                worst = worst.max((a - b).abs());
+                worst_edge = worst_edge.max((a - b).abs());
             }
+            worst = worst.max((a - b).abs());
         }
     }
-    (edges, worst)
+    (edges, worst_edge, worst)
 }
 
 /// A triangle with straight edges at fractional coordinates, so every edge pixel is
@@ -476,14 +492,15 @@ fn one_sheet_carries_both_producers() {
 fn the_lane_can_change_between_frames_on_one_device() {
     let mut device = Device::headless(&Options {
         adapter: Some("llvmpipe".into()),
+        atlas_budget: TINY_ATLAS,
         ..Options::default()
     })
     .expect("llvmpipe is present wherever this suite runs");
     device.wait_until_warm();
-    // Large enough that the GPU lane takes it: ADR 0026 weighs a tile's coverage bytes
-    // against its triangles, and a 40-pixel blob is cheaper to rasterise than to
-    // triangulate — both lanes would answer it identically and the test could no longer
-    // tell them apart.
+    // A tile the GPU lane takes, which is one the atlas will not hold (ADR 0028) and
+    // whose triangles cost less than its coverage (ADR 0026). Both conditions matter to
+    // this test: a fixture either lane answers the same way — a cached glyph, or a
+    // nine-pixel one — could not tell the two lanes apart at all.
     let scene = blob_at(&mut device, 800.0);
     let viewport = Viewport::full(1600, 2200, Affine::IDENTITY);
 
@@ -517,8 +534,8 @@ fn the_lane_can_change_between_frames_on_one_device() {
     );
 }
 
-/// The side of the target `wide_blob` is drawn at. Past [`GPU_LANE_MIN_AREA`], so the
-/// GPU lane takes the tile and can be charged for the target it then needs (ADR 0027).
+/// The side of the target `wide_blob` is drawn at. Far past what [`TINY_ATLAS`] holds,
+/// so the GPU lane takes the tile and can be charged for the target it then needs.
 const WIDE: u32 = 800;
 
 /// `blob`'s curve, scaled past what the test devices' small atlas will take (ADR 0024)
@@ -624,13 +641,15 @@ fn only_the_lane_that_makes_the_winding_texture_pays_for_it() {
 }
 
 /// The lane a command takes is decided by what the two lanes would cost it, not by a
-/// constant (ADR 0026).
+/// constant (ADR 0026, and ADR 0028 for the atlas half of the question).
 ///
 /// The GPU lane's price is this outline's triangles — three vertices each, one stride
 /// apiece — **per placement, whatever the tile's size**. The CPU lane's is the tile's
-/// area in coverage bytes. So one shape at two scales takes two different lanes, and
-/// `Counters::tiles` says which: the GPU lane always packs a tile, the CPU lane packs
-/// one only when the atlas will not hold it.
+/// area in coverage bytes, *and* the cache in front of it: a tile the atlas holds is
+/// rasterised once for every placement there will ever be, which is a price no lane
+/// beats. So one shape at two scales takes two different lanes, and `Counters::tiles`
+/// says which: the GPU lane always packs a tile, the CPU lane packs one only when the
+/// atlas will not hold it.
 #[test]
 fn the_lane_follows_what_each_would_cost() {
     let small = |device: &mut Device| blob_at(device, 9.0);
@@ -719,4 +738,172 @@ fn blob_at(device: &mut Device, side: f32) -> Scene {
         )
         .unwrap();
     builder.finish()
+}
+
+/// The side of one shape in the multi-pane fixtures below: far past what [`TINY_ATLAS`]
+/// holds, so every one of them takes the GPU lane and lands on the sheet.
+const PANE_FIXTURE_SIDE: u32 = 800;
+
+/// One outline, `columns × rows` placements of it, each [`PANE_FIXTURE_SIDE`] across.
+///
+/// The placements are what matter: the winding target holds one *pane* of the sheet at
+/// a time (ADR 0028), and a grid this size is cut into several of them — some with a
+/// column offset, some with a row offset, which are the two halves of the agreement the
+/// two shader stages have to keep.
+fn grid_of_blobs(device: &mut Device, columns: u32, rows: u32) -> Scene {
+    let side = PANE_FIXTURE_SIDE as f32;
+    let r = side * 0.5;
+    let outline = device
+        .upload_outline(&[
+            Segment::MoveTo(Point::new(0.0, r)),
+            Segment::CubicTo {
+                c1: Point::new(0.0, 0.0),
+                c2: Point::new(side, 0.0),
+                to: Point::new(side, r),
+            },
+            Segment::CubicTo {
+                c1: Point::new(side, side),
+                c2: Point::new(0.0, side),
+                to: Point::new(0.0, r),
+            },
+            Segment::Close,
+        ])
+        .unwrap();
+    let mut builder = SceneBuilder::new();
+    for row in 0..rows {
+        for column in 0..columns {
+            builder
+                .fill(
+                    outline,
+                    Affine::translate(
+                        (column * PANE_FIXTURE_SIDE) as f32,
+                        (row * PANE_FIXTURE_SIDE) as f32,
+                    ),
+                    FillRule::NonZero,
+                    black(),
+                    None,
+                    BlendMode::Normal,
+                    Compose::SrcOver,
+                    None,
+                )
+                .unwrap();
+        }
+    }
+    builder.finish()
+}
+
+/// **Every pane draws its own tiles**, and a pane after the first is not a pane that
+/// draws nothing.
+///
+/// Four columns by two rows of 800-pixel shapes pack onto a sheet 3 200 texels wide,
+/// which the pane budget cuts into four rectangles: two per shelf, the second of each
+/// starting at a column offset, and the second shelf at a row offset. So every one of
+/// the three places that must subtract the pane's origin — `vs_winding` before mapping
+/// to clip space, `fs_winding` before testing a fragment against its tile, `fs_resolve`
+/// before reading the target back — is exercised in both axes by this one frame.
+///
+/// The test exists because ADR 0027 shipped with the middle one missing. Every band
+/// after the first discarded every fragment of every tile, and the page came back with
+/// holes in it and an `Ok` frame: principle 6's exact failure, invisible to every test
+/// in this file because each of them drew a single band.
+#[test]
+fn every_pane_draws_the_tiles_it_holds() {
+    let (columns, rows) = (4_u32, 2_u32);
+    let (width, height) = (columns * PANE_FIXTURE_SIDE, rows * PANE_FIXTURE_SIDE);
+    let scene_of = |device: &mut Device| grid_of_blobs(device, columns, rows);
+    let render_grid = |coverage: Coverage| {
+        let mut device = device_with(coverage);
+        device.wait_until_warm();
+        let scene = scene_of(&mut device);
+        let frame = device
+            .render(
+                &scene,
+                &Viewport::full(width, height, Affine::IDENTITY),
+                Target::Readback,
+            )
+            .expect("eight large shapes are inside every budget");
+        let tiles = frame.counters().tiles;
+        (frame.into_raster().unwrap().into_pixels(), tiles)
+    };
+    let (gpu, gpu_tiles) = render_grid(Coverage::Gpu);
+    let (cpu, _) = render_grid(Coverage::Cpu);
+    assert_eq!(
+        gpu_tiles,
+        columns * rows,
+        "each placement is its own tile on the sheet"
+    );
+
+    // The middle of each shape, which is solid in both lanes: a pane that drew nothing
+    // reads 0 here, and a pane that drew in the wrong place reads 0 here and paints
+    // somewhere it should not.
+    for row in 0..rows {
+        for column in 0..columns {
+            let x = column * PANE_FIXTURE_SIDE + PANE_FIXTURE_SIDE / 2;
+            let y = row * PANE_FIXTURE_SIDE + PANE_FIXTURE_SIDE / 2;
+            let seen = gpu[((y * width + x) * 4 + 3) as usize];
+            assert_eq!(
+                seen, 255,
+                "the shape at column {column}, row {row} is solid in its middle, not {seen}"
+            );
+        }
+    }
+    // And nothing was drawn outside the shapes: a pane written at the wrong offset
+    // leaves its coverage somewhere, and the corners of this grid are the somewhere.
+    for row in 0..rows {
+        for column in 0..columns {
+            let (x, y) = (column * PANE_FIXTURE_SIDE + 4, row * PANE_FIXTURE_SIDE + 4);
+            let index = ((y * width + x) * 4 + 3) as usize;
+            assert_eq!(
+                gpu[index], cpu[index],
+                "the corner of column {column}, row {row}: the lanes agree that the \
+                 blob does not reach it"
+            );
+        }
+    }
+}
+
+/// A page of large shapes draws under a budget the sheet-wide target could not fit.
+///
+/// Eight 800-pixel shapes in a row pack onto a sheet 6 400 texels wide. ADR 0027's band
+/// spanned that width — 6 400 × 800 × 8 bytes, 41 MB of `rgba16float` — while the pane
+/// this frame needs is [`quorra_gpu`'s pane budget] wide at most: 2 621 × 800 × 8, under
+/// 17 MB. The budget below sits between the two, so the frame draws here and would have
+/// been refused as a band; and it is a *budget*, so the refusal it replaces would have
+/// been an honest `Err` rather than a blank page (principle 6).
+///
+/// This is the case ADR 0027 recorded as what it did not fix, at the scale a software
+/// adapter can render: the shape of the arithmetic is the same at thirty shapes of
+/// 1 200 pixels, where a band asked for 309 MB against a 256 MiB budget.
+#[test]
+fn a_page_of_large_shapes_fits_a_budget_no_band_of_the_sheet_could() {
+    let columns = 8_u32;
+    let width = columns * PANE_FIXTURE_SIDE;
+    let mut device = Device::headless(&Options {
+        adapter: Some("llvmpipe".into()),
+        coverage: Coverage::Gpu,
+        atlas_budget: TINY_ATLAS,
+        // Above the pane (17 MB) plus the sheet (5 MB) and the quads, below the band
+        // (41 MB) plus the same.
+        max_frame_bytes: 30 * 1024 * 1024,
+        ..Options::default()
+    })
+    .expect("llvmpipe is present wherever this suite runs");
+    device.wait_until_warm();
+    let scene = grid_of_blobs(&mut device, columns, 1);
+    let pixels = device
+        .render(
+            &scene,
+            &Viewport::full(width, PANE_FIXTURE_SIDE, Affine::IDENTITY),
+            Target::Readback,
+        )
+        .expect("the pane fits the budget, so the frame is drawn rather than refused")
+        .into_raster()
+        .unwrap()
+        .into_pixels();
+    let last = (columns - 1) * PANE_FIXTURE_SIDE + PANE_FIXTURE_SIDE / 2;
+    let index = ((PANE_FIXTURE_SIDE / 2 * width + last) * 4 + 3) as usize;
+    assert_eq!(
+        pixels[index], 255,
+        "and the last shape of the page is on it"
+    );
 }
