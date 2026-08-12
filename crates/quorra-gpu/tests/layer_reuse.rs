@@ -26,7 +26,7 @@
 
 use quorra_gpu::{Device, Options, RenderError, Target, Viewport};
 use quorra_scene::{
-    Affine, BlendMode, Color, GroupSpec, Point, Rect, Scene, SceneBuilder, SceneError,
+    Affine, BlendMode, Color, Compose, GroupSpec, Point, Rect, Scene, SceneBuilder, SceneError,
 };
 
 fn device_with_budget(max_frame_bytes: u64) -> Device {
@@ -49,6 +49,7 @@ fn group(blend: BlendMode) -> GroupSpec {
         knockout: false,
         mask: None,
         isolated: true,
+        compose: Compose::SrcOver,
     }
 }
 

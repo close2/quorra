@@ -32,7 +32,7 @@
 )]
 
 use quorra_scene::{
-    Affine, BlendMode, Color, GroupSpec, MaskKind, NonIsolatedReason, Point, Rect, Scene,
+    Affine, BlendMode, Color, Compose, GroupSpec, MaskKind, NonIsolatedReason, Point, Rect, Scene,
     SceneBuilder, SceneError,
 };
 
@@ -281,6 +281,7 @@ fn group(isolated: bool, alpha: f32) -> GroupSpec {
         knockout: false,
         mask: None,
         isolated,
+        compose: Compose::SrcOver,
     }
 }
 

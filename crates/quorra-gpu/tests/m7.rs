@@ -712,6 +712,7 @@ fn image_inside_a_group_takes_the_group_alpha() {
                 knockout: false,
                 mask: None,
                 isolated: true,
+                compose: Compose::SrcOver,
             },
             |body| {
                 body.image(

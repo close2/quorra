@@ -260,6 +260,9 @@ pub(crate) struct ChildOp {
     /// an empty region means no residue.
     pub residue_rect: [f32; 4],
     pub residue_origin: [f32; 2],
+    /// §11.4.6's stage this group *is*, when it is one: 0 ordinary, 1 erase by the
+    /// group's own alpha, 2 add it (ADR 0033).
+    pub compose: u32,
     /// The group's soft mask, as a mask index.
     pub mask: Option<u32>,
     /// §11.4.5's isolated group (the ordinary case) or §11.4.4's non-isolated one,
@@ -951,6 +954,14 @@ impl Encoder<'_> {
                     ],
                     residue_rect,
                     residue_origin,
+                    compose: match spec.compose {
+                        Compose::DestOut => 1,
+                        Compose::Plus => 2,
+                        // §11.4.6's other two are the group's own model rather than a
+                        // stage of it: `SrcOver` is the ordinary composite and `Src` is
+                        // what `knockout` states, which the builder refuses on a group.
+                        Compose::SrcOver | Compose::Src => 0,
+                    },
                     mask,
                     isolated: spec.isolated,
                 }));
@@ -1062,6 +1073,7 @@ impl Encoder<'_> {
                 clip_rect: OPEN_CLIP,
                 residue_rect: [0.0; 4],
                 residue_origin: [0.0; 2],
+                compose: 0,
                 mask,
                 isolated: true,
             }));
@@ -1530,6 +1542,7 @@ impl Encoder<'_> {
             clip_rect: OPEN_CLIP,
             residue_rect: [0.0; 4],
             residue_origin: [0.0; 2],
+            compose: 0,
             mask,
             isolated: true,
         }));
@@ -1582,6 +1595,7 @@ impl Encoder<'_> {
                 clip_rect: OPEN_CLIP,
                 residue_rect: [0.0; 4],
                 residue_origin: [0.0; 2],
+                compose: 0,
                 mask,
                 isolated: true,
             }));

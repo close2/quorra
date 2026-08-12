@@ -223,6 +223,7 @@ fn each_missing_lane_is_named() {
                 knockout: false,
                 mask: None,
                 isolated: true,
+                compose: Compose::SrcOver,
             },
             |b| {
                 b.rect(

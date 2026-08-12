@@ -31,8 +31,8 @@
 
 use quorra_gpu::{Device, Options, Target, Viewport};
 use quorra_scene::{
-    Affine, BlendMode, Color, Compose, FillRule, GroupSpec, MaskKind, OutlineId, Paint, Point,
-    Scene, SceneBuilder, SceneError, Segment, StagedComposeReason,
+    Affine, BlendMode, Color, Compose, FillRule, GroupComposeReason, GroupSpec, MaskKind,
+    OutlineId, Paint, Point, Scene, SceneBuilder, SceneError, Segment, StagedComposeReason,
 };
 
 const SIZE: u32 = 64;
@@ -272,6 +272,7 @@ fn the_two_positions_that_already_stage_the_clause_refuse() {
                 knockout: true,
                 mask: None,
                 isolated: true,
+                compose: Compose::SrcOver,
             },
             |body| fill(body, outline, colour, Compose::DestOut),
         )
@@ -396,6 +397,7 @@ fn the_pair_inside_a_knockout_group_is_the_clause() {
         knockout: true,
         mask: None,
         isolated: true,
+        compose: Compose::SrcOver,
     };
     let cover = |builder: &mut SceneBuilder| {
         builder
@@ -478,4 +480,144 @@ fn the_pair_inside_a_knockout_group_is_the_clause() {
         "and the single mark must not be — it is the defect the pair exists to fix, and a \
          fixture where the two agree tests nothing: {worst_plain}"
     );
+}
+
+/// **A group can be the source of one stage**, which is what §11.6.4.2 forces for a
+/// knockout element that is itself a group (ADR 0033).
+///
+/// > The shape of a group object shall be the union […] of the shapes of the objects it
+/// > contains.
+///
+/// No fill can state that union, so the pair on a *fill* cannot express such an element —
+/// which is three of the four pages the caller cannot draw. Written as two groups: the
+/// same content opaque under [`Compose::DestOut`], then the content itself under
+/// [`Compose::Plus`].
+///
+/// The element here is two overlapping wedges at half alpha inside their group. Their
+/// union is the shape; their alpha is not, and where they overlap the two differ most —
+/// which is why the fixture overlaps them.
+#[test]
+fn a_group_can_be_one_stage_of_the_clause() {
+    let mut device = device();
+    let outline = wedge(&mut device);
+    let shifted = device
+        .upload_outline(&[
+            Segment::MoveTo(Point::new(24.0, 8.0)),
+            Segment::LineTo(Point::new(56.0, 40.0)),
+            Segment::LineTo(Point::new(24.0, 56.0)),
+            Segment::Close,
+        ])
+        .unwrap();
+    let object = Color::new(0.1, 0.4, 0.9, 0.5);
+
+    let stage = |compose: Compose| GroupSpec {
+        alpha: 1.0,
+        blend: BlendMode::Normal,
+        clip: None,
+        knockout: false,
+        mask: None,
+        isolated: true,
+        compose,
+    };
+    let content = |body: &mut SceneBuilder, colour: Color| -> Result<(), SceneError> {
+        fill(body, outline, colour, Compose::SrcOver)?;
+        fill(body, shifted, colour, Compose::SrcOver)
+    };
+    let opaque = Color::new(1.0, 1.0, 1.0, 1.0);
+
+    // f and S, read from the device: the shape group and the object group on their own.
+    let onto_transparency = |device: &mut Device, colour: Color| {
+        let mut builder = SceneBuilder::new();
+        builder
+            .group(stage(Compose::SrcOver), |body| content(body, colour))
+            .unwrap();
+        render(device, &builder.finish())
+    };
+    let shape = onto_transparency(&mut device, opaque);
+    let deposit = onto_transparency(&mut device, object);
+
+    let mut before = SceneBuilder::new();
+    backdrop(&mut before);
+    let before = render(&mut device, &before.finish());
+
+    let mut staged = SceneBuilder::new();
+    backdrop(&mut staged);
+    staged
+        .group(stage(Compose::DestOut), |body| content(body, opaque))
+        .unwrap();
+    staged
+        .group(stage(Compose::Plus), |body| content(body, object))
+        .unwrap();
+    let staged = render(&mut device, &staged.finish());
+
+    let mut plain = SceneBuilder::new();
+    backdrop(&mut plain);
+    plain
+        .group(stage(Compose::SrcOver), |body| content(body, object))
+        .unwrap();
+    let plain = render(&mut device, &plain.finish());
+
+    let (worst_staged, partial) = deviation_from_the_clause(&before, &shape, &deposit, &staged);
+    let (worst_plain, _) = deviation_from_the_clause(&before, &shape, &deposit, &plain);
+    eprintln!("group stage: worst staged {worst_staged:.2}, worst ordinary {worst_plain:.2}");
+    assert!(
+        partial > 30,
+        "the fixture needs partial coverage: {partial}"
+    );
+    assert!(
+        worst_staged <= 3.0,
+        "a group as one stage must be §11.4.6's line; worst deviation {worst_staged}"
+    );
+    assert!(
+        worst_plain >= 16.0,
+        "and the ordinary composite must not be, or the fixture proves nothing: \
+         {worst_plain}"
+    );
+}
+
+/// The two positions a group may not be composited from, and why each is refused.
+#[test]
+fn a_group_refuses_the_stages_where_the_clause_does_not_put_them() {
+    let spec = |compose: Compose, blend: BlendMode, isolated: bool| GroupSpec {
+        alpha: 1.0,
+        blend,
+        clip: None,
+        knockout: false,
+        mask: None,
+        isolated,
+        compose,
+    };
+    let refuse = |compose, blend, isolated| {
+        SceneBuilder::new()
+            .group(spec(compose, blend, isolated), |_| Ok(()))
+            .expect_err("refused")
+    };
+    assert_eq!(
+        refuse(Compose::DestOut, BlendMode::Multiply, true),
+        SceneError::GroupComposeUnsupported {
+            compose: Compose::DestOut,
+            reason: GroupComposeReason::BlendNotNormal,
+        }
+    );
+    assert_eq!(
+        refuse(Compose::Plus, BlendMode::Normal, false),
+        SceneError::GroupComposeUnsupported {
+            compose: Compose::Plus,
+            reason: GroupComposeReason::NonIsolated,
+        }
+    );
+    assert_eq!(
+        refuse(Compose::Src, BlendMode::Normal, true),
+        SceneError::GroupComposeUnsupported {
+            compose: Compose::Src,
+            reason: GroupComposeReason::Source,
+        },
+        "§11.4.6 calls that a knockout group, and `GroupSpec::knockout` states it"
+    );
+    SceneBuilder::new()
+        .group(
+            spec(Compose::SrcOver, BlendMode::Multiply, true),
+            |_| Ok(()),
+        )
+        .expect("an ordinary group is untouched by ADR 0033");
 }

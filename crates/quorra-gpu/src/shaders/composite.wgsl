@@ -21,7 +21,12 @@ struct Params {
     // 1 for §11.4.4's non-isolated group, whose layer was seeded with this backdrop
     // and is interpolated back onto it; 0 for §11.4.5's isolated group.
     non_isolated: u32,
-    _pad1: f32,
+    // §11.4.6's stage this group *is*, when it is one (ADR 0033): 0 the ordinary
+    // composite below, 1 the erase `P' = (1 − f) × P`, 2 the deposit `P' = P + S`.
+    // A caller writes a knockout element whose shape is not its coverage as two groups
+    // under these, because §11.6.4.2 makes a group's shape the union of its elements'
+    // and no fill can state that.
+    compose: u32,
     // Device-space clip rectangle for the composited group (min.xy, max.xy).
     clip: vec4f,
     // Clip-residue mask placement: region min in .xy, scratch texel origin in .zw.
@@ -231,6 +236,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let mask_texel = min(pi, vec2i(mask_dims) - vec2i(1, 1));
     let soft = textureLoad(soft_mask_tex, mask_texel, 0).r;
     let w = params.alpha * soft * clip_coverage(p) * residue_value(p);
+
+    // The staged stages, before §11.4.4's interpolation and §11.3.6's formula, because
+    // they replace both: this group is one half of somebody's expansion of §11.4.6 and
+    // not an object being composited with a backdrop.
+    //
+    // The erase weight is the group's own **alpha**, which is its shape when the caller
+    // draws the shape half opaque — the only way a group's shape can reach a raster
+    // (Table 140's group alpha is not carried here). `w` scales it because a group's
+    // constant alpha, soft mask and clip are the caller's statements about this half.
+    if params.compose == 1u {
+        return b * (1.0 - s.a * w);
+    }
+    if params.compose == 2u {
+        return b + s * w;
+    }
 
     // §11.4.4, the non-isolated group. `s` holds E(B): this group's elements
     // composited onto the very backdrop `b` holds, because the layer was seeded with

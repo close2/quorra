@@ -17,7 +17,7 @@
 )]
 
 use quorra_gpu::{Device, Options, RenderError, ReportKind, Target, Viewport};
-use quorra_scene::{Affine, BlendMode, Color, Point, Rect, Scene, SceneBuilder};
+use quorra_scene::{Affine, BlendMode, Color, Compose, Point, Rect, Scene, SceneBuilder};
 
 /// 64 pixels wide on purpose: 64 × 4 bytes = 256, the buffer-copy row alignment.
 const SIZE: u32 = 64;
@@ -223,6 +223,7 @@ fn layered_scenes_patch_too() {
             knockout: false,
             mask: None,
             isolated: true,
+            compose: Compose::SrcOver,
         },
         |body| {
             body.rect(

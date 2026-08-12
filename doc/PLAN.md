@@ -15,6 +15,21 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A group can be one stage of §11.4.6** (2026-08-12, ADR 0033): the other half of the
+caller's §14.2, and the reason three of their four refused pages needed more than
+ADR 0032. §11.3.7.2 makes a group's shape *the union of the shapes of the objects it
+contains*, so a knockout element that is itself a group has a shape no fill can state —
+and `SceneBuilder::group` carried no compositing operator at all. `GroupSpec::compose`
+sits beside `blend` now: `DestOut` composites the group as the erase `P' = (1 − f) × P`
+weighted by the group's own alpha, which is its shape when the caller draws the shape half
+opaque, and `Plus` as the deposit. `Src` is refused on a group — that is what `knockout`
+states — as are a staged group carrying a blend mode (§11.3.5 composites it there) and a
+non-isolated one (§11.4.4 seeds its buffer with its own backdrop, so the alpha the erase
+reads as a shape would carry the backdrop's too). Measured on two overlapping half-opaque
+wedges: **0.77 of 255 against the clause's line for the pair, 114.95 for the ordinary
+composite**. The cost is a new field on a public struct — thirty-two literals here and the
+caller's adapter besides — and `Plus`'s saturation obligation extending to groups.
+
 **The staged pair belongs where the clause puts it** (2026-08-12, ADR 0032): ADR 0025 gave
 the caller §11.4.6's two operators and then refused them inside a knockout group, on the
 reading that a group already staging the clause per element would apply it twice. It does

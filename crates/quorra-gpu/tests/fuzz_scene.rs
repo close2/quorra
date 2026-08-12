@@ -152,6 +152,7 @@ fn random_ops(rng: &mut Rng, builder: &mut SceneBuilder, outlines: &[OutlineId],
                         // must refuse — the refusal is as much of the boundary as the
                         // acceptance is.
                         isolated: seed % 3 != 0,
+                        compose: Compose::SrcOver,
                     },
                     |inner| {
                         if depth < 20 {

@@ -201,6 +201,7 @@ mod tests {
                     knockout: false,
                     mask: None,
                     isolated: true,
+                    compose: Compose::SrcOver,
                 },
                 |inner| {
                     fill(inner, outline, Affine::translate(10.0, 10.0));

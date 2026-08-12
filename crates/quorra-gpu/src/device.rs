@@ -1395,6 +1395,8 @@ impl Device {
         bytes[4..8].copy_from_slice(&op.alpha.to_le_bytes());
         let non_isolated = u32::from(!op.isolated);
         bytes[8..12].copy_from_slice(&non_isolated.to_le_bytes());
+        // The word `_pad1` used to hold: §11.4.6's stage this group is, if it is one.
+        bytes[12..16].copy_from_slice(&op.compose.to_le_bytes());
         for (i, v) in op.clip_rect.iter().enumerate() {
             let at = 16 + i * 4;
             bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());

@@ -64,6 +64,7 @@ fn plain_group() -> GroupSpec {
         knockout: false,
         mask: None,
         isolated: true,
+        compose: Compose::SrcOver,
     }
 }
 

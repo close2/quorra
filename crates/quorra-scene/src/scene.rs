@@ -103,6 +103,23 @@ pub struct GroupSpec {
     pub knockout: bool,
     /// Soft mask applied to the composited group, or `None` (§11.6.4.3).
     pub mask: Option<MaskId>,
+    /// How the finished group combines with its backdrop, for the one case where
+    /// [`BlendMode`] cannot say it: §11.4.6's two stages (ADR 0033).
+    ///
+    /// [`Compose::SrcOver`] is the ordinary group and what every other entry of this
+    /// struct assumes. [`Compose::DestOut`] and [`Compose::Plus`] write the clause's
+    /// second stage — `P' = (1 − f) × P + S` — with a *group* as the source of each
+    /// half, which is what §11.6.4.2 forces for a knockout element that is itself a
+    /// group:
+    ///
+    /// > The shape of a group object shall be the union […] of the shapes of the objects
+    /// > it contains.
+    ///
+    /// A caller states the erase half as the same group drawn opaque, so its alpha *is*
+    /// its shape, and the deposit half as the group itself. [`Compose::Src`] is refused
+    /// here: an element whose shape is its coverage is what [`GroupSpec::knockout`]
+    /// already means.
+    pub compose: Compose,
     /// What the elements composite **onto** (ISO 32000-2 §11.4.5, §11.4.4).
     ///
     /// `true` is §11.4.5's isolated group, which is what a layer in any rasterising
@@ -303,6 +320,40 @@ pub enum NonIsolatedReason {
     InsideKnockoutGroup,
 }
 
+/// Why a group cannot be composited with the operator it named (ADR 0033).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupComposeReason {
+    /// [`Compose::Src`] on a group: [`GroupSpec::knockout`] is what §11.4.6 calls that,
+    /// and asking for both would be asking the same question twice.
+    Source,
+    /// The group also carries a blend mode, which composites it by §11.3.5 — the step
+    /// the staged pair replaces rather than joins.
+    BlendNotNormal,
+    /// The group is not isolated, so §11.4.4 seeds its buffer with its own backdrop and
+    /// the alpha the erase half reads as a shape would carry the backdrop's too.
+    NonIsolated,
+}
+
+impl GroupComposeReason {
+    /// The clause-shaped half of the message, so `Display` stays one screen.
+    fn because(self) -> &'static str {
+        match self {
+            Self::Source => {
+                "a group whose elements each replace the backdrop is what `knockout` \
+                 states (§11.4.6)"
+            }
+            Self::BlendNotNormal => {
+                "it also carries a blend mode, which composites the group by §11.3.5"
+            }
+            Self::NonIsolated => {
+                "it is not isolated, so §11.4.4 seeds its buffer with its own backdrop \
+                 and the alpha this operator reads as a shape would carry that backdrop \
+                 too"
+            }
+        }
+    }
+}
+
 /// Why one of §11.4.6's staged operators cannot be drawn where it was placed.
 ///
 /// [`Compose::DestOut`] and [`Compose::Plus`] are a caller's own expansion of §11.4.6's
@@ -321,6 +372,18 @@ pub enum StagedComposeReason {
     /// an implicit one-element group (§11.3.5) — so the operator would compose the group
     /// rather than the element, which is not where the clause puts it.
     BlendNotNormal,
+}
+
+impl StagedComposeReason {
+    /// The clause-shaped half of the message; see [`GroupComposeReason::because`].
+    fn because(self) -> &'static str {
+        match self {
+            Self::BlendNotNormal => {
+                "it also carries a blend mode, which puts it in an implicit one-element \
+                 group (§11.3.5)"
+            }
+        }
+    }
 }
 
 /// Why the builder refused an input. Every variant names what was wrong with which
@@ -376,6 +439,13 @@ pub enum SceneError {
     GroupTooDeep {
         /// The bound that was hit.
         limit: usize,
+    },
+    /// A group named a compositing operator it cannot be composited with (ADR 0033).
+    GroupComposeUnsupported {
+        /// What was asked for.
+        compose: Compose,
+        /// Which condition refused it.
+        reason: GroupComposeReason,
     },
     /// One of §11.4.6's staged operators ([`Compose::DestOut`], [`Compose::Plus`]) in a
     /// position that already stages the clause by another route.
@@ -457,13 +527,13 @@ impl fmt::Display for SceneError {
             Self::GroupTooDeep { limit } => {
                 write!(f, "group nesting exceeds the bound of {limit}")
             }
+            Self::GroupComposeUnsupported { compose, reason } => write!(
+                f,
+                "a group cannot be composited with {compose:?} here, because {}",
+                reason.because()
+            ),
             Self::StagedComposeUnsupported { compose, reason } => {
-                let because = match reason {
-                    StagedComposeReason::BlendNotNormal => {
-                        "it also carries a blend mode, which puts it in an implicit \
-                         one-element group (§11.3.5)"
-                    }
-                };
+                let because = reason.because();
                 write!(
                     f,
                     "{compose:?} states §11.4.6's second stage, and cannot be drawn here \
@@ -794,10 +864,44 @@ impl SceneBuilder {
         }
         self.check_clip(spec.clip)?;
         self.check_mask(spec.mask)?;
+        Self::check_group_compose(&spec)?;
         self.check_isolation(&spec)?;
         let commands = self.nested_body(self.inside_knockout() || spec.knockout, body)?;
         self.push(Command::Group { spec, commands });
         Ok(())
+    }
+
+    /// What a group may be composited with (ADR 0033), in the order a reader of §11.4.6
+    /// meets the conditions.
+    ///
+    /// Both refusals are §5's kind: the operator would be drawn somewhere the clause does
+    /// not put it, and a plausible-looking wrong page is the worst outcome either project
+    /// has a name for.
+    fn check_group_compose(spec: &GroupSpec) -> Result<(), SceneError> {
+        let staged = matches!(spec.compose, Compose::DestOut | Compose::Plus);
+        let reason = if matches!(spec.compose, Compose::Src) {
+            // §11.4.6's element-with-shape-equal-to-coverage is what `knockout` means,
+            // and a group cannot ask for both without saying which it meant.
+            Some(GroupComposeReason::Source)
+        } else if staged && spec.blend != BlendMode::Normal {
+            // A blend mode composites the group by §11.3.5, which is the step the staged
+            // pair replaces rather than joins.
+            Some(GroupComposeReason::BlendNotNormal)
+        } else if staged && !spec.isolated {
+            // §11.4.4 seeds a non-isolated group's buffer with its own backdrop, so the
+            // alpha this pair reads as a shape would be the backdrop's as well as the
+            // group's.
+            Some(GroupComposeReason::NonIsolated)
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => Err(SceneError::GroupComposeUnsupported {
+                compose: spec.compose,
+                reason,
+            }),
+            None => Ok(()),
+        }
     }
 
     /// The three conditions of [`GroupSpec::isolated`], in the order a reader of the
@@ -1080,6 +1184,7 @@ mod tests {
             knockout: false,
             mask: None,
             isolated: true,
+            compose: Compose::SrcOver,
         }
     }
 
@@ -1303,6 +1408,7 @@ mod tests {
                     knockout: false,
                     mask: None,
                     isolated: true,
+                    compose: Compose::SrcOver,
                 },
                 |b| nest(b, remaining - 1),
             )

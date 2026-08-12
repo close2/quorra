@@ -386,6 +386,7 @@ fn build(device: &mut Device, shape: &Archetype) -> Scene {
             knockout: false,
             mask: None,
             isolated: true,
+            compose: Compose::SrcOver,
         };
         builder
             .group(spec, |body| {
