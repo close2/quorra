@@ -536,7 +536,25 @@ impl ScratchPacker {
             .unwrap_or(self.width)
             .clamp(1, self.width);
         if !self.data.is_empty() {
+            // Rows the CPU lane actually wrote, counted in the *packing* stride before
+            // compaction restrides them.
+            let written = self
+                .data
+                .len()
+                .checked_div(self.width as usize)
+                .unwrap_or(0);
             self.compact_rows(used);
+            // **Cut the tail before growing the sheet.** Compaction moves each row left
+            // and leaves the old wide layout's bytes behind it, so the buffer is still
+            // as long as it was and everything past `written × used` is stale coverage
+            // rather than blank sheet. Resizing straight to the sheet's extent keeps
+            // whatever of that tail happens to fall inside it — which is nothing at all
+            // while every shelf holds CPU tiles (they write their own rows), and is a
+            // page of somebody else's marks the moment a shelf below them belongs to a
+            // lane that writes its rows on the device instead. The caller's
+            // `transparency_group.pdf` drew 136 410 texels of another shape's coverage
+            // that way, in horizontal streaks across the rows under its last CPU tile.
+            self.data.truncate(written.saturating_mul(used as usize));
             // Both extents are bounded by the device dimension, so the product is far
             // inside a `usize`; saturating says so rather than relying on it.
             self.data
@@ -2370,12 +2388,53 @@ pub(crate) fn blend_word(mode: BlendMode) -> u32 {
 mod tests {
     use quorra_scene::{Affine, Color, Point, Rect, SceneBuilder};
 
-    use super::{BatchKind, encode};
+    use super::{BatchKind, ScratchPacker, encode};
     use crate::atlas::AtlasStore;
     use crate::error::RenderError;
     use crate::resources::ResourceStore;
     use crate::startup::Coverage;
     use crate::viewport::Viewport;
+
+    /// **A shelf no CPU tile wrote is blank sheet, not the tail of the wide layout.**
+    ///
+    /// The packer lays rows out at the *packing* width and `finish` restrides them down
+    /// to the width the shelves reached (ADR 0021). Compaction moves each row left and
+    /// leaves the old bytes behind it, so growing the buffer to the sheet's extent
+    /// straight afterwards keeps whatever of that tail falls inside — stale coverage,
+    /// not blank sheet.
+    ///
+    /// Invisible while every shelf holds CPU tiles, because each writes its own rows.
+    /// The GPU lane reserves rows it fills on the device, so its shelf is exactly the
+    /// region that reads back whatever was left there: the caller's
+    /// `transparency_group.pdf` drew 136 410 texels of another shape's coverage in
+    /// horizontal streaks under its last CPU tile (`QUORRA_FEEDBACK.md` §20.4.1).
+    #[test]
+    fn a_shelf_the_cpu_lane_did_not_write_is_blank() {
+        let mut packer = ScratchPacker::new(64, 64);
+        let mask = |width: u32, height: u32| crate::raster::CoverageMask {
+            left: 0,
+            top: 0,
+            width,
+            height,
+            coverage: vec![255; (width * height) as usize],
+        };
+        // Two tiles on one shelf: 16 of the 64 packing columns are used, so `finish`
+        // restrides — which is the precondition for the tail to exist at all.
+        assert!(packer.pack(&mask(8, 20)).is_some());
+        assert!(packer.pack(&mask(8, 20)).is_some());
+        // And a shelf below them that reserves rows without writing bytes, which is
+        // what every GPU-lane tile does. Short enough that the shelf rule opens a new
+        // one for it rather than seating it beside the two above.
+        assert_eq!(packer.reserve(8, 4), Some((0, 20)));
+
+        let scratch = packer.finish().expect("the sheet holds three tiles");
+        assert_eq!((scratch.width, scratch.height), (16, 24));
+        let stray = scratch.data[(16 * 20) as usize..]
+            .iter()
+            .filter(|byte| **byte != 0)
+            .count();
+        assert_eq!(stray, 0, "{stray} texels of somebody else's coverage");
+    }
 
     fn no_resources() -> ResourceStore {
         ResourceStore::new(0)

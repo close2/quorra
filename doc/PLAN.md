@@ -15,6 +15,20 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A shelf the CPU lane did not write was the tail of the wide layout** (2026-08-12, the
+caller's `QUORRA_FEEDBACK.md` §20.4.1): they measured the GPU lane against the corpus for
+the first time and found `transparency_group.pdf` differing by 31.7 of 255 in its worst
+tile, asking whether sixteen samples could explain it. They cannot — and it was not the
+lane at all. `ScratchPacker::finish` restrides the sheet's rows from the packing width
+down to the width the shelves reached (ADR 0021), which leaves the old layout's bytes
+behind each moved row; growing the buffer to the sheet's extent afterwards **keeps
+whatever of that tail falls inside it**. Nothing while every shelf holds CPU tiles, since
+each writes its own rows — and 136 410 texels of another shape's coverage the moment a
+shelf below them belongs to the GPU lane, which reserves rows it fills on the device.
+Dumping the sheet before the winding pass is what said so. Cutting the tail before the
+grow takes **five pages at scale 1 and six at scale 4** from *differs* to *agrees* on
+their corpus, with the CPU lane's verdicts unmoved.
+
 **A cache is worth what it is used for, not what it will accept** (2026-08-12,
 ADR 0029): ADR 0028 asked the atlas whether it *would hold* a tile. The better question
 is what it would *do* with one, and the scene can answer it — `crate::census` counts a
