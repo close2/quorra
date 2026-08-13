@@ -1,4 +1,4 @@
-//! Pipelines and shaders: how few, and how late.
+//! Pipelines and shaders: how few, how late, and what happens when one is refused.
 //!
 //! §7 of the brief makes this module a startup-latency problem before it is a
 //! rendering problem. The caller renders page one on its CPU backend *while we
@@ -25,6 +25,22 @@
 //! and ADR 0013 weighed the exception against the startup measurement and declined
 //! it — the warm set compiles in ~9 ms on a thread nobody blocks on.
 //!
+//! # A pipeline that cannot be built is refused, not survived
+//!
+//! `wgpu` reports a shader or pipeline failure *out of band*: the constructor hands
+//! back a handle either way and the error goes to the device's uncaptured-error
+//! handler, whose default is to panic — on whatever thread was compiling, which for
+//! the warm set is a thread nobody is listening to. Every compile here therefore runs
+//! inside a validation error scope ([`captured`]), a captured failure becomes a
+//! [`PipelineProblem`], and [`PipelineStore::get`] is fallible so the frame that needed
+//! the pipeline is refused by name (ADR 0042). What the warm-up thread ends with is
+//! recorded in [`WarmUp`] on **every** exit path, so [`PipelineStore::wait_until_warm`]
+//! always returns.
+//!
+//! Fallibility is what the module's three files are split along: `layouts.rs` is the
+//! half of a pipeline no adapter can refuse, `spec.rs` is what each [`Kind`] *is*, and
+//! this file is the store — its one lock, its laziness and its warm-up.
+//!
 //! # Shaders are code, and this project's rules apply to them
 //!
 //! WGSL lives in `src/shaders/`, and every function implementing a normative
@@ -33,178 +49,94 @@
 //! invariants are not stated beside it is write-only code (principle 4); each shader
 //! states its coverage definition and its determinism argument inline.
 
+mod layouts;
+mod spec;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::error::PipelineProblem;
+use crate::startup::WarmUp;
+use layouts::Layouts;
+pub(crate) use spec::Kind;
+use spec::Spec;
+
 /// The format the warm-up thread compiles for: the readback and host-texture format,
 /// which every headless frame needs.
 pub(crate) const WARM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// Which pipeline: the two lanes in their three blend styles, plus the compositor's
-/// own passes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Kind {
-    /// Analytic rectangles, premultiplied over (`rect.wgsl` `fs_main`, ADR 0005).
-    RectOver,
-    /// Rectangle shape-erase for knockout (`fs_shape`, factors `ZERO`/`1-alpha`).
-    RectErase,
-    /// Rectangle additive deposit for knockout (`fs_main`, factors `ONE`/`ONE`).
-    RectAdd,
-    /// Coverage quads, premultiplied over (`coverage.wgsl` `fs_main`).
-    CoverOver,
-    /// Coverage shape-erase for knockout.
-    CoverErase,
-    /// Coverage additive deposit for knockout.
-    CoverAdd,
-    /// One image quad, premultiplied over (`image.wgsl` `fs_main`, ADR 0011).
-    ImageOver,
-    /// Image shape-erase for knockout (`fs_shape`).
-    ImageErase,
-    /// Image additive deposit for knockout.
-    ImageAdd,
-    /// One shading or mesh quad, premultiplied over (`shading.wgsl` `fs_main`,
-    /// ISO 32000-2 §8.7.4.5).
-    ShadedOver,
-    /// Shading shape-erase for knockout (`fs_shape`).
-    ShadedErase,
-    /// Shading additive deposit for knockout.
-    ShadedAdd,
-    /// One finished layer onto its backdrop under a §11.3.5 blend mode
-    /// (`composite.wgsl`; REPLACE, arithmetic wholly in-shader).
-    Composite,
-    /// Soft-mask reduction to R8 (`reduce.wgsl`; §11.5, byte-agreed).
-    Reduce,
-    /// Root layer to target, unchanged (`blit.wgsl`).
-    Blit,
-    /// Outline triangles accumulating a winding number (`winding.wgsl` `fs_winding`;
-    /// additive, ADR 0016). The GPU coverage lane's first pass.
-    Winding,
-    /// Winding to coverage under a fill rule (`winding.wgsl` `fs_resolve`; REPLACE).
-    WindingResolve,
+/// Run `create` inside a `wgpu` validation error scope, and hand back what it captured.
+///
+/// This is the whole mechanism by which a refused shader becomes a value rather than a
+/// panic. The scope is thread-local, so the warm-up thread and a frame compiling on
+/// demand each capture their own without seeing the other's.
+///
+/// `pollster` resolves the pop, which blocks on nothing: `wgpu`'s own backend pops the
+/// scope synchronously and returns an already-ready future, so this is the same "a
+/// thread is not a runtime" position CLAUDE.md's stack table takes for the two awaits
+/// in device creation.
+fn captured<T>(device: &wgpu::Device, create: impl FnOnce() -> T) -> (T, Option<String>) {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let handle = create();
+    let error = pollster::block_on(scope.pop());
+    (handle, error.map(|error| error.to_string()))
 }
 
-/// Everything shared by every pipeline: parsed shaders and the bind-group layouts.
-struct Base {
-    rect_shader: wgpu::ShaderModule,
-    cover_shader: wgpu::ShaderModule,
-    image_shader: wgpu::ShaderModule,
-    shading_shader: wgpu::ShaderModule,
-    composite_shader: wgpu::ShaderModule,
-    reduce_shader: wgpu::ShaderModule,
-    blit_shader: wgpu::ShaderModule,
-    winding_shader: wgpu::ShaderModule,
-    globals_layout: wgpu::BindGroupLayout,
-    /// Group 1 of both lanes: atlas, scratch, soft mask.
-    textures_layout: wgpu::BindGroupLayout,
-    /// Image quad: params, image (filterable), sampler, soft mask, scratch.
-    image_layout: wgpu::BindGroupLayout,
-    /// Shading quad: params, paint (ramp or mesh), scratch, soft mask.
-    shading_layout: wgpu::BindGroupLayout,
-    /// Composite pass: params, backdrop, src, soft mask, scratch.
-    composite_layout: wgpu::BindGroupLayout,
-    /// Reduce pass: params (with the transfer table), src.
-    reduce_layout: wgpu::BindGroupLayout,
-    /// Blit pass: src, and where in it to read (ADR 0038).
-    blit_layout: wgpu::BindGroupLayout,
-    /// The winding resolve's one sampled texture.
-    sampled_layout: wgpu::BindGroupLayout,
-    /// Winding and resolve passes: the sheet's globals, read by both stages.
-    winding_layout: wgpu::BindGroupLayout,
-    lane_layout: wgpu::PipelineLayout,
-    image_pipe_layout: wgpu::PipelineLayout,
-    shading_pipe_layout: wgpu::PipelineLayout,
-    composite_pipe_layout: wgpu::PipelineLayout,
-    reduce_pipe_layout: wgpu::PipelineLayout,
-    blit_pipe_layout: wgpu::PipelineLayout,
-    winding_pipe_layout: wgpu::PipelineLayout,
-    resolve_pipe_layout: wgpu::PipelineLayout,
+/// The eight parsed WGSL modules, made together on first need.
+///
+/// Together because they are one artefact: the shaders this crate ships either all
+/// parse on an adapter or the adapter cannot run this renderer, and there is no useful
+/// state in between where some of a page draws.
+struct Modules {
+    rect: wgpu::ShaderModule,
+    cover: wgpu::ShaderModule,
+    image: wgpu::ShaderModule,
+    shading: wgpu::ShaderModule,
+    composite: wgpu::ShaderModule,
+    reduce: wgpu::ShaderModule,
+    blit: wgpu::ShaderModule,
+    winding: wgpu::ShaderModule,
 }
 
-/// A uniform buffer binding, with the size the shader's struct is — `min_binding_size`
-/// makes a layout that disagrees with its WGSL a validation error rather than a wrong
-/// picture.
-fn uniform_entry(
-    binding: u32,
-    size: u64,
-    visibility: wgpu::ShaderStages,
-) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: wgpu::BufferSize::new(size),
-        },
-        count: None,
+impl Modules {
+    /// Parse every module, or name the first one this adapter refused.
+    fn new(device: &wgpu::Device) -> Result<Self, PipelineProblem> {
+        let module = |shader: &'static str, source: &str| {
+            let (module, detail) = captured(device, || {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(shader),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                })
+            });
+            match detail {
+                Some(detail) => Err(PipelineProblem::Shader { shader, detail }),
+                None => Ok(module),
+            }
+        };
+        Ok(Self {
+            rect: module("quorra rect", include_str!("shaders/rect.wgsl"))?,
+            cover: module("quorra coverage", include_str!("shaders/coverage.wgsl"))?,
+            image: module("quorra image", include_str!("shaders/image.wgsl"))?,
+            shading: module("quorra shading", include_str!("shaders/shading.wgsl"))?,
+            composite: module("quorra composite", include_str!("shaders/composite.wgsl"))?,
+            reduce: module("quorra reduce", include_str!("shaders/reduce.wgsl"))?,
+            blit: module("quorra blit", include_str!("shaders/blit.wgsl"))?,
+            winding: module("quorra winding", include_str!("shaders/winding.wgsl"))?,
+        })
     }
-}
-
-/// A sampled texture read by `textureLoad` alone: exact fetches, no filtering (§4.6).
-fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: None,
-    }
-}
-
-/// The image's texture, the one filterable binding in the crate: linear filtering is the
-/// placement's resolved decision (§4.5), so the hardware sampler must be usable on it.
-fn filterable_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: None,
-    }
-}
-
-/// The sampler that goes with it.
-fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-        count: None,
-    }
-}
-
-/// A uniform both stages read: a quad's, whose vertex stage places it and whose fragment
-/// stage shades it from the same numbers.
-const QUAD_UNIFORM: wgpu::ShaderStages =
-    wgpu::ShaderStages::VERTEX.union(wgpu::ShaderStages::FRAGMENT);
-
-/// The bind-group layouts alone, grouped so [`PipelineStore::base`] stays a
-/// composition of named parts.
-struct BindLayouts {
-    globals: wgpu::BindGroupLayout,
-    textures: wgpu::BindGroupLayout,
-    image: wgpu::BindGroupLayout,
-    shading: wgpu::BindGroupLayout,
-    composite: wgpu::BindGroupLayout,
-    reduce: wgpu::BindGroupLayout,
-    blit: wgpu::BindGroupLayout,
-    sampled: wgpu::BindGroupLayout,
-    winding: wgpu::BindGroupLayout,
 }
 
 struct StoreState {
-    base: Option<Base>,
+    layouts: Option<Layouts>,
+    /// The parsed modules, or the refusal that stopped them — cached either way. A
+    /// module a backend rejects is rejected identically every time it is asked for, so
+    /// re-parsing per frame would cost the parse and answer nothing new; keeping the
+    /// refusal is also what lets every later frame be refused in the same words.
+    modules: Option<Result<Modules, PipelineProblem>>,
     pipelines: HashMap<(Kind, wgpu::TextureFormat), Arc<wgpu::RenderPipeline>>,
-    warm: bool,
-    warm_duration: Option<Duration>,
+    warm_up: WarmUp,
 }
 
 /// The lazily-populated set of render pipelines, shared between the device and its
@@ -223,8 +155,47 @@ impl std::fmt::Debug for PipelineStore {
         let state = self.lock();
         f.debug_struct("PipelineStore")
             .field("compiled", &state.pipelines.len())
-            .field("warm", &state.warm)
+            .field("warm_up", &state.warm_up)
             .finish_non_exhaustive()
+    }
+}
+
+/// Records the warm-up's outcome and releases its waiters on **every** exit path,
+/// including an unwind.
+///
+/// [`PipelineStore::wait_until_warm`] is a `Condvar` with exactly one notifier, so a
+/// notifier that leaves by a route which does not notify leaves every waiter waiting
+/// forever. That is not a hypothetical: a reserved keyword in `blit.wgsl` panicked this
+/// thread inside `wgpu`, and the test binary then sat silent until it was killed — the
+/// defect ADR 0042 exists to close. The error scopes above make the *known* panic a
+/// value; this guard is what makes the promise hold for the ones that are not.
+struct WarmUpGuard<'a> {
+    store: &'a PipelineStore,
+    /// What to record. Still `None` when the thread is unwinding, which is exactly
+    /// [`WarmUp::Abandoned`] — the state with no reason to give, because there is none.
+    outcome: Option<WarmUp>,
+}
+
+impl<'a> WarmUpGuard<'a> {
+    fn new(store: &'a PipelineStore) -> Self {
+        Self {
+            store,
+            outcome: None,
+        }
+    }
+
+    /// Record `outcome` and release the waiters, by dropping.
+    fn finish(mut self, outcome: WarmUp) {
+        self.outcome = Some(outcome);
+    }
+}
+
+impl Drop for WarmUpGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.store.lock();
+        state.warm_up = self.outcome.take().unwrap_or(WarmUp::Abandoned);
+        drop(state);
+        self.store.warmed.notify_all();
     }
 }
 
@@ -235,10 +206,10 @@ impl PipelineStore {
         Arc::new(Self {
             device,
             state: Mutex::new(StoreState {
-                base: None,
+                layouts: None,
+                modules: None,
                 pipelines: HashMap::new(),
-                warm: false,
-                warm_duration: None,
+                warm_up: WarmUp::Running,
             }),
             warmed: Condvar::new(),
         })
@@ -248,10 +219,10 @@ impl PipelineStore {
     /// first. §2.1 of the brief also says a device must not *require* a background
     /// thread: if the host cannot spawn one, the warm set compiles inline instead —
     /// construction blocks for the compile, which is the documented cost of a host
-    /// with no threads to give, and `is_warm` keeps meaning what it says.
+    /// with no threads to give, and `warm_up` keeps meaning what it says.
     ///
     /// The handle goes to the [`Device`], which joins it when it is dropped. Nothing
-    /// *waits* on it — completion is observed through `is_warm`/`wait_until_warm`, and
+    /// *waits* on it — completion is observed through `warm_up`/`wait_until_warm`, and
     /// a frame that arrives early compiles what it needs on the spot — but a thread
     /// inside the driver must not outlive the device it is compiling for (ADR 0018).
     ///
@@ -270,115 +241,137 @@ impl PipelineStore {
 
     /// The warm-up itself: the two over-lanes a page of text needs (§7 — the
     /// knockout variants, the compositor and the reduction compile on first use).
+    ///
+    /// A refusal is kept rather than retried. Nothing else in the device changes
+    /// because of it: a frame still compiles what it needs on the spot, and gets the
+    /// same refusal in its own `Err` if the reason is still there.
     fn warm_up_now(&self) {
-        let start = Instant::now();
-        let (_pipeline, _compiled) = self.get(Kind::RectOver, WARM_FORMAT);
-        let (_pipeline, _compiled) = self.get(Kind::CoverOver, WARM_FORMAT);
-        let duration = start.elapsed();
-        let mut state = self.lock();
-        state.warm = true;
-        state.warm_duration = Some(duration);
-        drop(state);
-        self.warmed.notify_all();
+        let guard = WarmUpGuard::new(self);
+        let started = Instant::now();
+        let compiled = self
+            .get(Kind::RectOver, WARM_FORMAT)
+            .and_then(|_| self.get(Kind::CoverOver, WARM_FORMAT));
+        guard.finish(match compiled {
+            Ok(_) => WarmUp::Warm(started.elapsed()),
+            Err(reason) => WarmUp::Refused(reason),
+        });
     }
 
     /// The pipeline for a lane and target format, compiling it now if the warm
     /// thread has not already. The second element is `Some(duration)` when this call
     /// did the compiling, so the frame that paid the one-off cost can name it in its
     /// `Timings::phases`.
+    ///
+    /// # Errors
+    ///
+    /// [`PipelineProblem`] when this adapter refuses one of the crate's shader modules
+    /// or the pipeline built from them. Nothing is cached for a format that failed, so
+    /// a later `get` for another format is unaffected — but a module that would not
+    /// parse is remembered, because it will not parse next time either.
     pub(crate) fn get(
         &self,
         kind: Kind,
         format: wgpu::TextureFormat,
-    ) -> (Arc<wgpu::RenderPipeline>, Option<Duration>) {
+    ) -> Result<(Arc<wgpu::RenderPipeline>, Option<Duration>), PipelineProblem> {
         let mut state = self.lock();
         if let Some(pipeline) = state.pipelines.get(&(kind, format)) {
-            return (Arc::clone(pipeline), None);
+            return Ok((Arc::clone(pipeline), None));
         }
-        let start = Instant::now();
-        let pipeline = Arc::new(self.compile(&mut state, kind, format));
+        let started = Instant::now();
+        let pipeline = Arc::new(self.compile(&mut state, kind, format)?);
         state
             .pipelines
             .insert((kind, format), Arc::clone(&pipeline));
-        (pipeline, Some(start.elapsed()))
+        Ok((pipeline, Some(started.elapsed())))
     }
 
     /// The bind-group layout for the globals uniform.
     pub(crate) fn globals_layout(&self) -> wgpu::BindGroupLayout {
-        let mut state = self.lock();
-        Self::base(&self.device, &mut state).globals_layout.clone()
+        self.layout(|layouts| &layouts.globals)
     }
 
     /// The bind-group layout for the lane textures (atlas, scratch, soft mask).
     pub(crate) fn textures_layout(&self) -> wgpu::BindGroupLayout {
-        let mut state = self.lock();
-        Self::base(&self.device, &mut state).textures_layout.clone()
+        self.layout(|layouts| &layouts.textures)
     }
 
     /// The image quad's bind-group layout.
     pub(crate) fn image_layout(&self) -> wgpu::BindGroupLayout {
-        let mut state = self.lock();
-        Self::base(&self.device, &mut state).image_layout.clone()
+        self.layout(|layouts| &layouts.image)
     }
 
     /// The shading quad's bind-group layout.
     pub(crate) fn shading_layout(&self) -> wgpu::BindGroupLayout {
-        let mut state = self.lock();
-        Self::base(&self.device, &mut state).shading_layout.clone()
+        self.layout(|layouts| &layouts.shading)
     }
 
     /// The composite pass's bind-group layout.
     pub(crate) fn composite_layout(&self) -> wgpu::BindGroupLayout {
-        let mut state = self.lock();
-        Self::base(&self.device, &mut state)
-            .composite_layout
-            .clone()
+        self.layout(|layouts| &layouts.composite)
     }
 
     /// The reduce pass's bind-group layout.
     pub(crate) fn reduce_layout(&self) -> wgpu::BindGroupLayout {
-        let mut state = self.lock();
-        Self::base(&self.device, &mut state).reduce_layout.clone()
+        self.layout(|layouts| &layouts.reduce)
     }
 
     /// The winding sheet's globals layout, shared by both passes of the GPU lane.
     pub(crate) fn winding_layout(&self) -> wgpu::BindGroupLayout {
-        let mut state = self.lock();
-        Self::base(&self.device, &mut state).winding_layout.clone()
+        self.layout(|layouts| &layouts.winding)
     }
 
     /// The blit pass's bind-group layout.
     pub(crate) fn blit_layout(&self) -> wgpu::BindGroupLayout {
-        let mut state = self.lock();
-        Self::base(&self.device, &mut state).blit_layout.clone()
+        self.layout(|layouts| &layouts.blit)
     }
 
     /// The winding resolve's source layout: one sampled texture.
     pub(crate) fn sampled_layout(&self) -> wgpu::BindGroupLayout {
-        let mut state = self.lock();
-        Self::base(&self.device, &mut state).sampled_layout.clone()
+        self.layout(|layouts| &layouts.sampled)
     }
 
-    /// Whether the warm set — every pipeline a page of text needs — exists.
-    pub(crate) fn is_warm(&self) -> bool {
-        self.lock().warm
+    /// One binding table, made with its siblings on first need.
+    ///
+    /// Infallible, and that is the point of `layouts.rs` being its own module: a
+    /// layout is a description `wgpu` checks against nothing but itself, so no adapter
+    /// can refuse one and no caller of these needs a `Result`.
+    fn layout(
+        &self,
+        pick: impl FnOnce(&Layouts) -> &wgpu::BindGroupLayout,
+    ) -> wgpu::BindGroupLayout {
+        let mut state = self.lock();
+        pick(Self::layouts(&self.device, &mut state)).clone()
+    }
+
+    /// Where the background warm-up has got to.
+    pub(crate) fn warm_up(&self) -> WarmUp {
+        self.lock().warm_up.clone()
     }
 
     /// How long the warm set took to compile, once it has.
     pub(crate) fn warm_duration(&self) -> Option<Duration> {
-        self.lock().warm_duration
+        let state = self.lock();
+        match state.warm_up {
+            WarmUp::Warm(duration) => Some(duration),
+            _ => None,
+        }
     }
 
-    /// Block until the warm-up reports done. Measurement support: startup numbers
-    /// need a defined "fully warm" moment to be comparable.
-    pub(crate) fn wait_until_warm(&self) {
+    /// Block until the warm-up reports what became of it, and say what that was.
+    /// Measurement support: startup numbers need a defined "fully warm" moment to be
+    /// comparable.
+    ///
+    /// Returns for every outcome, including a warm-up that panicked
+    /// ([`WarmUp::Abandoned`]) — see [`WarmUpGuard`].
+    pub(crate) fn wait_until_warm(&self) -> WarmUp {
         let mut state = self.lock();
-        while !state.warm {
+        while matches!(state.warm_up, WarmUp::Running) {
             state = self
                 .warmed
                 .wait(state)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+        state.warm_up.clone()
     }
 
     fn lock(&self) -> MutexGuard<'_, StoreState> {
@@ -390,347 +383,39 @@ impl PipelineStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The shared base — parsed shaders and layouts — created on first need.
-    fn base<'a>(device: &wgpu::Device, state: &'a mut StoreState) -> &'a Base {
-        state.base.get_or_insert_with(|| {
-            let module = |label: &str, source: &str| {
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(label),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
-                })
-            };
-            let layouts = Self::bind_layouts(device);
-            let pipe_layout = |label: &str, groups: &[&wgpu::BindGroupLayout]| {
-                let refs: Vec<Option<&wgpu::BindGroupLayout>> =
-                    groups.iter().map(|g| Some(*g)).collect();
-                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some(label),
-                    bind_group_layouts: &refs,
-                    immediate_size: 0,
-                })
-            };
-            let lane_layout = pipe_layout("quorra lane", &[&layouts.globals, &layouts.textures]);
-            let image_pipe_layout = pipe_layout("quorra image", &[&layouts.image]);
-            let shading_pipe_layout = pipe_layout("quorra shading", &[&layouts.shading]);
-            let composite_pipe_layout = pipe_layout("quorra composite", &[&layouts.composite]);
-            let reduce_pipe_layout = pipe_layout("quorra reduce", &[&layouts.reduce]);
-            let blit_pipe_layout = pipe_layout("quorra blit", &[&layouts.blit]);
-            let winding_pipe_layout = pipe_layout("quorra winding", &[&layouts.winding]);
-            let resolve_pipe_layout = pipe_layout(
-                "quorra winding resolve",
-                &[&layouts.winding, &layouts.sampled],
-            );
-
-            Base {
-                rect_shader: module("quorra rect", include_str!("shaders/rect.wgsl")),
-                cover_shader: module("quorra coverage", include_str!("shaders/coverage.wgsl")),
-                image_shader: module("quorra image", include_str!("shaders/image.wgsl")),
-                shading_shader: module("quorra shading", include_str!("shaders/shading.wgsl")),
-                composite_shader: module(
-                    "quorra composite",
-                    include_str!("shaders/composite.wgsl"),
-                ),
-                reduce_shader: module("quorra reduce", include_str!("shaders/reduce.wgsl")),
-                blit_shader: module("quorra blit", include_str!("shaders/blit.wgsl")),
-                winding_shader: module("quorra winding", include_str!("shaders/winding.wgsl")),
-                globals_layout: layouts.globals,
-                textures_layout: layouts.textures,
-                image_layout: layouts.image,
-                shading_layout: layouts.shading,
-                composite_layout: layouts.composite,
-                reduce_layout: layouts.reduce,
-                blit_layout: layouts.blit,
-                sampled_layout: layouts.sampled,
-                winding_layout: layouts.winding,
-                lane_layout,
-                image_pipe_layout,
-                shading_pipe_layout,
-                composite_pipe_layout,
-                reduce_pipe_layout,
-                blit_pipe_layout,
-                winding_pipe_layout,
-                resolve_pipe_layout,
-            }
-        })
+    /// The layouts alone, created on first need.
+    fn layouts<'a>(device: &wgpu::Device, state: &'a mut StoreState) -> &'a Layouts {
+        state.layouts.get_or_insert_with(|| Layouts::new(device))
     }
 
-    /// Every bind-group layout, in one place: the binding tables the shaders in
-    /// `src/shaders/` assume, entry for entry. The entries themselves are named above.
-    fn bind_layouts(device: &wgpu::Device) -> BindLayouts {
-        let make = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some(label),
-                entries,
-            })
-        };
-        BindLayouts {
-            globals: make(
-                "quorra globals",
-                // Both stages, since ADR 0036: the vertex stage subtracts the
-                // attachment's device origin before mapping to clip space and the
-                // fragment stage adds it back to recover the device pixel it is
-                // shading. Declaring it vertex-only is a validation error rather than a
-                // wrong picture, which is the good kind — wgpu refused every pipeline
-                // that read it from a fragment stage.
-                &[uniform_entry(0, 16, QUAD_UNIFORM)],
-            ),
-            textures: make(
-                "quorra lane sources",
-                // Binding 3 is the mask's placement (ADR 0037), which belongs to the
-                // mask rather than to the pass: `Globals` is written once per region and
-                // one region's pass draws batches under different masks.
-                &[
-                    texture_entry(0),
-                    texture_entry(1),
-                    texture_entry(2),
-                    uniform_entry(3, 32, wgpu::ShaderStages::FRAGMENT),
-                ],
-            ),
-            image: make(
-                "quorra image",
-                &[
-                    uniform_entry(0, 144, QUAD_UNIFORM),
-                    filterable_entry(1),
-                    sampler_entry(2),
-                    texture_entry(3),
-                    texture_entry(4),
-                ],
-            ),
-            shading: make(
-                "quorra shading",
-                &[
-                    uniform_entry(0, 176, QUAD_UNIFORM),
-                    texture_entry(1),
-                    texture_entry(2),
-                    texture_entry(3),
-                ],
-            ),
-            composite: make(
-                "quorra composite",
-                &[
-                    uniform_entry(0, 128, wgpu::ShaderStages::FRAGMENT),
-                    texture_entry(1),
-                    texture_entry(2),
-                    texture_entry(3),
-                    texture_entry(4),
-                ],
-            ),
-            reduce: make(
-                "quorra reduce",
-                &[
-                    uniform_entry(0, 288, wgpu::ShaderStages::FRAGMENT),
-                    texture_entry(1),
-                ],
-            ),
-            // The source origin (ADR 0038) is fragment-only: the pass is a full-screen
-            // triangle whose vertex stage knows nothing about where it reads.
-            blit: make(
-                "quorra blit",
-                &[
-                    texture_entry(0),
-                    uniform_entry(1, 16, wgpu::ShaderStages::FRAGMENT),
-                ],
-            ),
-            // The winding resolve's source. Identical in shape to `blit` before ADR 0038
-            // gave that one an origin, and it was the same layout for exactly that
-            // reason — a coincidence of shape, not a shared responsibility.
-            sampled: make("quorra sampled texture", &[texture_entry(0)]),
-            // Both stages read it: the vertex stage for the sheet's size and the band
-            // it is drawing, the resolve fragment for the fill rule, the sample grid and
-            // the same band.
-            // 48 bytes: the sheet size, this draw's sample offset, the channel mask it
-            // accumulates into, and the band's origin and height (ADR 0027).
-            winding: make("quorra winding", &[uniform_entry(0, 48, QUAD_UNIFORM)]),
-        }
+    /// Both halves of what a pipeline is built from, each created on first need.
+    ///
+    /// The destructuring is what lets one borrow of `state` produce two: `layouts` and
+    /// `modules` are disjoint fields, so both can be filled and then both returned.
+    fn base<'a>(
+        device: &wgpu::Device,
+        state: &'a mut StoreState,
+    ) -> Result<(&'a Layouts, &'a Modules), PipelineProblem> {
+        let StoreState {
+            layouts, modules, ..
+        } = state;
+        let layouts = layouts.get_or_insert_with(|| Layouts::new(device));
+        let modules = modules
+            .get_or_insert_with(|| Modules::new(device))
+            .as_ref()
+            .map_err(Clone::clone)?;
+        Ok((layouts, modules))
     }
 
-    // One match arm per pipeline kind: irreducible dispatch, each arm a handful of
-    // lines (clippy.toml's stated exception style).
-    #[allow(clippy::too_many_lines)]
+    /// Build one pipeline, or name what this adapter refused.
     fn compile(
         &self,
         state: &mut StoreState,
         kind: Kind,
         format: wgpu::TextureFormat,
-    ) -> wgpu::RenderPipeline {
-        struct Spec<'a> {
-            label: &'a str,
-            shader: &'a wgpu::ShaderModule,
-            layout: &'a wgpu::PipelineLayout,
-            /// The vertex entry point. Every lane shares `vs_main`; the winding pass
-            /// has two stages of its own in one module.
-            vertex: &'a str,
-            entry: &'a str,
-            blend: Option<wgpu::BlendState>,
-            buffer: Option<(u64, &'a [wgpu::VertexAttribute])>,
-            /// How the buffer advances. The lanes draw one quad per instance; the
-            /// winding pass draws real triangles, one vertex at a time.
-            step: wgpu::VertexStepMode,
-            /// Four-corner strip quads; `false` for the full-screen triangle passes.
-            strip: bool,
-        }
-        let base = Self::base(&self.device, state);
-        // Premultiplied over: (ONE, ONE_MINUS_SRC_ALPHA). Knockout erase scales the
-        // backdrop by (1 − shape): (ZERO, ONE_MINUS_SRC_ALPHA) with shape in the
-        // source alpha. Knockout add deposits shape·element: (ONE, ONE). ADR 0010.
-        let component = |src, dst| wgpu::BlendComponent {
-            src_factor: src,
-            dst_factor: dst,
-            operation: wgpu::BlendOperation::Add,
-        };
-        let both = |src, dst| wgpu::BlendState {
-            color: component(src, dst),
-            alpha: component(src, dst),
-        };
-        let over = both(wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrcAlpha);
-        let erase = both(wgpu::BlendFactor::Zero, wgpu::BlendFactor::OneMinusSrcAlpha);
-        let add = both(wgpu::BlendFactor::One, wgpu::BlendFactor::One);
-
-        let rect_attributes = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
-        let resolve_attributes = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x2];
-        let winding_attributes =
-            wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
-        let cover_attributes = wgpu::vertex_attr_array![
-            0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
-            3 => Float32x4, 4 => Float32x4
-        ];
-        let spec = match kind {
-            Kind::RectOver | Kind::RectErase | Kind::RectAdd => Spec {
-                label: "quorra rect",
-                shader: &base.rect_shader,
-                layout: &base.lane_layout,
-                vertex: "vs_main",
-                entry: if kind == Kind::RectErase {
-                    "fs_shape"
-                } else {
-                    "fs_main"
-                },
-                blend: Some(match kind {
-                    Kind::RectErase => erase,
-                    Kind::RectAdd => add,
-                    _ => over,
-                }),
-                buffer: Some((crate::encode::RECT_INSTANCE_STRIDE, &rect_attributes)),
-                step: wgpu::VertexStepMode::Instance,
-                strip: true,
-            },
-            Kind::CoverOver | Kind::CoverErase | Kind::CoverAdd => Spec {
-                label: "quorra coverage",
-                shader: &base.cover_shader,
-                layout: &base.lane_layout,
-                vertex: "vs_main",
-                entry: if kind == Kind::CoverErase {
-                    "fs_shape"
-                } else {
-                    "fs_main"
-                },
-                blend: Some(match kind {
-                    Kind::CoverErase => erase,
-                    Kind::CoverAdd => add,
-                    _ => over,
-                }),
-                buffer: Some((crate::encode::QUAD_INSTANCE_STRIDE, &cover_attributes)),
-                step: wgpu::VertexStepMode::Instance,
-                strip: true,
-            },
-            Kind::ImageOver | Kind::ImageErase | Kind::ImageAdd => Spec {
-                label: "quorra image",
-                shader: &base.image_shader,
-                layout: &base.image_pipe_layout,
-                vertex: "vs_main",
-                entry: if kind == Kind::ImageErase {
-                    "fs_shape"
-                } else {
-                    "fs_main"
-                },
-                blend: Some(match kind {
-                    Kind::ImageErase => erase,
-                    Kind::ImageAdd => add,
-                    _ => over,
-                }),
-                buffer: None,
-                step: wgpu::VertexStepMode::Instance,
-                strip: true,
-            },
-            Kind::ShadedOver | Kind::ShadedErase | Kind::ShadedAdd => Spec {
-                label: "quorra shading",
-                shader: &base.shading_shader,
-                layout: &base.shading_pipe_layout,
-                vertex: "vs_main",
-                entry: if kind == Kind::ShadedErase {
-                    "fs_shape"
-                } else {
-                    "fs_main"
-                },
-                blend: Some(match kind {
-                    Kind::ShadedErase => erase,
-                    Kind::ShadedAdd => add,
-                    _ => over,
-                }),
-                buffer: None,
-                step: wgpu::VertexStepMode::Instance,
-                strip: true,
-            },
-            Kind::Composite => Spec {
-                label: "quorra composite",
-                shader: &base.composite_shader,
-                layout: &base.composite_pipe_layout,
-                vertex: "vs_main",
-                entry: "fs_main",
-                blend: None, // REPLACE: the shader computes §11.3.6 wholly itself
-                buffer: None,
-                step: wgpu::VertexStepMode::Instance,
-                strip: false,
-            },
-            Kind::Reduce => Spec {
-                label: "quorra reduce",
-                shader: &base.reduce_shader,
-                layout: &base.reduce_pipe_layout,
-                vertex: "vs_main",
-                entry: "fs_main",
-                blend: None,
-                buffer: None,
-                step: wgpu::VertexStepMode::Instance,
-                strip: false,
-            },
-            Kind::Blit => Spec {
-                label: "quorra blit",
-                shader: &base.blit_shader,
-                layout: &base.blit_pipe_layout,
-                vertex: "vs_main",
-                entry: "fs_main",
-                blend: None,
-                buffer: None,
-                step: wgpu::VertexStepMode::Instance,
-                strip: false,
-            },
-            // Additive, and that is the whole mechanism: what lands in the sheet is
-            // the sum of every triangle's ±1, which is the winding number (ADR 0016).
-            Kind::Winding => Spec {
-                label: "quorra winding",
-                shader: &base.winding_shader,
-                layout: &base.winding_pipe_layout,
-                vertex: "vs_winding",
-                entry: "fs_winding",
-                blend: Some(add),
-                buffer: Some((crate::outline::WindingVertex::STRIDE, &winding_attributes)),
-                step: wgpu::VertexStepMode::Vertex,
-                strip: false,
-            },
-            // Additive as well, for a different reason: each pass carries four of the
-            // frame's samples and the sheet sums the groups.
-            Kind::WindingResolve => Spec {
-                label: "quorra winding resolve",
-                shader: &base.winding_shader,
-                layout: &base.resolve_pipe_layout,
-                vertex: "vs_resolve",
-                entry: "fs_resolve",
-                blend: Some(add),
-                buffer: Some((crate::pane::TILE_STRIDE, &resolve_attributes)),
-                step: wgpu::VertexStepMode::Instance,
-                strip: true,
-            },
-        };
+    ) -> Result<wgpu::RenderPipeline, PipelineProblem> {
+        let (layouts, modules) = Self::base(&self.device, state)?;
+        let spec = Spec::of(kind, layouts, modules);
         let buffers: Vec<Option<wgpu::VertexBufferLayout<'_>>> = spec
             .buffer
             .map(|(stride, attributes)| {
@@ -741,38 +426,170 @@ impl PipelineStore {
                 })]
             })
             .unwrap_or_default();
-        self.device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(spec.label),
-                layout: Some(spec.layout),
-                vertex: wgpu::VertexState {
-                    module: spec.shader,
-                    entry_point: Some(spec.vertex),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers: &buffers,
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: if spec.strip {
-                        wgpu::PrimitiveTopology::TriangleStrip
-                    } else {
-                        wgpu::PrimitiveTopology::TriangleList
+        let (pipeline, detail) = captured(&self.device, || {
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(spec.label),
+                    layout: Some(spec.layout),
+                    vertex: wgpu::VertexState {
+                        module: spec.shader,
+                        entry_point: Some(spec.vertex),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        buffers: &buffers,
                     },
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: spec.shader,
-                    entry_point: Some(spec.entry),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: spec.blend,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
+                    primitive: wgpu::PrimitiveState {
+                        topology: if spec.strip {
+                            wgpu::PrimitiveTopology::TriangleStrip
+                        } else {
+                            wgpu::PrimitiveTopology::TriangleList
+                        },
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: spec.shader,
+                        entry_point: Some(spec.entry),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: spec.blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        });
+        match detail {
+            Some(detail) => Err(PipelineProblem::Pipeline {
+                pipeline: spec.label,
+                format,
+                detail,
+            }),
+            None => Ok(pipeline),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)] // test-file policy: a fixture that cannot run must fail loudly
+mod tests {
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::{Kind, PipelineStore, WARM_FORMAT, WarmUpGuard};
+    use crate::device::Device;
+    use crate::error::PipelineProblem;
+    use crate::startup::{Options, WarmUp};
+
+    /// The software adapter, as everywhere in this crate's tests.
+    fn device() -> Device {
+        Device::headless(&Options {
+            adapter: Some("llvmpipe".into()),
+            ..Options::default()
+        })
+        .expect("llvmpipe is present wherever this suite runs")
+    }
+
+    /// **How long a wait is allowed to be before it counts as never ending.** Every
+    /// test here that could hang runs its wait on a thread and gives up after this, so
+    /// a regression fails the suite instead of wedging it — which is the trap the
+    /// defect these tests guard against actually sprang.
+    const PATIENCE: Duration = Duration::from_secs(30);
+
+    /// Call `wait` on a thread and insist it returns. Panics with `what` if it does
+    /// not, leaving the waiting thread behind: it is blocked on a `Condvar` and holds
+    /// nothing, so the process still exits.
+    fn within_patience<T: Send + 'static>(what: &str, wait: impl FnOnce() -> T + Send + 'static) {
+        let (done, waited) = mpsc::channel();
+        thread::spawn(move || {
+            drop(wait());
+            let _ = done.send(());
+        });
+        assert!(
+            waited.recv_timeout(PATIENCE).is_ok(),
+            "{what} did not return within {PATIENCE:?}"
+        );
+    }
+
+    /// The defect ADR 0042 closes, stated as the property that failed: a warm-up that
+    /// ends by panicking must still release everything waiting on it. Before the guard,
+    /// this test hung — which is the whole reason the wait is bounded.
+    #[test]
+    fn a_warm_up_that_panics_still_releases_its_waiters() {
+        let device = device();
+        let (gpu, _) = device.wgpu();
+        let store = PipelineStore::new(gpu.clone());
+        let panicking = {
+            let store = Arc::clone(&store);
+            thread::spawn(move || {
+                let _guard = WarmUpGuard::new(&store);
+                panic!("a driver error wgpu reports by panicking rather than by an error scope");
             })
+        };
+        assert!(panicking.join().is_err(), "the thread panicked as staged");
+        within_patience("wait_until_warm after a panicking warm-up", {
+            let store = Arc::clone(&store);
+            move || store.wait_until_warm()
+        });
+        assert_eq!(store.warm_up(), WarmUp::Abandoned);
+        assert!(store.warm_duration().is_none());
+    }
+
+    /// A store whose warm-up has not run yet keeps `wait_until_warm` waiting — the
+    /// other half of the property above, so that "it returns" is not passing by
+    /// returning always.
+    #[test]
+    fn a_running_warm_up_is_reported_as_running() {
+        let device = device();
+        let (gpu, _) = device.wgpu();
+        let store = PipelineStore::new(gpu.clone());
+        assert_eq!(store.warm_up(), WarmUp::Running);
+    }
+
+    /// A pipeline this adapter cannot build is an `Err` naming it, not a panic on
+    /// whichever thread asked (§5: refused, never survived).
+    ///
+    /// `Rgba8Snorm` is the instrument: WebGPU gives it no `RENDER_ATTACHMENT` usage, so
+    /// a colour target in that format is a validation error every backend agrees on,
+    /// reached without shipping a shader that does not parse.
+    #[test]
+    fn a_pipeline_the_adapter_refuses_is_an_error_and_not_a_panic() {
+        let device = device();
+        let (gpu, _) = device.wgpu();
+        let store = PipelineStore::new(gpu.clone());
+        let refused = store.get(Kind::Blit, wgpu::TextureFormat::Rgba8Snorm);
+        match refused {
+            Err(PipelineProblem::Pipeline {
+                pipeline, format, ..
+            }) => {
+                assert_eq!(pipeline, "quorra blit");
+                assert_eq!(format, wgpu::TextureFormat::Rgba8Snorm);
+            }
+            other => panic!("expected a named pipeline refusal, got {other:?}"),
+        }
+        // Nothing was cached for the format that failed, and the store still works:
+        // one refused format must not take the device with it.
+        store
+            .get(Kind::Blit, WARM_FORMAT)
+            .expect("the blit pipeline builds for the format the frame actually uses");
+    }
+
+    /// The refusal above must reach a caller in the words of the error, not only as a
+    /// variant — a person reading a log has to be able to attribute it.
+    #[test]
+    fn a_refusal_names_the_pipeline_and_the_format() {
+        let device = device();
+        let (gpu, _) = device.wgpu();
+        let store = PipelineStore::new(gpu.clone());
+        let Err(reason) = store.get(Kind::Composite, wgpu::TextureFormat::Rgba8Snorm) else {
+            panic!("Rgba8Snorm is not a renderable format");
+        };
+        let message = reason.to_string();
+        assert!(message.contains("quorra composite"), "{message}");
+        assert!(message.contains("Rgba8Snorm"), "{message}");
     }
 }

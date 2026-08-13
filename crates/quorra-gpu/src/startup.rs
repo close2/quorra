@@ -30,7 +30,40 @@
 
 use std::time::Duration;
 
-use crate::error::DeviceError;
+use crate::error::{DeviceError, PipelineProblem};
+
+/// Where the background pipeline warm-up has got to.
+///
+/// One running state and three ways of being finished, for the reason §5 gives about
+/// frames: a caller that waits for the warm set — by polling [`Device::warm_up`] or by
+/// blocking in [`Device::wait_until_warm`] — must be able to learn that it is never
+/// coming, and only one of the three finished states means it arrived.
+/// [`Device::is_warm`] is this question narrowed to that one.
+///
+/// [`Device::warm_up`]: crate::device::Device::warm_up
+/// [`Device::wait_until_warm`]: crate::device::Device::wait_until_warm
+/// [`Device::is_warm`]: crate::device::Device::is_warm
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WarmUp {
+    /// Still compiling. The device renders correctly meanwhile, compiling what a frame
+    /// needs on the spot.
+    Running,
+    /// The warm set exists; the duration is what compiling it cost, and it is what
+    /// [`StartupTimings::pipeline_compilation`] reports.
+    Warm(Duration),
+    /// This adapter refused a shader or a pipeline of the warm set, by name. Nothing
+    /// retries it, and a frame needing that pipeline is refused with the same reason.
+    Refused(PipelineProblem),
+    /// The warm-up thread ended without an answer, because it panicked.
+    ///
+    /// Reachable, and recorded rather than left as a wait nobody will end: this crate
+    /// pops a `wgpu` error scope for validation, but an out-of-memory or an internal
+    /// error is neither, and those still reach `wgpu`'s uncaptured-error handler —
+    /// which panics. A device in this state has no warm set and no reason to give for
+    /// it; the frame that next needs one of those pipelines compiles it itself and
+    /// reports whatever happens then.
+    Abandoned,
+}
 
 /// The default per-frame budget for scene-derived allocations, in bytes.
 ///
@@ -213,11 +246,13 @@ pub struct StartupTimings {
     pub adapter_selection: Duration,
     /// `request_device`: getting a queue on the chosen adapter.
     pub device_creation: Duration,
-    /// Compiling the warm pipeline set, on the background thread. `None` while that
-    /// is still in flight — poll [`Device::is_warm`], or read this again later. Not
-    /// part of [`StartupTimings::blocking_total`]: nothing blocks on it.
+    /// Compiling the warm pipeline set, on the background thread. `None` while that is
+    /// still in flight — poll [`Device::warm_up`], or read this again later — and
+    /// `None` for good if that warm-up was refused, which is why the state to poll is
+    /// [`WarmUp`] rather than a boolean. Not part of
+    /// [`StartupTimings::blocking_total`]: nothing blocks on it.
     ///
-    /// [`Device::is_warm`]: crate::device::Device::is_warm
+    /// [`Device::warm_up`]: crate::device::Device::warm_up
     pub pipeline_compilation: Option<Duration>,
 }
 

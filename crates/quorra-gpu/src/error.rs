@@ -123,6 +123,41 @@ pub enum ResourceProblem {
     RampColorInvalid,
 }
 
+/// Why a shader module or a render pipeline could not be built on this adapter.
+///
+/// Its own type rather than a [`RenderError`] variant's fields, and deliberately
+/// `Clone` and free of `wgpu`'s own error types: the pipeline store keeps one of these
+/// so that a refusal reaches *every* later frame with the same words, and the
+/// background warm-up thread has to carry it across a thread boundary to do that.
+///
+/// A shader that does not parse is this crate's own defect and not something a scene
+/// can provoke — but the same refusal is how a backend that will not accept one of our
+/// shaders, or a target format it cannot render to, arrives, and neither of those may
+/// be a panic on a thread nobody is listening to (§5 of the brief).
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PipelineProblem {
+    /// A WGSL module in `src/shaders/` was refused: a parse or validation failure that
+    /// this adapter's backend reported.
+    #[error("shader module '{shader}' was refused: {detail}")]
+    Shader {
+        /// The module's label, as `src/pipeline.rs` names it.
+        shader: &'static str,
+        /// What `wgpu` said, including the source span when it had one.
+        detail: String,
+    },
+    /// A render pipeline built from modules that parsed was itself refused — an entry
+    /// point, a vertex layout or a colour target this adapter will not accept.
+    #[error("pipeline '{pipeline}' for {format:?} was refused: {detail}")]
+    Pipeline {
+        /// The pipeline's label.
+        pipeline: &'static str,
+        /// The colour target format it was asked for.
+        format: wgpu::TextureFormat,
+        /// What `wgpu` said.
+        detail: String,
+    },
+}
+
 /// Why the surface could not provide a texture for this frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceProblem {
@@ -280,6 +315,15 @@ pub enum RenderError {
     UnknownMesh {
         /// The identifier that was referenced.
         mesh: quorra_scene::MeshId,
+    },
+    /// A pipeline this frame needs could not be built. The frame is refused rather
+    /// than drawn without the pass that pipeline was for — a page missing its blit is
+    /// exactly the plausible-looking wrong page §5 has a name for.
+    #[error("a pipeline this frame needs could not be built: {reason}")]
+    PipelineUnavailable {
+        /// Which module or pipeline, and what the adapter said.
+        #[from]
+        reason: PipelineProblem,
     },
     /// [`Frame::into_raster`](crate::frame::Frame::into_raster) on a frame rendered
     /// to a `Surface` or `Texture` target: those pixels are already where the caller

@@ -283,7 +283,7 @@ impl Executor<'_> {
             let (pipeline, compiled) = self
                 .device
                 .pipelines()
-                .get(Kind::Reduce, wgpu::TextureFormat::R8Unorm);
+                .get(Kind::Reduce, wgpu::TextureFormat::R8Unorm)?;
             if let Some(duration) = compiled {
                 self.phases.push(("pipeline compile (first use)", duration));
             }
@@ -390,7 +390,7 @@ impl Executor<'_> {
                 (backdrop, region),
                 (&view, region),
                 [0.0, 0.0],
-            );
+            )?;
             cleared = true;
         }
         let mut op_index = 0;
@@ -434,7 +434,7 @@ impl Executor<'_> {
                     let seed = (!child_op.isolated).then_some(&view);
                     let child =
                         self.render_plan(recorder, child_op.layer.saturating_add(1), seed)?;
-                    self.composite_child(recorder, &view, region, &child, &child_op);
+                    self.composite_child(recorder, &view, region, &child, &child_op)?;
                     // Every pass that reads the child has been recorded; a sibling may
                     // have its texture now.
                     self.pool.release(child.texture);
@@ -470,9 +470,9 @@ impl Executor<'_> {
         region: Region,
         child: &Rendered,
         op: &ChildOp,
-    ) {
+    ) -> Result<(), RenderError> {
         let Some(onto) = region.meet(child.region) else {
-            return;
+            return Ok(());
         };
         let copy = self.pool.acquire(self.device, onto.width, onto.height);
         let copy_view = view_of(&copy);
@@ -487,7 +487,7 @@ impl Executor<'_> {
             (accumulator, region),
             (&copy_view, onto),
             from,
-        );
+        )?;
         self.composite_pass(
             recorder,
             accumulator,
@@ -495,8 +495,9 @@ impl Executor<'_> {
             (&copy_view, onto),
             (&child.view(), child.region),
             op,
-        );
+        )?;
         self.pool.release(copy);
+        Ok(())
     }
 
     /// One render pass of lane batches and single-quad ops onto `view`. Public to
@@ -516,7 +517,7 @@ impl Executor<'_> {
         let globals = self.device.region_globals(self.region);
         let mut pipelines = HashMap::new();
         for kind in needed {
-            let (pipeline, compiled) = self.device.pipelines().get(kind, format);
+            let (pipeline, compiled) = self.device.pipelines().get(kind, format)?;
             if let Some(duration) = compiled {
                 self.phases.push(("pipeline compile (first use)", duration));
             }
@@ -669,7 +670,7 @@ impl Executor<'_> {
         backdrop: (&wgpu::TextureView, Region),
         child: (&wgpu::TextureView, Region),
         op: &ChildOp,
-    ) {
+    ) -> Result<(), RenderError> {
         let mask = self.mask_for(op.mask);
         let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
         let bind = self
@@ -678,7 +679,7 @@ impl Executor<'_> {
         let (pipeline, compiled) = self
             .device
             .pipelines()
-            .get(Kind::Composite, wgpu::TextureFormat::Rgba8Unorm);
+            .get(Kind::Composite, wgpu::TextureFormat::Rgba8Unorm)?;
         if let Some(duration) = compiled {
             self.phases.push(("pipeline compile (first use)", duration));
         }
@@ -703,6 +704,7 @@ impl Executor<'_> {
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
+        Ok(())
     }
 
     /// One rectangle of one texture copied into another, whole and unchanged.
@@ -725,14 +727,14 @@ impl Executor<'_> {
         src: (&wgpu::TextureView, Region),
         into: (&wgpu::TextureView, Region),
         at: [f32; 2],
-    ) {
+    ) -> Result<(), RenderError> {
         let (src, src_region) = src;
         let (into, into_region) = into;
         let bind = self.device.blit_bind(src, at, extent(src_region));
         let (pipeline, compiled) = self
             .device
             .pipelines()
-            .get(Kind::Blit, wgpu::TextureFormat::Rgba8Unorm);
+            .get(Kind::Blit, wgpu::TextureFormat::Rgba8Unorm)?;
         if let Some(duration) = compiled {
             self.phases.push(("pipeline compile (first use)", duration));
         }
@@ -757,6 +759,7 @@ impl Executor<'_> {
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
+        Ok(())
     }
 
     /// Blit the finished root onto the frame's target.
@@ -772,11 +775,11 @@ impl Executor<'_> {
         src_region: Region,
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
-    ) {
+    ) -> Result<(), RenderError> {
         let bind = self
             .device
             .blit_bind(src, from_root(src_region), extent(src_region));
-        let (pipeline, compiled) = self.device.pipelines().get(Kind::Blit, format);
+        let (pipeline, compiled) = self.device.pipelines().get(Kind::Blit, format)?;
         if let Some(duration) = compiled {
             self.phases.push(("pipeline compile (first use)", duration));
         }
@@ -800,6 +803,7 @@ impl Executor<'_> {
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
+        Ok(())
     }
 
     /// Patch the finished root onto the target: one scissored REPLACE blit per
@@ -817,11 +821,11 @@ impl Executor<'_> {
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
         rects: &[[u32; 4]],
-    ) {
+    ) -> Result<(), RenderError> {
         let bind = self
             .device
             .blit_bind(src, from_root(src_region), extent(src_region));
-        let (pipeline, compiled) = self.device.pipelines().get(Kind::Blit, format);
+        let (pipeline, compiled) = self.device.pipelines().get(Kind::Blit, format)?;
         if let Some(duration) = compiled {
             self.phases.push(("pipeline compile (first use)", duration));
         }
@@ -848,6 +852,7 @@ impl Executor<'_> {
             pass.set_scissor_rect(x, y, w, h);
             pass.draw(0..3, 0..1);
         }
+        Ok(())
     }
 
     /// Scissor an internal pass: to the damage bounding box when this frame patches, and

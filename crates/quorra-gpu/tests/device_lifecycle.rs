@@ -18,7 +18,7 @@
 // Test-file lint policy as in m1.rs.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use quorra_gpu::{Device, Options, Target, Viewport};
+use quorra_gpu::{Device, Options, Target, Viewport, WarmUp};
 use quorra_scene::{Affine, BlendMode, Color, Compose, GroupSpec, Point, Rect, SceneBuilder};
 
 /// Build a device on every adapter this machine has and drop each one at once —
@@ -72,6 +72,13 @@ fn a_warm_device_drops_too() {
     .expect("llvmpipe is present wherever this suite runs");
     device.wait_until_warm();
     assert!(device.is_warm());
+    // The warm set is real, so the state carries the duration it cost — the outcome a
+    // caller polling `warm_up` distinguishes from a refusal that will never become one
+    // (ADR 0042). `is_warm` is the same question with that distinction thrown away.
+    let WarmUp::Warm(compiled) = device.warm_up() else {
+        panic!("a device that reports itself warm has compiled the warm set");
+    };
+    assert_eq!(device.startup().pipeline_compilation, Some(compiled));
     drop(device);
 }
 

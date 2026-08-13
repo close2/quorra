@@ -42,7 +42,7 @@ use crate::pipeline::{PipelineStore, WARM_FORMAT};
 use crate::readback;
 use crate::report::{Report, ReportKind};
 use crate::resources::ResourceStore;
-use crate::startup::{self, Coverage, Options, PreSteps, StartupTimings};
+use crate::startup::{self, Coverage, Options, PreSteps, StartupTimings, WarmUp};
 use crate::surface::SurfaceState;
 use crate::target::Target;
 pub(crate) use crate::timing::PassQuery;
@@ -549,9 +549,26 @@ impl Device {
     /// Whether every pipeline of the warm set exists. A device that is not yet warm
     /// renders correctly and compiles what it needs on demand; a caller handing over
     /// from a CPU backend may prefer to wait for `true`.
+    ///
+    /// **A host that polls this must poll [`Device::warm_up`] instead**, or handle the
+    /// two outcomes in which `false` is the final answer: a warm-up whose pipelines
+    /// this adapter refused, and one that ended in a panic. `is_warm` is that question
+    /// narrowed to its one interesting answer, and a loop waiting for it to turn true
+    /// is a loop that can never end.
     #[must_use]
     pub fn is_warm(&self) -> bool {
-        self.pipelines.is_warm()
+        matches!(self.pipelines.warm_up(), WarmUp::Warm(_))
+    }
+
+    /// Where the background warm-up has got to, without blocking: still running, warm,
+    /// refused by name, or ended without an answer.
+    ///
+    /// The whole reason this exists beside [`Device::is_warm`] is §5's rule applied to
+    /// startup — a caller that waits for the warm set has to be able to learn that it
+    /// is never coming, and a boolean cannot say that.
+    #[must_use]
+    pub fn warm_up(&self) -> WarmUp {
+        self.pipelines.warm_up()
     }
 
     /// Make the frame-sized resources a target of this size will need, now (ADR 0035).
@@ -588,10 +605,14 @@ impl Device {
         self.warmed_layer = Some((width, height, layers::warm_texture(self, width, height)));
     }
 
-    /// Block until the warm set is compiled. Startup measurement support; a caller
+    /// Block until the warm-up has finished. Startup measurement support; a caller
     /// that does not care never needs to call it.
+    ///
+    /// Returns whatever became of the warm-up, not only success: a set this adapter
+    /// refused and a thread that panicked both end the wait, and [`Device::warm_up`]
+    /// then says which. The one thing this never does is not return (ADR 0042).
     pub fn wait_until_warm(&self) {
-        self.pipelines.wait_until_warm();
+        drop(self.pipelines.wait_until_warm());
     }
 
     /// What startup cost, one number per step that can regress on its own (§7).
@@ -857,7 +878,7 @@ impl Device {
                 &target_view,
                 target_format,
                 rects,
-            );
+            )?;
         } else if matches!(damage, DamagePlan::Patch { .. }) {
             // Every damage rect fell outside the target: nothing visible changed,
             // and honouring the list exactly means touching no pixel at all.
@@ -874,7 +895,7 @@ impl Device {
                 root.region(),
                 &target_view,
                 target_format,
-            );
+            )?;
         }
         executor.end_stamp(&mut recorder, &target_view);
         let layer_textures = u32::try_from(executor.pool.peak()).unwrap_or(u32::MAX);
@@ -1926,9 +1947,10 @@ impl Device {
 impl Drop for Device {
     fn drop(&mut self) {
         if let Some(handle) = self.warm_up.take() {
-            // The thread's body cannot panic — it compiles two pipelines and sets two
-            // fields — and a device being dropped has no one left to report to if it
-            // did. `is_warm` would stay false, which is the honest residue.
+            // The result is discarded because a device being dropped has no one left to
+            // report to. What the thread ended with is not lost, though: it records that
+            // before it leaves, whether it finished, was refused or panicked (ADR 0042),
+            // so `warm_up` still answers for as long as the device exists.
             drop(handle.join());
         }
     }
