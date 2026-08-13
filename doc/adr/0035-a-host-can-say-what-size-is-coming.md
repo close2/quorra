@@ -3,6 +3,12 @@
 Status: accepted, 2026-08-13. The rest of the caller's `QUORRA_FEEDBACK.md` §9, after
 ADR 0031 took the part that needed no API.
 
+> **Amended by ADR 0040, 2026-08-13.** The API below stands; **the measurement below does
+> not**. The allocation `warm_for` moves costs 0.06 ms on this driver, and 24.7 ms → 10.3
+> could not be reproduced in five configurations — including the one where the pool takes
+> the warmed texture. Do not quote the table under "What it buys". What a first frame does
+> pay, and where it went, is ADR 0040.
+
 ## Context
 
 §9 measures a device's first frame at 12 to 18 ms more than every frame after it, flat

@@ -30,6 +30,37 @@ non-isolated group takes its parent's whole region. The cost is that the orphane
 keeps `is_flat` false; `cull.rs` pins it. No corpus figure is claimed: the gate runs once
 over the parallel work.
 
+**What a first frame pays has no size** (2026-08-13, ADR 0040): `Device::warm_for` makes a
+target-sized texture, and four ADRs had made that the right size for almost no plan — since
+ADR 0039 the root is as big as what the page marks, so the warmed texture is claimed by two
+frames of the corpus in a hundred. Before teaching the pool to hand a smaller plan a larger
+texture — which would put a viewport in every pass — the thing the hint moves was priced.
+**A 46 MB texture is created in 0.06 ms** on RADV, which commits the memory when the GPU
+first touches it rather than when the allocation is made, so sixty microseconds is the whole
+budget of the mechanism. And calling `warm_for` is indistinguishable from not calling it in
+five configurations, *including* the one where the texture is claimed: **ADR 0035's
+24.7 ms → 10.3 does not reproduce**, at either page size, over 40 round-robin rounds.
+
+What a first frame does pay is 1.5 to 6 ms and it does **not** scale with the target —
+forty-four times the pixels buys about twice the excess on a flat page, and a page with
+groups pays the same 5 ms at six times the area. Having a group costs more than being
+large. The caller's §9 said "flat across target sizes" and was right; ADR 0031
+paraphrased it as "it scales with the target" and ADR 0035 built an API on the paraphrase.
+Where the excess actually is: a layered first frame reports **exactly two `pipeline compile
+(first use)` entries, in 40 frames of 40** — `Kind::Composite` and `Kind::Blit`, 0.75 ms at
+the minimum and 2.6 on the quietest run — and §9's reason for ruling compilation out
+(settling a second before the first render changes nothing) is sound about the warm-up
+thread and says nothing about a *first-use* compile inside the frame.
+
+So the warm set compiles four pipelines where it compiled two. **40 layered first frames of
+40 now report no compilation at all**, `is_warm` arrives about 1.1 ms later on the thread
+nobody blocks on, and `tests/device_lifecycle.rs` asserts the absence of the phase rather
+than a duration. `warm_for` keeps its signature and its texture with a doc comment that says
+what it is worth; the pool goes on matching on exact extent. What is left of §9 is that
+every pipeline is keyed by **target format** and a surface negotiates `Bgra8Unorm`, so a
+presenting host still compiles its lane inside its first frame — a window is needed to
+measure it, and this account has no X authority for one.
+
 **The root is as big as what the page marks** (2026-08-13, ADR 0039): ADR 0036 sized every
 plan to its bounds and exempted the root, on the grounds that the root *is* the target —
 which sounded like a definition and was a choice. `HANDOVER.md` said to measure the
@@ -128,7 +159,9 @@ frame that wants it takes it and no longer — keeping pairs *between* frames wa
 implemented and measured and moved nothing, so ADR 0012's per-frame pool stands. The
 shipped test asserts a property rather than a duration (a device warmed for this size, for
 another, or for none draws the same bytes), because a re-measurement under load read 19.9
-against 20.0 and that is contention, not a result.
+against 20.0 and that is contention, not a result. *(The API stands and the measurement
+does not: ADR 0040, the entry at the top of this file, could not reproduce 24.7 → 10.3 and
+priced the allocation at 0.06 ms.)*
 
 **A layer is as big as its plan** (2026-08-13, ADR 0036): the compositor allocated a
 layer as a pair of *full-target* textures whatever the group covered, and on the three
@@ -206,7 +239,10 @@ to warm**: it is inside `run_frame` and scales with the target, so it is page-si
 textures and the driver's first touch of a heap that size, and a warm-up thread cannot
 allocate them before the viewport exists. That makes the remainder an API question — a
 size hint, or `Device::warm_for` — and it is the caller's contract, so it is written down
-rather than taken.
+rather than taken. *(That reading of the remainder is wrong, and ADR 0040 says why: the
+excess does not scale with the target, and a third to a half of it on a page with a group
+was two pipelines compiled inside the frame — which the warm-up thread can and now does
+compile.)*
 
 **A clip chain is one region, so its links intersect** (2026-08-12, ADR 0030): the caller
 asked, in their `QUORRA_FEEDBACK.md` §18, what rule composes a chain here and whether

@@ -16,9 +16,11 @@ library as a git dependency, pinned by their `Cargo.lock`.
 each is: 0032 and 0033 answer the caller's §14.2, then the sheet packer (0034), the size
 hint (0035), layers sized to their plans (0036, in two commits), a scissor fix that 0036
 made necessary (no ADR — a defect), masks sized to their plans (0037, in two commits), and
-one accumulator per plan instead of a ping-pong pair (0038, in two commits), the root
-sized like every other plan (0039), and a child the encoder drops when its clip leaves it
-nothing to contribute (0041).
+one accumulator per plan instead of a ping-pong pair (0038, in two commits), the root sized
+like every other plan (0039), the compositor's two pipelines moved into the warm set after
+ADR 0035's first-frame number failed to reproduce (0040), a child the encoder drops when its
+clip leaves it nothing to contribute (0041), and the round cap that was drawing the
+half-disc *inside* the stroke — the caller's `QUORRA_FEEDBACK.md` §21.1.
 
 **What the caller must do to take it** is written for them in
 `/home/cl/projects/pdf-viewer/doc/QUORRA_UPGRADE.md`: one line for `GroupSpec::compose`, a
@@ -41,6 +43,18 @@ frame.) A frame would have to use more than one sheet, which means batches carry
 index and touching the encoder, the compositor and the device together: the largest and
 least certain item on this list.
 
+### 2. The warm set is compiled for one format, and a surface has another
+
+Every pipeline is keyed by `(kind, target format)`. The warm set compiles `Rgba8Unorm`;
+`SurfaceState::new` negotiates **`Bgra8Unorm`** where the adapter offers it. So a presenting
+host's first frame compiles the lane it draws with inside that frame — and the blit too, if
+the page has a group — which is the same cost ADR 0040 just took off a headless first frame,
+still sitting on the caller's launch path. The device knows the surface's format one line
+above `spawn_warm_up`, so the change is small; **what is missing is the measurement**, and
+it needs a window. This account has no X authority for the owner's display and `lavapipe`
+under `Xvfb` would time a software compiler rather than the one a viewer waits for, so this
+is the owner's number to take — after which the fix is a line.
+
 ### The memory path is finished, and this is what finished looks like
 
 ADRs 0036 to 0039 took a frame's internal memory apart and left no term with an obvious
@@ -61,11 +75,18 @@ Each of these has an ADR that states the measurement and why it was left:
 - **a pane is cut in sheet order** rather than by what packs tightest (0028);
 - **tiles are packed in encounter order**, and sorting them needs positions assigned after
   the walk — a two-pass encode (0034);
-- **`warm_for` warms a target-sized texture**, which is the right size for no plan of most
-  pages now: 0035 measured it (24.7 ms → 10.3) on a page whose root filled the target, 0036
-  made it wrong for groups, 0037 for masks and 0039 for the root of the three-quarters of
-  layered frames that mark less than all of their target. It is a hint and nothing depends
-  on it, and its test asserts a property rather than a duration;
+- **`warm_for` warms a target-sized texture, and that is worth 0.06 ms** — the whole
+  budget of the mechanism, because RADV commits a texture's memory when the GPU first
+  touches it and not when it is allocated. ADR 0040 re-measured 0035's 24.7 ms → 10.3 and
+  could not reproduce it in five configurations, including the one where the pool takes the
+  warmed texture. So the pool goes on matching on **exact** extent: serving a smaller plan
+  from a larger texture would buy 0.06 ms and would put a viewport in every pass, which is
+  ADR 0036's hazard with a new name;
+- **`warm_for` does not draw a warm frame**, which is the only warming that measured
+  anything at all: at the host's size it costs 4.7 ms at 1 191 × 1 684 and 22.3 at
+  2 448 × 4 752 on the calling thread to save between 0.5 and 2, and the part of the benefit
+  that is real is size-independent — a 64 × 64 warm frame buys three quarters of it. What
+  was attributable in it (two pipeline compilations) is in the warm set instead (0040);
 - **the mask's transparent value is computed on the CPU as well as in `reduce.wgsl`**,
   rather than fed into the reduce so the two cannot disagree — an independent
   implementation a test compares is stronger evidence than an agreement by construction
@@ -93,7 +114,18 @@ improvement measured at 24.7 ms → 10.3 on a quiet machine re-measured as 19.9 
 hour later with Firefox and a slicer running; the load average was 12. Check `uptime`
 before believing a timing, prefer minima over means, and make the *test* assert a property
 — a device warmed for one size, another, or none draws the same bytes — rather than a
-duration.
+duration. **That improvement was not real** (ADR 0040): 40 round-robin rounds, one device
+per process, could not find it at either page size, and the allocation it was credited to
+takes 0.06 ms. When a difference is a difference of wall clocks, run the configurations
+round-robin so drift falls on all of them, and look for a *direct* span — a duration inside
+`Timings`, an `Instant` around the one call — before believing the subtraction.
+
+**A first-use pipeline compile is invisible to "wait a while and try again".** §9 ruled
+compilation out of its first-frame excess because settling a second between bring-up and the
+first render changed nothing — which is true of the warm-up thread and says nothing about a
+pipeline compiled *inside* the frame that first needs it. Two of them were 2.6 ms of a
+layered first frame for three ADRs, and `Timings::phases` had been reporting them by name
+the whole time. When a first frame is slow, read its phases before theorising about memory.
 
 **The caller's corpus is part of a change, not a check after it.** Layers sized to their
 plans passed 208 unit tests and moved 31 corpus pages off *agree*, then 12 more, before it

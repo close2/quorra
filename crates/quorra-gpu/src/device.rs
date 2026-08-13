@@ -96,8 +96,9 @@ pub struct Device {
     coverage_samples: u32,
     /// The GPU lane's winding target, kept across frames (ADR 0016's measurement).
     winding_texture: crate::winding::WindingTexture,
-    /// A layer pair made ahead of the frame that will want it (ADR 0035), and held only
-    /// until that frame takes it — the pool itself stays per-frame, as ADR 0012 decided.
+    /// A layer texture made ahead of the frame that will want it (ADR 0035), and held
+    /// only until that frame takes it — the pool itself stays per-frame, as ADR 0012
+    /// decided. Worth 0.06 ms and no more; ADR 0040 measured it and says why it stays.
     warmed_layer: Option<(u32, u32, wgpu::Texture)>,
     timestamps: Option<TimestampSupport>,
     /// The frame's two timestamps and their buffers, kept for the device's life
@@ -556,18 +557,28 @@ impl Device {
 
     /// Make the frame-sized resources a target of this size will need, now (ADR 0035).
     ///
-    /// **What a first frame costs over its successors is mostly allocation**, and the
-    /// caller's `QUORRA_FEEDBACK.md` §9 measured it at 12 to 18 ms with the observation
-    /// that settling for a second between bring-up and the first render changes nothing:
-    /// the pipelines are ready long before anything asks. What is not ready is the
-    /// memory, and it cannot be until the size is known — which is why this takes the
-    /// size rather than happening on the warm-up thread by itself.
+    /// **What this is worth, measured** (ADR 0040): one texture of that size, whose
+    /// creation costs **0.04 to 0.06 ms** cold on RADV and a tenth of that warm. It is
+    /// not the fourteen milliseconds ADR 0035 recorded — that number could not be
+    /// reproduced in any of five configurations, including the one where the texture is
+    /// claimed, and the mechanism cannot buy more than the allocation it moves.
     ///
-    /// Call it where the device is constructed. §7's advice already puts that off the
-    /// critical path (the caller's `main` spawns a thread for it at its first line),
-    /// while a first frame is on that path by definition. Calling it again with the same
-    /// size is free; with a different one it replaces what it held, because a viewer
-    /// draws one size at a time and a zoom replaces it.
+    /// **What a first frame actually pays over its successors is 1.5 to 6 ms, and it does
+    /// not scale with the target**: a page with groups pays the same excess at
+    /// 1 191 × 1 684 and at 2 448 × 4 752, and a throwaway warm frame at 64 × 64 removes
+    /// three quarters of what one at the target's own size removes. On a page with a
+    /// group, 0.75 to 2.6 ms of it was two first-use pipeline compilations, and those are
+    /// compiled at construction now, on the thread nothing blocks on. What is left is the
+    /// driver's first submission, which no size hint reaches.
+    ///
+    /// So call it if you like — it costs a caller nothing and it is what a driver that
+    /// commits memory at allocation rather than at first use would want — but do not
+    /// budget a first frame around it. Call it where the device is constructed: §7's
+    /// advice already puts that off the critical path (the caller's `main` spawns a
+    /// thread for it at its first line), while a first frame is on that path by
+    /// definition. Calling it again with the same size is free; with a different one it
+    /// replaces what it held, because a viewer draws one size at a time and a zoom
+    /// replaces it.
     ///
     /// It is a hint and nothing depends on it: a frame of any size draws correctly
     /// whether or not this was called, and what a `Frame` reports about its own bytes is
@@ -578,13 +589,13 @@ impl Device {
         }
         // Held until the frame that wants it takes it, and no longer: the pool itself
         // stays per-frame, because ADR 0012 declined to keep one and nothing measured
-        // here overturns that. Making the texture and dropping it immediately was tried
-        // and measures the same on this driver (11.3 ms against 10.3 for a first frame),
-        // but it relies on the driver keeping a freed allocation warm, which is a promise
-        // no API makes.
+        // here overturns that.
         //
         // One texture, since ADR 0038: a plan accumulates in one rather than ping-ponging
-        // between two, so a target-sized one is the whole of what the root will ask for.
+        // between two. Since ADR 0039 the root is as big as what the page marks, so this
+        // is the size the root asks for on the 26 % of layered frames that mark their
+        // whole target and is dropped unused on the rest — which is a cost of 0.06 ms,
+        // and why ADR 0040 left the pool's exact-extent matching alone.
         self.warmed_layer = Some((width, height, layers::warm_texture(self, width, height)));
     }
 

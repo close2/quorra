@@ -83,7 +83,9 @@ the root only when the page marks its whole area — a quarter of layered frames
 hint and nothing depends on it (its shipped test asserts that a device warmed for this
 size, another, or none draws the same bytes), and the 91 % of frames that are flat never
 wanted it. But the number in ADR 0035 is a number about a page whose root filled the
-target, and it should not be quoted for one whose root does not.
+target, and it should not be quoted for one whose root does not. *(It should not be quoted
+at all: ADR 0040 re-measured it, including on a page whose root does fill the target, and
+priced the allocation at 0.06 ms.)*
 
 **The hand-off gained a branch per pixel of the target**, and the target is the biggest
 thing a frame touches. It replaces nothing — the old blit was an unconditional
