@@ -23,6 +23,7 @@ use crate::device::{Device, PassQuery};
 use crate::encode::{Batch, BatchKind, ChildOp, DrawStyle, Encoded, ImageOp, Op, ShadedOp};
 use crate::error::RenderError;
 use crate::layers::{LayerPool, Pair};
+use crate::mask::{MaskPlacement, Realised};
 use crate::pipeline::Kind;
 
 /// One drawable item of a pass: an instanced lane batch, or a single-quad op
@@ -67,8 +68,8 @@ pub(crate) struct Executor<'a> {
     /// The frame's layer textures, acquired per plan and given back when the parent's
     /// composite has read them (ADR 0020).
     pub pool: LayerPool,
-    /// Realised mask views by mask index.
-    pub mask_views: Vec<Option<wgpu::TextureView>>,
+    /// Realised masks by mask index: the R8 texture and where it sits (ADR 0037).
+    pub masks: Vec<Option<Realised>>,
     /// Lane instance buffers.
     pub rect_buffer: Option<wgpu::Buffer>,
     pub quad_buffer: Option<wgpu::Buffer>,
@@ -201,22 +202,24 @@ impl Executor<'_> {
             let Some(plan) = &self.encoded.mask_plans[index] else {
                 continue;
             };
-            // A soft mask's group renders on its own, onto transparency (§11.5).
-            // **At the target's size**, whatever the mask's own plan covers: the reduce
-            // below reads it at the fragment's own position and writes an R8 mask the
-            // whole frame samples in device space, and neither has an origin to subtract
-            // (ADR 0036 sizes the layer *pairs*; the masks are the next thing to take off
-            // that number). Rendering a mask small and reducing it as though it were
-            // whole moved 31 pages of the caller's corpus off *agree*, which is how this
-            // line came to be written.
-            let whole = Region::whole(self.width, self.height);
+            // A soft mask's group renders on its own, onto transparency (§11.5), at the
+            // target's size whatever it covers — ADR 0037 makes that its plan's rectangle
+            // instead, and this commit is the machinery at the size it already had, whose
+            // correctness is checkable by equality.
+            //
+            // **The reduce below needs no origin either way**: it reads the group at the
+            // fragment's own position and writes the R8 at the same one, and the two
+            // textures are the same size, so they map 1:1 wherever that rectangle sits.
+            // What the frame's five sampling sites need is where the R8 *is* and what
+            // surrounds it, which is the placement below.
+            let region = Region::whole(self.width, self.height);
             let group =
-                self.render_plan(recorder, plan.root.saturating_add(1), None, Some(whole))?;
+                self.render_plan(recorder, plan.root.saturating_add(1), None, Some(region))?;
             let group_view = group.view();
             let mask_texture = self.device.create_internal_texture(
                 "quorra soft mask",
-                self.width,
-                self.height,
+                region.width,
+                region.height,
                 wgpu::TextureFormat::R8Unorm,
             );
             let mask_view = mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -244,16 +247,41 @@ impl Executor<'_> {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.apply_scissor(&mut pass, whole);
+            self.apply_scissor(&mut pass, region);
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
             drop(pass);
             // The reduce has read it; the mask's own R8 is what outlives this loop.
             self.pool.release(group.pair);
-            self.mask_views[index] = Some(mask_view);
+            if let Some(slot) = self.masks.get_mut(index) {
+                *slot = Some(Realised {
+                    view: mask_view,
+                    placement: MaskPlacement {
+                        #[allow(clippy::cast_precision_loss)] // extents are exact in f32
+                        origin: [region.x as f32, region.y as f32],
+                        #[allow(clippy::cast_precision_loss)]
+                        size: [region.width as f32, region.height as f32],
+                        outside: crate::mask::transparent_value(plan),
+                    },
+                });
+            }
         }
         Ok(())
+    }
+
+    /// The mask an op names: the view to bind, and where its texels are.
+    ///
+    /// An op that names no mask — or one the frame did not realise — gets the 1 × 1
+    /// stand-in and [`MaskPlacement::ABSENT`], whose every sample is outside it and so
+    /// admits everything. The view still has to be bound: a layout entry is not optional.
+    fn mask_for(&self, mask: Option<u32>) -> (&wgpu::TextureView, MaskPlacement) {
+        let realised = mask
+            .and_then(|index| self.masks.get(index as usize))
+            .and_then(Option::as_ref);
+        realised.map_or((&self.dummy_view, MaskPlacement::ABSENT), |realised| {
+            (&realised.view, realised.placement)
+        })
     }
 
     /// Render one plan into a pair borrowed from the pool; returns the pair and which
@@ -504,14 +532,9 @@ impl Executor<'_> {
                     for kind in kinds.iter().flatten() {
                         want(&mut needed, *kind);
                     }
-                    let mask_view = image
-                        .mask
-                        .and_then(|m| self.mask_views[m as usize].as_ref())
-                        .unwrap_or(&self.dummy_view);
+                    let mask = self.mask_for(image.mask);
                     let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
-                    let bind = self
-                        .device
-                        .image_bind(image, self.region, mask_view, scratch)?;
+                    let bind = self.device.image_bind(image, self.region, mask, scratch)?;
                     ready.push(Ready::Single { kinds, bind });
                 }
                 RunOp::Shaded(shaded) => {
@@ -524,14 +547,11 @@ impl Executor<'_> {
                     for kind in kinds.iter().flatten() {
                         want(&mut needed, *kind);
                     }
-                    let mask_view = shaded
-                        .mask
-                        .and_then(|m| self.mask_views[m as usize].as_ref())
-                        .unwrap_or(&self.dummy_view);
+                    let mask = self.mask_for(shaded.mask);
                     let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
                     let bind = self
                         .device
-                        .shaded_bind(shaded, self.region, scratch, mask_view)?;
+                        .shaded_bind(shaded, self.region, scratch, mask)?;
                     ready.push(Ready::Single { kinds, bind });
                 }
             }
@@ -549,10 +569,7 @@ impl Executor<'_> {
         child_region: Region,
         op: &ChildOp,
     ) {
-        let mask_view = op
-            .mask
-            .and_then(|m| self.mask_views[m as usize].as_ref())
-            .unwrap_or(&self.dummy_view);
+        let mask = self.mask_for(op.mask);
         let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
         let bind = self.device.composite_bind(
             op,
@@ -560,7 +577,7 @@ impl Executor<'_> {
             child_region,
             backdrop,
             child,
-            mask_view,
+            mask,
             scratch,
         );
         let (pipeline, compiled) = self
@@ -772,18 +789,19 @@ impl Executor<'_> {
         })
     }
 
-    /// Build (once per mask) the lane bind group carrying atlas, scratch and the
-    /// mask's view.
+    /// Build (once per mask) the lane bind group carrying atlas, scratch, and the mask's
+    /// view together with where it sits.
+    ///
+    /// Keyed by the mask, which is what the placement is a property of — a batch changes
+    /// mask, the region it draws into does not (that is `Globals`, group 0).
     fn ensure_lane_bind(&mut self, mask: Option<u32>) {
         if self.lane_binds.contains_key(&mask) {
             return;
         }
-        let mask_view = mask
-            .and_then(|m| self.mask_views[m as usize].as_ref())
-            .unwrap_or(&self.dummy_view);
+        let (mask_view, placement) = self.mask_for(mask);
         let atlas = self.atlas_view.as_ref().unwrap_or(&self.dummy_view);
         let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
-        let bind = self.device.lane_bind(atlas, scratch, mask_view);
+        let bind = self.device.lane_bind(atlas, scratch, mask_view, placement);
         self.lane_binds.insert(mask, bind);
     }
 }

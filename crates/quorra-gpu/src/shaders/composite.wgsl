@@ -45,15 +45,32 @@ struct Params {
     child_origin: vec2f,
     child_size: vec2f,
     _pad2: vec2f,
+    // Where the group's soft mask sits (ADR 0037): its device corner in .xy, its size
+    // in texels in .zw.
+    mask_rect: vec4f,
+    // What that mask holds outside `mask_rect`, in .x: the reduce's output for a
+    // transparent pixel, since the mask's group marks nothing out there. A size of
+    // (0, 0) is an absent mask, and then this is 1 and admits everything.
+    mask_outside: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var backdrop_tex: texture_2d<f32>;
 @group(0) @binding(2) var src_tex: texture_2d<f32>;
-// The group's soft mask at device resolution (white 1x1 when absent).
+// The group's soft mask, realised at its own plan's rectangle.
 @group(0) @binding(3) var soft_mask_tex: texture_2d<f32>;
 // The frame's scratch image, holding the clip-residue mask when present.
 @group(0) @binding(4) var scratch_tex: texture_2d<f32>;
+
+// The soft mask at a device pixel (ADR 0037). Identical in all five shaders that
+// sample a mask; WGSL has no include, so the copies are kept textually the same.
+fn soft_mask_at(p: vec2f) -> f32 {
+    let local = p - params.mask_rect.xy;
+    if any(local < vec2f(0.0)) || any(local >= params.mask_rect.zw) {
+        return params.mask_outside.x;
+    }
+    return textureLoad(soft_mask_tex, vec2i(local), 0).r;
+}
 
 struct VsOut {
     @builtin(position) position: vec4f,
@@ -249,12 +266,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 
     // §11.4.5: the group's constant alpha; §11.6.4.3: its soft mask; ADR 0007: its
     // clip. All scale the group's premultiplied contribution uniformly.
-    let mask_dims = textureDimensions(soft_mask_tex);
-    // Device space: the mask is realised at the target's size, whatever region this
-    // pass writes into.
-    let mask_texel = min(vec2i(p), vec2i(mask_dims) - vec2i(1, 1));
-    let soft = textureLoad(soft_mask_tex, mask_texel, 0).r;
-    let w = params.alpha * soft * clip_coverage(p) * residue_value(p);
+    let w = params.alpha * soft_mask_at(p) * clip_coverage(p) * residue_value(p);
 
     // The staged stages, before §11.4.4's interpolation and §11.3.6's formula, because
     // they replace both: this group is one half of somebody's expansion of §11.4.6 and

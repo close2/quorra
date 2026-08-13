@@ -37,6 +37,7 @@ use crate::encode::{self, ChildOp, Encoded, ImageOp, MaskPlan, PaintSource, Shad
 use crate::error::{DeviceError, RenderError};
 use crate::frame::{Counters, Frame, Payload, Raster, TimingProvenance, Timings};
 use crate::layers::{self, LayerPool};
+use crate::mask::MaskPlacement;
 use crate::pipeline::{PipelineStore, WARM_FORMAT};
 use crate::readback;
 use crate::report::{Report, ReportKind};
@@ -830,7 +831,7 @@ impl Device {
             // in it: a plan's pair is otherwise created on its first acquire, so a flat
             // frame creates none at all (ADR 0020).
             pool: LayerPool::warmed(warmed),
-            mask_views: (0..mask_count).map(|_| None).collect(),
+            masks: (0..mask_count).map(|_| None).collect(),
             rect_buffer: upload.rect_instances,
             quad_buffer: upload.quad_instances,
             lane_binds: HashMap::new(),
@@ -1397,13 +1398,16 @@ impl Device {
         &self.queue
     }
 
-    /// The lane bind group: atlas, scratch, soft mask (dummies where absent).
+    /// The lane bind group: atlas, scratch, soft mask and where that mask sits
+    /// (dummies and [`MaskPlacement::ABSENT`] where there is none).
     pub(crate) fn lane_bind(
         &self,
         atlas: &wgpu::TextureView,
         scratch: &wgpu::TextureView,
         mask: &wgpu::TextureView,
+        placement: MaskPlacement,
     ) -> wgpu::BindGroup {
+        let uniform = self.quad_uniform("quorra mask placement", &placement.bytes());
         let layout = self.pipelines.textures_layout();
         self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quorra lane sources"),
@@ -1420,6 +1424,10 @@ impl Device {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(mask),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: uniform.as_entire_binding(),
                 },
             ],
         })
@@ -1438,10 +1446,10 @@ impl Device {
         child: Region,
         backdrop: &wgpu::TextureView,
         src: &wgpu::TextureView,
-        mask: &wgpu::TextureView,
+        mask: (&wgpu::TextureView, MaskPlacement),
         scratch: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
-        let mut bytes = [0_u8; 96];
+        let mut bytes = [0_u8; 128];
         bytes[0..4].copy_from_slice(&op.mode.to_le_bytes());
         bytes[4..8].copy_from_slice(&op.alpha.to_le_bytes());
         let non_isolated = u32::from(!op.isolated);
@@ -1473,9 +1481,10 @@ impl Device {
             let at = 64 + i * 4;
             bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
         }
+        bytes[96..128].copy_from_slice(&mask.1.bytes());
         let uniform = self.gpu.create_buffer(&wgpu::BufferDescriptor {
             label: Some("quorra composite params"),
-            size: 96,
+            size: 128,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1499,7 +1508,7 @@ impl Device {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(mask),
+                    resource: wgpu::BindingResource::TextureView(mask.0),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -1650,13 +1659,13 @@ impl Device {
 
     /// The image quad's uniform + bind group for one `ImageOp` (ISO 32000-2
     /// §8.9.5; layout mirrored in `image.wgsl`'s `Params`).
-    #[allow(clippy::arithmetic_side_effects)] // fixed-layout offsets in a 112-byte array
+    #[allow(clippy::arithmetic_side_effects)] // fixed-layout offsets in a 144-byte array
     #[allow(clippy::cast_precision_loss)] // target sizes are far below 2^24
     pub(crate) fn image_bind(
         &self,
         op: &ImageOp,
         region: Region,
-        mask: &wgpu::TextureView,
+        mask: (&wgpu::TextureView, MaskPlacement),
         scratch: &wgpu::TextureView,
     ) -> Result<wgpu::BindGroup, RenderError> {
         let (width, height) = (region.width, region.height);
@@ -1665,7 +1674,7 @@ impl Device {
                 image: ImageId(op.image),
             });
         };
-        let mut bytes = [0_u8; 112];
+        let mut bytes = [0_u8; 144];
         let mut put = |at: usize, v: f32| bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
         for (i, v) in op.inv.iter().enumerate() {
             put(i * 4, *v); // inv0 then inv1.xy
@@ -1699,6 +1708,7 @@ impl Device {
         // `fs_main` adds back.
         put(104, region.x as f32);
         put(108, region.y as f32);
+        bytes[112..144].copy_from_slice(&mask.1.bytes());
         let uniform = self.quad_uniform("quorra image params", &bytes);
         let layout = self.pipelines.image_layout();
         Ok(self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1719,7 +1729,7 @@ impl Device {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(mask),
+                    resource: wgpu::BindingResource::TextureView(mask.0),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -1731,14 +1741,14 @@ impl Device {
 
     /// The shading quad's uniform + bind group for one `ShadedOp` (ISO 32000-2
     /// §8.7.4.5; layout mirrored in `shading.wgsl`'s `Params`).
-    #[allow(clippy::arithmetic_side_effects)] // fixed-layout offsets in a 144-byte array
+    #[allow(clippy::arithmetic_side_effects)] // fixed-layout offsets in a 176-byte array
     #[allow(clippy::cast_precision_loss)] // extend bits ≤ 3; sizes far below 2^24
     pub(crate) fn shaded_bind(
         &self,
         op: &ShadedOp,
         region: Region,
         scratch: &wgpu::TextureView,
-        mask: &wgpu::TextureView,
+        mask: (&wgpu::TextureView, MaskPlacement),
     ) -> Result<wgpu::BindGroup, RenderError> {
         let (width, height) = (region.width, region.height);
         let paint_view = match op.paint {
@@ -1755,7 +1765,7 @@ impl Device {
                 view
             }
         };
-        let mut bytes = [0_u8; 144];
+        let mut bytes = [0_u8; 176];
         let mut put = |at: usize, v: f32| bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
         for (i, v) in op.inv.iter().enumerate() {
             put(i * 4, *v); // inv0 then inv1.xy
@@ -1793,6 +1803,7 @@ impl Device {
         // The attachment's device origin (ADR 0036).
         put(136, region.x as f32);
         put(140, region.y as f32);
+        bytes[144..176].copy_from_slice(&mask.1.bytes());
         let uniform = self.quad_uniform("quorra shading params", &bytes);
         let layout = self.pipelines.shading_layout();
         Ok(self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1813,7 +1824,7 @@ impl Device {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(mask),
+                    resource: wgpu::BindingResource::TextureView(mask.0),
                 },
             ],
         }))

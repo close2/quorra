@@ -24,13 +24,35 @@ struct Globals {
     origin: vec2f,
 }
 
+// Where the active soft mask sits and what it is elsewhere (ADR 0037). Per mask
+// rather than per region, which is why it is in this group and not in `Globals`:
+// the region is one pass's, and a pass draws batches under different masks.
+struct MaskPlace {
+    // Device corner of the mask's texel (0, 0) in .xy, its size in texels in .zw.
+    rect: vec4f,
+    // What the mask holds outside `rect`, in .x: the reduce's output for a
+    // transparent pixel, since the mask's group marks nothing out there. A size of
+    // (0, 0) is an absent mask, and then this is 1 and admits everything.
+    outside: vec4f,
+}
+
 @group(0) @binding(0) var<uniform> globals: Globals;
 // The persistent glyph atlas (M4) and the frame's scratch masks (M5), both r8unorm.
 @group(1) @binding(0) var atlas_tex: texture_2d<f32>;
 @group(1) @binding(1) var scratch_tex: texture_2d<f32>;
-// The active soft mask at device resolution (§11.5's soft clip), 1x1 white when
-// absent.
+// The active soft mask (§11.5's soft clip), realised at its own plan's rectangle.
 @group(1) @binding(2) var soft_mask_tex: texture_2d<f32>;
+@group(1) @binding(3) var<uniform> mask_place: MaskPlace;
+
+// The soft mask at a device pixel (ADR 0037). Identical in all five shaders that
+// sample a mask; WGSL has no include, so the copies are kept textually the same.
+fn soft_mask_at(p: vec2f) -> f32 {
+    let local = p - mask_place.rect.xy;
+    if any(local < vec2f(0.0)) || any(local >= mask_place.rect.zw) {
+        return mask_place.outside.x;
+    }
+    return textureLoad(soft_mask_tex, vec2i(local), 0).r;
+}
 
 struct Instance {
     // Integer device pixel of the tile's top-left corner.
@@ -89,10 +111,7 @@ fn coverage_at(in: VsOut) -> f32 {
     let overlap_min = max(in.clip.xy, p);
     let overlap_max = min(in.clip.zw, p + vec2f(1.0, 1.0));
     let extent = max(overlap_max - overlap_min, vec2f(0.0, 0.0));
-    let mask_dims = textureDimensions(soft_mask_tex);
-    let mask_texel = min(vec2i(p), vec2i(mask_dims) - vec2i(1, 1));
-    let mask = textureLoad(soft_mask_tex, mask_texel, 0).r;
-    return cov * extent.x * extent.y * mask;
+    return cov * extent.x * extent.y * soft_mask_at(p);
 }
 
 // Premultiplied source scaled by coverage; fixed-function (ONE, ONE_MINUS_SRC_ALPHA).

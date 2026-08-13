@@ -441,12 +441,20 @@ impl PipelineStore {
             ),
             textures: make(
                 "quorra lane sources",
-                &[texture_entry(0), texture_entry(1), texture_entry(2)],
+                // Binding 3 is the mask's placement (ADR 0037), which belongs to the
+                // mask rather than to the pass: `Globals` is written once per region and
+                // one region's pass draws batches under different masks.
+                &[
+                    texture_entry(0),
+                    texture_entry(1),
+                    texture_entry(2),
+                    uniform_entry(3, 32, wgpu::ShaderStages::FRAGMENT),
+                ],
             ),
             image: make(
                 "quorra image",
                 &[
-                    uniform_entry(0, 112, quad_uniform),
+                    uniform_entry(0, 144, quad_uniform),
                     filterable_entry(1),
                     sampler_entry(2),
                     texture_entry(3),
@@ -456,7 +464,7 @@ impl PipelineStore {
             shading: make(
                 "quorra shading",
                 &[
-                    uniform_entry(0, 144, quad_uniform),
+                    uniform_entry(0, 176, quad_uniform),
                     texture_entry(1),
                     texture_entry(2),
                     texture_entry(3),
@@ -465,7 +473,7 @@ impl PipelineStore {
             composite: make(
                 "quorra composite",
                 &[
-                    uniform_entry(0, 96, wgpu::ShaderStages::FRAGMENT),
+                    uniform_entry(0, 128, wgpu::ShaderStages::FRAGMENT),
                     texture_entry(1),
                     texture_entry(2),
                     texture_entry(3),

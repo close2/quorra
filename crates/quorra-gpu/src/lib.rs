@@ -26,10 +26,8 @@
 //!
 //! # State
 //!
-//! M1 is implemented: a device (headless and surface-attached), the three targets of
-//! §2.4, the analytic rectangle lane, timestamped frames, and the startup split of §7.
-//! [`atlas`] (M4) and [`mask`] (M6) still hold their contracts rather than code — see
-//! `doc/adr/0003` and `doc/PLAN.md` for which milestone fills which module.
+//! All nine milestones are implemented; `doc/PLAN.md`'s "Where we are" is the current
+//! state and `doc/adr/` the decisions behind it.
 
 #![forbid(unsafe_code)]
 

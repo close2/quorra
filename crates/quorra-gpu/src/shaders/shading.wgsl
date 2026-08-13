@@ -38,13 +38,31 @@ struct Params {
     // stated in device space and would otherwise be read at the wrong place. Zero for the
     // frame's root, which renders into the target itself.
     origin: vec2f,
+    // Where the active soft mask sits (ADR 0037): its device corner in .xy, its size
+    // in texels in .zw.
+    mask_rect: vec4f,
+    // What that mask holds outside `mask_rect`, in .x: the reduce's output for a
+    // transparent pixel, since the mask's group marks nothing out there. A size of
+    // (0, 0) is an absent mask, and then this is 1 and admits everything.
+    mask_outside: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
 // The ramp (RAMP_RESOLUTION x 1) for axial/radial, or the mesh raster.
 @group(0) @binding(1) var paint_tex: texture_2d<f32>;
 @group(0) @binding(2) var scratch_tex: texture_2d<f32>;
+// The active soft mask, realised at its own plan's rectangle.
 @group(0) @binding(3) var soft_mask_tex: texture_2d<f32>;
+
+// The soft mask at a device pixel (ADR 0037). Identical in all five shaders that
+// sample a mask; WGSL has no include, so the copies are kept textually the same.
+fn soft_mask_at(p: vec2f) -> f32 {
+    let local = p - params.mask_rect.xy;
+    if any(local < vec2f(0.0)) || any(local >= params.mask_rect.zw) {
+        return params.mask_outside.x;
+    }
+    return textureLoad(soft_mask_tex, vec2i(local), 0).r;
+}
 
 struct VsOut {
     @builtin(position) position: vec4f,
@@ -150,10 +168,7 @@ fn base_weight(p: vec2f) -> f32 {
     let overlap_min = max(params.clip.xy, p);
     let overlap_max = min(params.clip.zw, p + vec2f(1.0, 1.0));
     let extent = max(overlap_max - overlap_min, vec2f(0.0, 0.0));
-    let mask_dims = textureDimensions(soft_mask_tex);
-    let mask_texel = min(vec2i(p), vec2i(mask_dims) - vec2i(1, 1));
-    let mask = textureLoad(soft_mask_tex, mask_texel, 0).r;
-    return cov * extent.x * extent.y * mask;
+    return cov * extent.x * extent.y * soft_mask_at(p);
 }
 
 // The straight-alpha paint at the fragment, or a negative alpha sentinel where the

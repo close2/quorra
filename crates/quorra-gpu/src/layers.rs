@@ -181,18 +181,15 @@ pub(crate) fn internal_texture_bytes(
     height: u32,
     force_layers: bool,
 ) -> u64 {
-    let per_layer = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(4);
     let masks_used = encoded.mask_plans.iter().flatten().count() as u64;
     let needs_layers = !encoded.layers.is_empty() || masks_used > 0 || force_layers;
     if !needs_layers {
         return 0;
     }
     // Pairs by the heaviest chain of plans, each at its own size (ADR 0036); masks are
-    // still realised at the target's size, which is the next thing to take off this
-    // number.
-    peak_pair_bytes(encoded, width, height).saturating_add(masks_used.saturating_mul(per_layer / 4))
+    // still realised at the target's size, which is what ADR 0037 takes off this number.
+    let per_mask = u64::from(width).saturating_mul(u64::from(height));
+    peak_pair_bytes(encoded, width, height).saturating_add(masks_used.saturating_mul(per_mask))
 }
 
 #[cfg(test)]
