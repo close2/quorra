@@ -570,14 +570,16 @@ fn refusals_name_what_they_refuse() {
 #[test]
 fn frame_budget_refusal_precedes_target_binding() {
     let adapter = &vulkan_adapters()[0];
-    // One group at 64×64 needs 16 896 internal bytes: the root's texture at the target
-    // (16 384), the group's at the 8 × 8 it draws (256), and the copy of those same
-    // pixels its composite reads (256). A 16 KiB budget admits the scene's few hundred
-    // instance bytes through encode and refuses on the internal textures.
+    // This scene marks an 8 × 8 corner of a 64 × 64 target and nothing else, so **every**
+    // texture it needs is 8 × 8 — the root's too, since ADR 0039: 256 bytes for the root,
+    // 256 for the group, and 256 for the copy the group's composite reads. A 512-byte
+    // budget admits the scene's few hundred instance bytes through encode and refuses on
+    // the internal textures.
     //
     // It was 32 KiB while the same scene needed 65 536 — two plans, a ping-pong pair
-    // each, both at the target (ADR 0036 sized them, ADR 0038 halved them).
-    let budget = 16 * 1024;
+    // each, both at the target. 65 536 → 33 024 (ADR 0036 sized the group) → 16 896
+    // (ADR 0038 gave each plan one texture) → 768 (ADR 0039 sized the root).
+    let budget = 512;
     let mut device = Device::headless(&Options {
         adapter: Some(adapter.clone()),
         max_frame_bytes: budget,
@@ -615,14 +617,13 @@ fn frame_budget_refusal_precedes_target_binding() {
     ) {
         Err(RenderError::FrameBudgetExceeded { needed, budget: b }) => {
             assert_eq!(b, budget);
-            // Two plans, one texture each (ADR 0038) at their own sizes (ADR 0036): the
-            // root is the target, the group is the 8 × 8 it draws — plus the copy of
-            // those same 8 × 8 pixels its composite reads out of the root.
+            // Two plans, one texture each (ADR 0038) at their own sizes (ADR 0036,
+            // ADR 0039) — plus the copy of the 8 × 8 the group's composite covers.
             assert_eq!(
                 needed,
-                64 * 64 * 4 + 2 * 8 * 8 * 4,
-                "the root at the target's size, the group at its own, and the backdrop \
-                 its composite covers"
+                3 * 8 * 8 * 4,
+                "the root and the group at what they mark, and the backdrop the \
+                 composite covers"
             );
         }
         other => panic!("expected FrameBudgetExceeded before NoSurface, got {other:?}"),

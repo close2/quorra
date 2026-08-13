@@ -166,6 +166,51 @@ fn nesting_is_what_costs_a_texture() {
     }
 }
 
+/// **The root is as big as what the page marks too** (ADR 0039), and the hand-off from it
+/// to the target is where that could go wrong: the root's texture is smaller than the
+/// target, so the copy reads at a negative origin and must write *transparency* — not
+/// stale bytes, and not the nearest edge texel — everywhere the page marked nothing.
+///
+/// A page rendered onto transparency (§3) has exactly that outside its marks, so the test
+/// is that a corner-marking page equals itself pixel for pixel: inside the group's patch,
+/// and transparent in all three of the other quadrants.
+///
+/// `m8`'s `a_group_smaller_than_the_damage_patches_too` is the other half — the same copy
+/// under `LoadOp::Load`, where writing nothing would leave the *previous* frame's pixels
+/// inside a damage rectangle that a full redraw would have cleared.
+#[test]
+fn a_page_that_marks_a_corner_hands_off_only_that_corner() {
+    let mut device = device_with_budget(quorra_gpu::DEFAULT_MAX_FRAME_BYTES);
+    let mut builder = SceneBuilder::new();
+    builder
+        .group(group(BlendMode::Normal), |body| {
+            body.group(group(BlendMode::Multiply), |inner| {
+                inner.rect(patch(0), Affine::IDENTITY, colour(0), None, None)
+            })
+        })
+        .unwrap();
+    let (pixels, _) = render(&mut device, &builder.finish());
+
+    // patch(0) is the 8 × 8 at the origin, and nothing else is drawn at all.
+    let at = |x: u32, y: u32| {
+        let i = ((y * W + x) * 4) as usize;
+        [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+    };
+    assert_ne!(
+        at(4, 4),
+        [0, 0, 0, 0],
+        "the marked corner must hold the group's patch"
+    );
+    for (x, y) in [(40, 4), (4, 40), (40, 40), (W - 1, H - 1), (8, 8)] {
+        assert_eq!(
+            at(x, y),
+            [0, 0, 0, 0],
+            "({x}, {y}) is outside everything the page marked: transparent, whatever the \
+             root's texture happens to be sized"
+        );
+    }
+}
+
 /// The pixels are the point: reuse must be invisible. Sixteen sibling groups once needed
 /// sixty-six textures and now need four, and every patch must land exactly where the same
 /// group drew it alone.

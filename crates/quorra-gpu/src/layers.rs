@@ -163,7 +163,8 @@ fn peak_layer_bytes(encoded: &Encoded, width: u32, height: u32) -> u64 {
         let region = region_of(plan);
         chain[index] = bytes_of(region).saturating_add(heaviest_child(&chain, plan, region));
     }
-    let root_region = crate::compose::Region::whole(width, height);
+    // The root is as big as what the page marks, like every other plan (ADR 0039).
+    let root_region = region_of(&encoded.root);
     let below_root = heaviest_child(&chain, &encoded.root, root_region);
     // A soft mask realises before the root draws and gives its textures back to the same
     // pool, so the peak is the heavier of the two rather than their sum. A mask's group is

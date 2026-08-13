@@ -206,11 +206,29 @@ impl Rendered {
     pub(crate) fn view(&self) -> wgpu::TextureView {
         view_of(&self.texture)
     }
+
+    /// Where in device space that texture sits.
+    pub(crate) const fn region(&self) -> Region {
+        self.region
+    }
 }
 
 /// The default view of a whole texture, which is the only kind this crate makes.
 fn view_of(texture: &wgpu::Texture) -> wgpu::TextureView {
     texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// A region's extent, as the shader's floats.
+#[allow(clippy::cast_precision_loss)] // extents are exact in f32
+fn extent(region: Region) -> [f32; 2] {
+    [region.width as f32, region.height as f32]
+}
+
+/// The source origin a pass writing the whole target reads the root at: negative, because
+/// the root's texel (0, 0) is the *device* pixel `region.x, region.y` (ADR 0039).
+#[allow(clippy::cast_precision_loss)] // extents are exact in f32
+fn from_root(region: Region) -> [f32; 2] {
+    [-(region.x as f32), -(region.y as f32)]
 }
 
 /// The rectangle two scissor rectangles share, in the coordinates both are stated in.
@@ -343,15 +361,15 @@ impl Executor<'_> {
         } else {
             &self.encoded.layers[plan_index.saturating_sub(1)]
         };
-        // **As big as the plan, not as big as the target** (ADR 0036), with two
-        // exceptions. The root *is* the target. And a plan that is seeded takes its
-        // parent's region: §11.4.4's initial backdrop is copied in texel for texel, and
-        // the interpolation that later takes it back out (ADR 0019) is stated over the
-        // whole of the group's own buffer.
+        // **As big as the plan, not as big as the target** (ADR 0036) — the root
+        // included, since ADR 0039 measured what roots actually mark. One exception is
+        // left: a plan that is seeded takes its parent's region, because §11.4.4's initial
+        // backdrop is copied in texel for texel and the interpolation that later takes it
+        // back out (ADR 0019) is stated over the whole of the group's own buffer.
         //
         // A plan that marks nothing still needs somewhere for the composite to read, and
         // one texel is enough for a rectangle nobody samples.
-        let region = if plan_index == 0 || seed.is_some() {
+        let region = if seed.is_some() {
             self.region
         } else {
             Region::of(plan.bounds, self.width, self.height)
@@ -364,13 +382,14 @@ impl Executor<'_> {
         let outer = std::mem::replace(&mut self.region, region);
         let mut cleared = false;
         if let Some(backdrop) = seed {
+            // The parent's region and the child's are the same rectangle for a seeded
+            // plan, so this copy is texel for texel and reads nothing outside.
             self.copy_pass(
                 recorder,
                 "quorra seed non-isolated group",
-                backdrop,
+                (backdrop, region),
+                (&view, region),
                 [0.0, 0.0],
-                &view,
-                region,
             );
             cleared = true;
         }
@@ -465,10 +484,9 @@ impl Executor<'_> {
         self.copy_pass(
             recorder,
             "quorra composite backdrop",
-            accumulator,
+            (accumulator, region),
+            (&copy_view, onto),
             from,
-            &copy_view,
-            onto,
         );
         self.composite_pass(
             recorder,
@@ -692,7 +710,8 @@ impl Executor<'_> {
     /// Two callers. §11.4.4's **seed**: a non-isolated group's buffer begins as a copy of
     /// what is under it (ADR 0019), at the parent's own origin. And the **backdrop** a
     /// composite is about to cover, read from `from` in the accumulator because the copy
-    /// is the child's size rather than the plan's (ADR 0038).
+    /// is the child's size rather than the plan's (ADR 0038). Both read inside the source
+    /// by construction; `src_region` is what tells the shader so.
     ///
     /// A blit rather than `copy_texture_to_texture` because it needs no copy usage on
     /// every internal texture in the frame, and because it is scissored by the same rule
@@ -703,12 +722,13 @@ impl Executor<'_> {
         &mut self,
         recorder: &mut wgpu::CommandEncoder,
         label: &str,
-        src: &wgpu::TextureView,
-        from: [f32; 2],
-        into: &wgpu::TextureView,
-        into_region: Region,
+        src: (&wgpu::TextureView, Region),
+        into: (&wgpu::TextureView, Region),
+        at: [f32; 2],
     ) {
-        let bind = self.device.blit_bind(src, from);
+        let (src, src_region) = src;
+        let (into, into_region) = into;
+        let bind = self.device.blit_bind(src, at, extent(src_region));
         let (pipeline, compiled) = self
             .device
             .pipelines()
@@ -740,14 +760,22 @@ impl Executor<'_> {
     }
 
     /// Blit the finished root onto the frame's target.
+    ///
+    /// The root is as big as what the page marks (ADR 0039) and the target is the target,
+    /// so this is the one copy whose destination is larger than its source: the shader
+    /// reads at `p − root.origin` and writes transparency outside the root's rectangle,
+    /// which is what a page rendered onto transparency (§3) has there.
     pub(crate) fn blit_to_target(
         &mut self,
         recorder: &mut wgpu::CommandEncoder,
         src: &wgpu::TextureView,
+        src_region: Region,
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
     ) {
-        let bind = self.device.blit_bind(src, [0.0, 0.0]);
+        let bind = self
+            .device
+            .blit_bind(src, from_root(src_region), extent(src_region));
         let (pipeline, compiled) = self.device.pipelines().get(Kind::Blit, format);
         if let Some(duration) = compiled {
             self.phases.push(("pipeline compile (first use)", duration));
@@ -777,15 +805,22 @@ impl Executor<'_> {
     /// Patch the finished root onto the target: one scissored REPLACE blit per
     /// damage rectangle, over the target's retained contents (`LoadOp::Load`).
     /// Nothing outside the rectangles is written — that is the whole contract.
+    ///
+    /// Inside a rectangle but outside the root, the blit writes transparency (ADR 0039):
+    /// the contract is that a patched rectangle equals a full redraw, and a full redraw
+    /// leaves transparency where the page marked nothing.
     pub(crate) fn patch_to_target(
         &mut self,
         recorder: &mut wgpu::CommandEncoder,
         src: &wgpu::TextureView,
+        src_region: Region,
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
         rects: &[[u32; 4]],
     ) {
-        let bind = self.device.blit_bind(src, [0.0, 0.0]);
+        let bind = self
+            .device
+            .blit_bind(src, from_root(src_region), extent(src_region));
         let (pipeline, compiled) = self.device.pipelines().get(Kind::Blit, format);
         if let Some(duration) = compiled {
             self.phases.push(("pipeline compile (first use)", duration));

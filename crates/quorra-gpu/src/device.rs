@@ -853,6 +853,7 @@ impl Device {
             executor.patch_to_target(
                 &mut recorder,
                 &root.view(),
+                root.region(),
                 &target_view,
                 target_format,
                 rects,
@@ -867,7 +868,13 @@ impl Device {
         } else {
             executor.realise_masks(&mut recorder)?;
             let root = executor.render_plan(&mut recorder, 0, None)?;
-            executor.blit_to_target(&mut recorder, &root.view(), &target_view, target_format);
+            executor.blit_to_target(
+                &mut recorder,
+                &root.view(),
+                root.region(),
+                &target_view,
+                target_format,
+            );
         }
         executor.end_stamp(&mut recorder, &target_view);
         let layer_textures = u32::try_from(executor.pool.peak()).unwrap_or(u32::MAX);
@@ -1549,14 +1556,24 @@ impl Device {
         })
     }
 
-    /// The blit pass's bind group, reading from `origin` in the source (ADR 0038).
+    /// The blit pass's bind group: read from `origin` in a source `size` texels across,
+    /// and write transparency outside it (ADR 0038, ADR 0039).
     ///
-    /// `[0.0, 0.0]` is a copy between two textures of one size — the frame's hand-off to
-    /// its target, and §11.4.4's seed.
-    pub(crate) fn blit_bind(&self, src: &wgpu::TextureView, origin: [f32; 2]) -> wgpu::BindGroup {
+    /// `[0.0, 0.0]` is a copy between two textures of one size, which is §11.4.4's seed;
+    /// a positive origin is the composite's backdrop, a rectangle inside its parent; a
+    /// negative one is the frame's hand-off, whose destination is the whole target while
+    /// its source is only what the page marks.
+    pub(crate) fn blit_bind(
+        &self,
+        src: &wgpu::TextureView,
+        origin: [f32; 2],
+        size: [f32; 2],
+    ) -> wgpu::BindGroup {
         let mut bytes = [0_u8; 16];
         bytes[0..4].copy_from_slice(&origin[0].to_le_bytes());
         bytes[4..8].copy_from_slice(&origin[1].to_le_bytes());
+        bytes[8..12].copy_from_slice(&size[0].to_le_bytes());
+        bytes[12..16].copy_from_slice(&size[1].to_le_bytes());
         let uniform = self.quad_uniform("quorra blit placement", &bytes);
         let layout = self.pipelines.blit_layout();
         self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
