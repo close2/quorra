@@ -47,9 +47,11 @@ of somebody else's size (12 pages, a highlight sitting above its line). 884, the
 
 **What is left on this path** is `issue16287.pdf`'s 291 MB, and its arithmetic names both
 halves: 186 MB is the *root's* pair, which is target-sized because the root is the target,
-and 93 MB is four full-target soft masks. Sizing the masks is the next piece — it needs the
-reduce pass and every sampler of a mask to learn an origin, the same way the lanes just
-did.
+and 93 MB is four full-target soft masks. Sizing the masks is the next piece, and ADR 0036 now
+specifies it: the reduce needs no origin (two textures of one size map 1:1), five sampling
+sites move, the value *outside* a mask's rectangle is what the reduce writes for a
+transparent pixel rather than zero, and an absent mask becomes "size (0, 0), outside 1.0"
+instead of the 1 × 1 white texture a clamp reads today.
 
 **A host can say what size is coming** (2026-08-13, ADR 0035): the rest of the caller's
 §9. ADR 0031 moved 2.4 ms of a first frame to device construction and wrote down that
