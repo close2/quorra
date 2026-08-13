@@ -620,7 +620,7 @@ impl Executor<'_> {
         backdrop: &wgpu::TextureView,
         into: &wgpu::TextureView,
     ) {
-        let bind = self.device.blit_bind(backdrop);
+        let bind = self.device.blit_bind(backdrop, [0.0, 0.0]);
         let (pipeline, compiled) = self
             .device
             .pipelines()
@@ -659,7 +659,7 @@ impl Executor<'_> {
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
     ) {
-        let bind = self.device.blit_bind(src);
+        let bind = self.device.blit_bind(src, [0.0, 0.0]);
         let (pipeline, compiled) = self.device.pipelines().get(Kind::Blit, format);
         if let Some(duration) = compiled {
             self.phases.push(("pipeline compile (first use)", duration));
@@ -697,7 +697,7 @@ impl Executor<'_> {
         format: wgpu::TextureFormat,
         rects: &[[u32; 4]],
     ) {
-        let bind = self.device.blit_bind(src);
+        let bind = self.device.blit_bind(src, [0.0, 0.0]);
         let (pipeline, compiled) = self.device.pipelines().get(Kind::Blit, format);
         if let Some(duration) = compiled {
             self.phases.push(("pipeline compile (first use)", duration));

@@ -106,8 +106,10 @@ struct Base {
     composite_layout: wgpu::BindGroupLayout,
     /// Reduce pass: params (with the transfer table), src.
     reduce_layout: wgpu::BindGroupLayout,
-    /// Blit pass: src.
+    /// Blit pass: src, and where in it to read (ADR 0038).
     blit_layout: wgpu::BindGroupLayout,
+    /// The winding resolve's one sampled texture.
+    sampled_layout: wgpu::BindGroupLayout,
     /// Winding and resolve passes: the sheet's globals, read by both stages.
     winding_layout: wgpu::BindGroupLayout,
     lane_layout: wgpu::PipelineLayout,
@@ -120,6 +122,70 @@ struct Base {
     resolve_pipe_layout: wgpu::PipelineLayout,
 }
 
+/// A uniform buffer binding, with the size the shader's struct is — `min_binding_size`
+/// makes a layout that disagrees with its WGSL a validation error rather than a wrong
+/// picture.
+fn uniform_entry(
+    binding: u32,
+    size: u64,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: wgpu::BufferSize::new(size),
+        },
+        count: None,
+    }
+}
+
+/// A sampled texture read by `textureLoad` alone: exact fetches, no filtering (§4.6).
+fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// The image's texture, the one filterable binding in the crate: linear filtering is the
+/// placement's resolved decision (§4.5), so the hardware sampler must be usable on it.
+fn filterable_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// The sampler that goes with it.
+fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
+/// A uniform both stages read: a quad's, whose vertex stage places it and whose fragment
+/// stage shades it from the same numbers.
+const QUAD_UNIFORM: wgpu::ShaderStages =
+    wgpu::ShaderStages::VERTEX.union(wgpu::ShaderStages::FRAGMENT);
+
 /// The bind-group layouts alone, grouped so [`PipelineStore::base`] stays a
 /// composition of named parts.
 struct BindLayouts {
@@ -130,6 +196,7 @@ struct BindLayouts {
     composite: wgpu::BindGroupLayout,
     reduce: wgpu::BindGroupLayout,
     blit: wgpu::BindGroupLayout,
+    sampled: wgpu::BindGroupLayout,
     winding: wgpu::BindGroupLayout,
 }
 
@@ -286,6 +353,12 @@ impl PipelineStore {
         Self::base(&self.device, &mut state).blit_layout.clone()
     }
 
+    /// The winding resolve's source layout: one sampled texture.
+    pub(crate) fn sampled_layout(&self) -> wgpu::BindGroupLayout {
+        let mut state = self.lock();
+        Self::base(&self.device, &mut state).sampled_layout.clone()
+    }
+
     /// Whether the warm set — every pipeline a page of text needs — exists.
     pub(crate) fn is_warm(&self) -> bool {
         self.lock().warm
@@ -343,8 +416,10 @@ impl PipelineStore {
             let reduce_pipe_layout = pipe_layout("quorra reduce", &[&layouts.reduce]);
             let blit_pipe_layout = pipe_layout("quorra blit", &[&layouts.blit]);
             let winding_pipe_layout = pipe_layout("quorra winding", &[&layouts.winding]);
-            let resolve_pipe_layout =
-                pipe_layout("quorra winding resolve", &[&layouts.winding, &layouts.blit]);
+            let resolve_pipe_layout = pipe_layout(
+                "quorra winding resolve",
+                &[&layouts.winding, &layouts.sampled],
+            );
 
             Base {
                 rect_shader: module("quorra rect", include_str!("shaders/rect.wgsl")),
@@ -365,6 +440,7 @@ impl PipelineStore {
                 composite_layout: layouts.composite,
                 reduce_layout: layouts.reduce,
                 blit_layout: layouts.blit,
+                sampled_layout: layouts.sampled,
                 winding_layout: layouts.winding,
                 lane_layout,
                 image_pipe_layout,
@@ -379,49 +455,8 @@ impl PipelineStore {
     }
 
     /// Every bind-group layout, in one place: the binding tables the shaders in
-    /// `src/shaders/` assume, entry for entry.
+    /// `src/shaders/` assume, entry for entry. The entries themselves are named above.
     fn bind_layouts(device: &wgpu::Device) -> BindLayouts {
-        let uniform_entry =
-            |binding: u32, size: u64, visibility: wgpu::ShaderStages| wgpu::BindGroupLayoutEntry {
-                binding,
-                visibility,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(size),
-                },
-                count: None,
-            };
-        let texture_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        };
-        // The image's texture is the one filterable binding in the crate: linear
-        // filtering is the placement's resolved decision (§4.5), so the hardware
-        // sampler must be usable on it.
-        let filterable_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        };
-        let sampler_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: None,
-        };
-        let quad_uniform = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT;
         let make = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some(label),
@@ -437,7 +472,7 @@ impl PipelineStore {
                 // shading. Declaring it vertex-only is a validation error rather than a
                 // wrong picture, which is the good kind — wgpu refused every pipeline
                 // that read it from a fragment stage.
-                &[uniform_entry(0, 16, quad_uniform)],
+                &[uniform_entry(0, 16, QUAD_UNIFORM)],
             ),
             textures: make(
                 "quorra lane sources",
@@ -454,7 +489,7 @@ impl PipelineStore {
             image: make(
                 "quorra image",
                 &[
-                    uniform_entry(0, 144, quad_uniform),
+                    uniform_entry(0, 144, QUAD_UNIFORM),
                     filterable_entry(1),
                     sampler_entry(2),
                     texture_entry(3),
@@ -464,7 +499,7 @@ impl PipelineStore {
             shading: make(
                 "quorra shading",
                 &[
-                    uniform_entry(0, 176, quad_uniform),
+                    uniform_entry(0, 176, QUAD_UNIFORM),
                     texture_entry(1),
                     texture_entry(2),
                     texture_entry(3),
@@ -487,13 +522,25 @@ impl PipelineStore {
                     texture_entry(1),
                 ],
             ),
-            blit: make("quorra blit", &[texture_entry(0)]),
+            // The source origin (ADR 0038) is fragment-only: the pass is a full-screen
+            // triangle whose vertex stage knows nothing about where it reads.
+            blit: make(
+                "quorra blit",
+                &[
+                    texture_entry(0),
+                    uniform_entry(1, 16, wgpu::ShaderStages::FRAGMENT),
+                ],
+            ),
+            // The winding resolve's source. Identical in shape to `blit` before ADR 0038
+            // gave that one an origin, and it was the same layout for exactly that
+            // reason — a coincidence of shape, not a shared responsibility.
+            sampled: make("quorra sampled texture", &[texture_entry(0)]),
             // Both stages read it: the vertex stage for the sheet's size and the band
             // it is drawing, the resolve fragment for the fill rule, the sample grid and
             // the same band.
             // 48 bytes: the sheet size, this draw's sample offset, the channel mask it
             // accumulates into, and the band's origin and height (ADR 0027).
-            winding: make("quorra winding", &[uniform_entry(0, 48, quad_uniform)]),
+            winding: make("quorra winding", &[uniform_entry(0, 48, QUAD_UNIFORM)]),
         }
     }
 

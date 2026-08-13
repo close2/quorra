@@ -1552,16 +1552,29 @@ impl Device {
         })
     }
 
-    /// The blit pass's bind group.
-    pub(crate) fn blit_bind(&self, src: &wgpu::TextureView) -> wgpu::BindGroup {
+    /// The blit pass's bind group, reading from `origin` in the source (ADR 0038).
+    ///
+    /// `[0.0, 0.0]` is a copy between two textures of one size — the frame's hand-off to
+    /// its target, and §11.4.4's seed.
+    pub(crate) fn blit_bind(&self, src: &wgpu::TextureView, origin: [f32; 2]) -> wgpu::BindGroup {
+        let mut bytes = [0_u8; 16];
+        bytes[0..4].copy_from_slice(&origin[0].to_le_bytes());
+        bytes[4..8].copy_from_slice(&origin[1].to_le_bytes());
+        let uniform = self.quad_uniform("quorra blit placement", &bytes);
         let layout = self.pipelines.blit_layout();
         self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quorra blit"),
             layout: &layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(src),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform.as_entire_binding(),
+                },
+            ],
         })
     }
 
