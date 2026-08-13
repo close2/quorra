@@ -16,6 +16,25 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**The root is as big as what the page marks** (2026-08-13, ADR 0039): ADR 0036 sized every
+plan to its bounds and exempted the root, on the grounds that the root *is* the target —
+which sounded like a definition and was a choice. `HANDOVER.md` said to measure the
+corpus's distribution before lifting it, and warned that most pages mark most of their
+area. **The warning was wrong**: of the 77 frames at 4× that allocate a root texture at all
+(7.9 % — the rest are flat and allocate none), the median marks **0.64** of the target, p25
+is 0.15, and only 26 % mark all of it. The heaviest layered frame in the corpus marks
+**8.4 %**.
+
+So the root is sized like every other plan, and the hand-off is the one copy whose
+destination is larger than its source: it reads at a negative origin and writes
+**transparency** outside the root's rectangle — which is what a page rendered onto
+transparency (§3) has there, and what a damage patch's `LoadOp::Load` would otherwise leave
+as the *previous* frame's pixels inside a rectangle the contract says must equal a full
+redraw. Across every layered frame at scale 4 the priced total falls **2 259.2 MB →
+1 325.5 MB, 41.3 %**; `issue16287.pdf` at 4× goes **104 120 206 → 6 158 496 bytes**, having
+been 291 199 104 when this path started. The corpus is unchanged at both scales, per page
+and to the last digit.
+
 **A plan accumulates in one texture, not two** (2026-08-13, ADR 0038): `HANDOVER.md` put
 the root's ping-pong pair first — 91.6 % of `issue16287.pdf`'s frame at 4× — and asked
 whether it could ping-pong against the target. It cannot (a target is validated for

@@ -16,7 +16,8 @@ library as a git dependency, pinned by their `Cargo.lock`.
 each is: 0032 and 0033 answer the caller's §14.2, then the sheet packer (0034), the size
 hint (0035), layers sized to their plans (0036, in two commits), a scissor fix that 0036
 made necessary (no ADR — a defect), masks sized to their plans (0037, in two commits), and
-one accumulator per plan instead of a ping-pong pair (0038, in two commits).
+one accumulator per plan instead of a ping-pong pair (0038, in two commits), and the root
+sized like every other plan (0039).
 
 **What the caller must do to take it** is written for them in
 `/home/cl/projects/pdf-viewer/doc/QUORRA_UPGRADE.md`: one line for `GroupSpec::compose`, a
@@ -28,23 +29,7 @@ answered it.
 
 ## What to do next, in this order
 
-### 1. The root's own size
-
-**No corpus page is refused for *frame* bytes any more** (ADR 0037 took the last one), so
-this is no longer about refusals — it is about what every page with a group pays on every
-frame. After ADR 0038 there is exactly one full-target texture left in a frame:
-`issue16287.pdf` at 4× is 104 MB, of which **93 MB, 89 %, is the root plan's accumulator**,
-at the target's size because the root *is* the target.
-
-ADR 0036 sized every plan to the union of what it marks and exempted the root. Lifting that
-exemption is the same trick on the one plan that never got it, and it is untried. What it
-has to answer: `blit_to_target` must still clear the whole target and write the root's
-rectangle into the right place (the blit has a source origin since 0038, but not a
-destination one), and a damage patch must still touch nothing outside its rectangles. A
-page that marks its whole area gains nothing, and most pages do mark most of their area —
-so measure the corpus's *distribution* before building it, not one page.
-
-### 2. Multi-sheet passes
+### 1. Multi-sheet passes
 
 Three pages at 4× and one at scale 1 refuse with `ScratchExhausted` — the coverage sheet
 against the adapter's 16 384 limit, which is a different ceiling from the frame budget and
@@ -55,6 +40,18 @@ frame.) A frame would have to use more than one sheet, which means batches carry
 index and touching the encoder, the compositor and the device together: the largest and
 least certain item on this list.
 
+### The memory path is finished, and this is what finished looks like
+
+ADRs 0036 to 0039 took a frame's internal memory apart and left no term with an obvious
+factor in it. Every layered frame of the corpus at 4× prices **1 325.5 MB** in total, and
+the heaviest single one — 93.0 MB — is a page whose root marks its whole target, so that is
+the page's own size and nothing else. Nine frames in ten are flat and allocate no layer at
+all.
+
+Before opening this seam again, price it first. The probe is six lines in `Device::render`
+— a `Region::of(root.bounds)` and an `eprintln!` — in a `git worktree`, and it is what
+turned 0039 from a paragraph saying "not worth it" into a 41 % reduction.
+
 ### Recorded and deliberately not taken
 
 Each of these has an ADR that states the measurement and why it was left:
@@ -63,8 +60,11 @@ Each of these has an ADR that states the measurement and why it was left:
 - **a pane is cut in sheet order** rather than by what packs tightest (0028);
 - **tiles are packed in encounter order**, and sorting them needs positions assigned after
   the walk — a two-pass encode (0034);
-- **`warm_for` predicts the target's size**, which stops being the right size to warm once
-  layers are their plans' (0035; 0036 made it true and 0037 made it true of masks too);
+- **`warm_for` warms a target-sized texture**, which is the right size for no plan of most
+  pages now: 0035 measured it (24.7 ms → 10.3) on a page whose root filled the target, 0036
+  made it wrong for groups, 0037 for masks and 0039 for the root of the three-quarters of
+  layered frames that mark less than all of their target. It is a hint and nothing depends
+  on it, and its test asserts a property rather than a duration;
 - **the mask's transparent value is computed on the CPU as well as in `reduce.wgsl`**,
   rather than fed into the reduce so the two cannot disagree — an independent
   implementation a test compares is stronger evidence than an agreement by construction
@@ -75,7 +75,11 @@ Each of these has an ADR that states the measurement and why it was left:
   (0038);
 - **a child whose region misses its parent's is still rendered** before the composite
   discovers there is nothing to write; culling it belongs in the encoder, which is where
-  the clip that emptied it is known (0038).
+  the clip that emptied it is known (0038);
+- **the hand-off gained a branch per pixel of the target**, which is the biggest thing a
+  frame touches and is real work added to every layered frame; nothing surfaced above the
+  run-to-run spread on the corpus, and that is the honest statement rather than a claim
+  either way (0039).
 
 ## Traps
 
@@ -103,6 +107,12 @@ of every mean, worst tile and SSIM.
 one of three subtractions missing and drew nothing at all for every band after the first.
 The same change done as *plumbing at zero, verified by equality, then the value* caught a
 vertex-only uniform binding immediately and cost one extra commit.
+
+**A WGSL compile error hangs the test binary; it does not fail it.** A reserved keyword
+(`from`) in `blit.wgsl` made `create_shader_module` a validation error, which panicked the
+warm-up thread inside wgpu, and the process then sat forever instead of reporting anything.
+`cargo test` looks like an infinite hang with no output. Run the test binary directly with
+`--test-threads=1 --nocapture` and read the **last** lines: the panic is there.
 
 **A refusal is arithmetic, a fidelity difference is not.** Which pages refuse is
 machine-independent and can be reasoned about; which lane is faster is a property of the
