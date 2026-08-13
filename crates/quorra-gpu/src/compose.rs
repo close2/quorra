@@ -160,9 +160,14 @@ impl Region {
     /// A child's region and its parent's need not contain one another: a plan's bounds
     /// grow by each child's bounds **intersected with the clip the composite will apply**
     /// (`encode.rs`), so a child clipped down to a corner has a region larger than the
-    /// part of the parent it can reach. Their meeting is what the composite writes, and
-    /// `None` is a child the clip removed entirely — which composites to nothing, since
-    /// `clip_coverage` is zero everywhere it could have contributed.
+    /// part of the parent it can reach. Their meeting is what the composite writes.
+    ///
+    /// `None` is a child with no part of its parent to write, which composites to
+    /// nothing. The encoder emits no child that its clip empties (ADR 0041), so what is
+    /// left here is what the two roundings can produce on their own — this rounds pixel
+    /// regions out and clamps them to the target, where the encoder tests device-space
+    /// rectangles — and the answer the arithmetic gives for it is the same one:
+    /// `clip_coverage` is zero everywhere such a child could have contributed.
     pub(crate) fn meet(self, other: Self) -> Option<Self> {
         let [x, y, width, height] = self.scissor_in(other.rect());
         (width > 0 && height > 0).then_some(Self {
@@ -462,7 +467,10 @@ impl Executor<'_> {
     ///
     /// A child that meets its parent nowhere composites to nothing: the clip that shrank
     /// the parent's bounds is the same clip whose coverage the pass would multiply by, and
-    /// it is zero everywhere the child could have contributed.
+    /// it is zero everywhere the child could have contributed. **By the time a child is
+    /// rendered it is too late to save anything by discovering that** — the encoder drops
+    /// such a child before it becomes an op at all (ADR 0041), which is where the clip
+    /// that emptied it is known.
     fn composite_child(
         &mut self,
         recorder: &mut wgpu::CommandEncoder,

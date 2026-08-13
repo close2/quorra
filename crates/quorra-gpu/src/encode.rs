@@ -346,6 +346,8 @@ pub(crate) struct Encoded {
     pub segments: u32,
     /// Commands the walk rejected for reaching no pixel of the target.
     pub commands_culled: u32,
+    /// Child layers the walk built and then did not composite (ADR 0041).
+    pub layers_culled: u32,
     /// The GPU lane's triangles and tiles for this frame; empty under `Coverage::Cpu`
     /// and for every command that took the CPU lane anyway.
     pub winding: crate::winding::Sheet,
@@ -768,6 +770,9 @@ struct Encoder<'a> {
     segments: u64,
     /// Commands that could reach no pixel of the target, and so were never built.
     culled: u32,
+    /// Child layers whose clip left them no pixel to contribute, and so were never
+    /// composited (ADR 0041).
+    culled_layers: u32,
     atlas_pressure: bool,
     /// See `Encoded::atlas_requested_bytes`.
     atlas_requested_bytes: u64,
@@ -852,6 +857,7 @@ pub(crate) fn encode(
         used_meshes: HashSet::new(),
         segments: 0,
         culled: 0,
+        culled_layers: 0,
         atlas_pressure: false,
         atlas_requested_bytes: 0,
         scratch_charged: 0,
@@ -920,6 +926,7 @@ pub(crate) fn encode(
         atlas_distinct_keys: u32::try_from(encoder.atlas_keys.len()).unwrap_or(u32::MAX),
         segments: u32::try_from(encoder.segments).unwrap_or(u32::MAX),
         commands_culled: encoder.culled,
+        layers_culled: encoder.culled_layers,
         winding,
         atlas_pressure: encoder.atlas_pressure,
         atlas_requested_bytes: encoder.atlas_requested_bytes,
@@ -2438,22 +2445,106 @@ impl Encoder<'_> {
         match &op {
             Op::Image(image) => self.plan_mut().mark(image.dest),
             Op::Shaded(shaded) => self.plan_mut().mark(shaded.dest),
-            Op::Child(child) => {
-                // What the child will actually put on this plan: its own marks, held to
-                // the clip the composite applies to them.
-                if let Some(bounds) = self.layers.get(child.layer).and_then(|plan| plan.bounds) {
-                    let clip = child.clip_rect;
-                    self.plan_mut().mark([
-                        bounds[0].max(clip[0]),
-                        bounds[1].max(clip[1]),
-                        bounds[2].min(clip[2]),
-                        bounds[3].min(clip[3]),
-                    ]);
-                }
-            }
+            // A child is the one op that may not be appended at all, so it goes through
+            // the method that decides — from here, so that no call site can reach the
+            // plain append and skip the decision. `ChildOp` is `Copy`.
+            Op::Child(child) => return self.push_child(*child),
             Op::Draw(_) => {}
         }
         self.plan_mut().ops.push(op);
+    }
+
+    /// Append a child composite — unless the clip the composite will apply leaves the
+    /// child no pixel of this plan to contribute to, in which case it is dropped
+    /// (ADR 0041).
+    ///
+    /// The child's subtree has already been encoded when this runs, so what is saved is
+    /// its *rendering*: a layer texture, a pass per plan below it, and the composite
+    /// itself. [`Counters::layers_culled`] reports how often that happened, since a
+    /// saving nobody counts is a saving nobody can check.
+    ///
+    /// **Why dropping it draws the same frame**, for each of the four things
+    /// `composite.wgsl` can be. Write `b` for the backdrop the pass reads, `s` for the
+    /// child's pixel and `w` for the group's constant alpha times its soft mask, its
+    /// clip coverage and its clip residue. [`child_contribution`] establishes that at
+    /// every pixel of this plan either `s = 0` or `w = 0` — the first outside the
+    /// child's own marks, the second outside its clip rectangle — and both branches of
+    /// each formula land on `b`:
+    ///
+    /// - §11.3.6, the ordinary composite: `co = as·(1−ab)·Cs + ab·(1−as)·Cb +
+    ///   as·ab·B(Cb, Cs)` with `as = s.a·w = 0` is `ab·Cb`, and `ao = as + ab·(1−as)` is
+    ///   `ab`. The pass writes back the backdrop it read.
+    /// - §11.4.6 stage 1, the erase this group *is* when `compose == 1` (ADR 0033):
+    ///   `P' = (1 − f) × P` with the group's alpha as the shape `f`, so
+    ///   `b × (1 − s.a·w)` = `b`. **An erase weighted by a shape that is zero everywhere
+    ///   erases nothing** — which is the case worth stating, because a wrong cull here
+    ///   would show as a hole rather than as a missing mark.
+    /// - §11.4.6 stage 2, the deposit: `P' = P + S`, so `b + s·w` = `b`.
+    /// - §11.4.4, the non-isolated group: `mix(b, s, w)`. Its layer was seeded with a
+    ///   texel-for-texel copy of this very accumulator and nothing wrote the accumulator
+    ///   in between, so wherever the child marked nothing `s` *is* `b` and the
+    ///   interpolation is `b` for any weight; wherever `w` is zero it is `b` again.
+    ///   A seeded plan also takes its parent's region rather than its own (ADR 0038), so
+    ///   this is the one case the compositor's own `region.meet` can never catch, and
+    ///   the only place it can be caught is here.
+    ///
+    /// The staged pair and the non-isolated group cannot combine — `SceneBuilder`
+    /// refuses `DestOut`/`Plus` on a group that is not isolated, because §11.4.4's seed
+    /// would put the backdrop's alpha into the shape those stages read — so the second
+    /// and third bullets are always about a group whose `s` is its own marks alone.
+    ///
+    /// [`Counters::layers_culled`]: crate::frame::Counters::layers_culled
+    /// [`child_contribution`]: Self::child_contribution
+    fn push_child(&mut self, child: ChildOp) {
+        let Some(contribution) = self.child_contribution(&child) else {
+            self.culled_layers = self.culled_layers.saturating_add(1);
+            return;
+        };
+        self.plan_mut().mark(contribution);
+        self.plan_mut().ops.push(Op::Child(child));
+    }
+
+    /// The rectangle a child layer can put on the plan that composites it — its own
+    /// marks held to the clip the composite applies to them — or `None` when that
+    /// rectangle holds no device pixel.
+    ///
+    /// Two ways to reach `None`, and they are different situations with the same answer:
+    /// a child whose `bounds` are `None` **marked nothing at all**, so its texture is a
+    /// cleared texel and `s = 0` everywhere; a child whose bounds miss its clip marked
+    /// something the composite's `clip_coverage` will multiply by zero. The first is not
+    /// necessarily an empty group — an image with a singular placement and a fill of an
+    /// empty outline both draw nothing while being perfectly well-formed commands.
+    ///
+    /// **Emptiness is decided at pixel granularity, not on area**, because that is the
+    /// granularity the composite works at: `clip_coverage` is the overlap of the whole
+    /// pixel cell with the clip rectangle, and `s` is one colour for the whole pixel
+    /// however little of it the child marked. A pixel `p` can therefore carry a
+    /// contribution only if `[p, p+1)²` overlaps the bounds *and* the clip with positive
+    /// area, and the integers that do lie in `[floor(min), ceil(max))` for each — so the
+    /// test is that the intersection, rounded **out**, is empty. Rounding in instead
+    /// would drop a real half-covered edge pixel; testing positive area instead would
+    /// cull a bounds and a clip that abut at a fractional coordinate and still share a
+    /// pixel between them.
+    ///
+    /// A plan marks nothing outside its bounds — every lane's rectangle is exactly what
+    /// its instance draws (ADR 0036) — which is what makes `s = 0` outside them a fact
+    /// about the texture rather than a hope.
+    ///
+    /// The lookup below cannot miss: `plan_child` hands back the index it has just
+    /// pushed. Treating a miss as nothing to contribute is the safe direction regardless,
+    /// since the compositor indexes that list without a bound of its own.
+    fn child_contribution(&self, child: &ChildOp) -> Option<[f32; 4]> {
+        let bounds = self.layers.get(child.layer)?.bounds?;
+        let clip = child.clip_rect;
+        let reach = [
+            bounds[0].max(clip[0]),
+            bounds[1].max(clip[1]),
+            bounds[2].min(clip[2]),
+            bounds[3].min(clip[3]),
+        ];
+        let holds_a_pixel =
+            reach[0].floor() < reach[2].ceil() && reach[1].floor() < reach[3].ceil();
+        holds_a_pixel.then_some(reach)
     }
 
     /// Extend the current batch, or start a new one on any switch of lane, style or

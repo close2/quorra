@@ -189,6 +189,20 @@ pub struct Counters {
     /// fortieth of it, and this counts what that costs nothing. A frame drawing
     /// everything it was given reports zero; it is not an error either way.
     pub commands_culled: u32,
+    /// Child layers this frame built and then did not composite, because the clip the
+    /// composite would have applied left them no pixel to contribute (ADR 0041).
+    ///
+    /// A group, and every element with a non-Normal blend mode, is a child layer. This
+    /// counts the ones whose whole rendering — a texture, a pass for each plan beneath
+    /// them, and the composite itself — was skipped because the result was identical to
+    /// the backdrop it would have been written over.
+    ///
+    /// **Not [`commands_culled`](Counters::commands_culled)'s kind of saving**, which is
+    /// why it is a second counter rather than more of the first: a culled command never
+    /// had its geometry built, while a culled layer was encoded in full and only its
+    /// rendering was saved. Multiplying this by what a group costs to encode would
+    /// overstate it.
+    pub layers_culled: u32,
     /// Bytes scheduled for CPU→GPU transfer this frame.
     pub bytes_uploaded: u64,
     /// Internal layer textures this frame allocated — the compositor's peak, not its
