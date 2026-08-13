@@ -37,11 +37,14 @@ const SIZE: u32 = 64;
 const MARKED: f32 = 16.0;
 
 fn device() -> Device {
-    Device::headless(&Options {
+    device_with(&Options {
         adapter: Some("llvmpipe".into()),
         ..Options::default()
     })
-    .expect("llvmpipe is present wherever this suite runs")
+}
+
+fn device_with(options: &Options) -> Device {
+    Device::headless(options).expect("llvmpipe is present wherever this suite runs")
 }
 
 fn render(device: &mut Device, scene: &Scene) -> Vec<u8> {
@@ -200,6 +203,62 @@ fn a_mask_is_its_groups_reduction_inside_the_rectangle_it_marks() {
             "the mask changes value at its group's bottom edge under {kind:?}",
         );
     }
+}
+
+/// What the sizing is for: a page whose mask covers a corner is priced for that corner,
+/// and that price is what the frame then allocates.
+///
+/// The arithmetic is machine-independent, so it may be asserted exactly. On this 64 × 64
+/// target with a mask group over 16 × 16:
+///
+/// | | bytes |
+/// |---|---:|
+/// | the root's pair, `64 × 64 × 4 × 2` — always the target's, because the root *is* it | 32 768 |
+/// | the mask group's pair, `16 × 16 × 4 × 2`, released before the root draws | 2 048 |
+/// | the reduced mask, one R8 byte per texel of the same rectangle | 256 |
+/// | | **35 072** |
+///
+/// Where a mask realised at the whole target adds `64 × 64` = 4 096 instead of 256 and
+/// renders its group into a target-sized pair rather than a 16 × 16 one, for 68 608.
+/// A budget of 35 072 draws this page; one byte less refuses it, naming both numbers (§5).
+///
+/// The exactness is the point twice over. Before this sizing the two halves disagreed:
+/// a mask group's plan was *priced* at its own bounds and *realised* at the target, so
+/// the budget check passed a frame that then allocated sixteen times what it promised —
+/// count-then-allocate counting one thing and allocating another.
+///
+/// `issue16287.pdf` at 4× is the same sum on a 2 448 × 9 504 page: four masks, 93 MB.
+#[test]
+fn a_mask_over_a_corner_is_priced_for_the_corner() {
+    let scene = masked_page(MaskKind::Alpha, None, true);
+    let viewport = Viewport::full(SIZE, SIZE, Affine::IDENTITY);
+    let budgeted = |bytes: u64| {
+        device_with(&Options {
+            adapter: Some("llvmpipe".into()),
+            max_frame_bytes: bytes,
+            ..Options::default()
+        })
+    };
+
+    let mut exact = budgeted(35_072);
+    exact
+        .render(&scene, &viewport, Target::Readback)
+        .expect("a mask over a sixteenth of the page is priced for a sixteenth of it");
+
+    let mut short = budgeted(35_071);
+    let refused = short
+        .render(&scene, &viewport, Target::Readback)
+        .expect_err("one byte short of the frame's own arithmetic");
+    assert!(
+        matches!(
+            refused,
+            quorra_gpu::RenderError::FrameBudgetExceeded {
+                needed: 35_072,
+                budget: 35_071,
+            }
+        ),
+        "the refusal names what overflowed and by how much, got {refused:?}"
+    );
 }
 
 /// A mask whose group marks **nothing at all** is its transparent reduction everywhere —

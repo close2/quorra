@@ -853,7 +853,7 @@ impl Device {
             // every pass scissored to the damage bounding box, then replace exactly
             // the damage rectangles on the caller's retained texture.
             executor.realise_masks(&mut recorder)?;
-            let root = executor.render_plan(&mut recorder, 0, None, None)?;
+            let root = executor.render_plan(&mut recorder, 0, None)?;
             executor.patch_to_target(
                 &mut recorder,
                 &root.view(),
@@ -870,7 +870,7 @@ impl Device {
             executor.draw_pass(&mut recorder, &target_view, target_format, true, &root_ops)?;
         } else {
             executor.realise_masks(&mut recorder)?;
-            let root = executor.render_plan(&mut recorder, 0, None, None)?;
+            let root = executor.render_plan(&mut recorder, 0, None)?;
             executor.blit_to_target(&mut recorder, &root.view(), &target_view, target_format);
         }
         executor.end_stamp(&mut recorder, &target_view);

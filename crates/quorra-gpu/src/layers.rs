@@ -11,8 +11,9 @@
 //! **The lifetime is a depth, not a count.** The compositor walks the plan tree
 //! depth-first: a child's pair is needed while it renders and while the parent's
 //! composite pass reads it, and never again. Siblings therefore never need pairs at the
-//! same time. [`LayerPool`] hands out the same textures again, and [`peak_pairs`]
-//! prices exactly that peak, which is the depth of the plan tree.
+//! same time. [`LayerPool`] hands out the same textures again, and [`peak_pair_bytes`]
+//! prices exactly that peak — the heaviest root-to-leaf chain of the plan tree, once a
+//! pair is as big as its plan (ADR 0036).
 //!
 //! **Why handing back a texture with someone else's pixels in it is safe:** every
 //! acquired pair is fully written before it is read — the first draw pass clears it, a
@@ -72,7 +73,7 @@ impl LayerPool {
 
     /// A pair for a plan about to render. Reuses a released one when there is one;
     /// creates textures only when the depth of this frame's tree has grown past
-    /// anything seen so far, which is what [`peak_pairs`] priced.
+    /// anything seen so far, which is what [`peak_pair_bytes`] priced.
     /// **A pair is reused only at its own size** (ADR 0036). Before layers were sized to
     /// their plans every pair was the target's, and popping any free one was the same as
     /// popping a matching one; now it is not, and handing a plan a texture of somebody
@@ -103,25 +104,18 @@ impl LayerPool {
         self.free.push(pair);
     }
 
-    /// How many pairs existed at once at the worst moment — the number
-    /// [`peak_pairs`] predicted, and the one a `Frame` reports as
+    /// How many pairs existed at once at the worst moment — the depth
+    /// [`peak_pair_bytes`] walked, and the number a `Frame` reports as
     /// `Counters::layer_textures` (doubled: a pair is two textures).
     pub(crate) const fn peak(&self) -> usize {
         self.peak
     }
 }
 
-/// What the compositor's internal textures cost this frame, for the budget check
-/// before any of them exist (§5: count then allocate; the refusal names both numbers).
-///
-/// [`peak_pairs`] pairs of full-target RGBA, plus one R8 per used mask — a mask's
-/// reduced bytes are read by draws all over the frame, so unlike a layer it lives from
-/// its reduction to the last pass. `force_layers` prices the root pair a
-/// damage-patched flat frame renders through (ADR 0012).
 /// The bytes of layer pairs a frame will hold at its worst moment (ADR 0036).
 ///
-/// Not `peak_pairs × the target`, because a pair is as big as its plan: what is alive at
-/// once is a root-to-leaf *chain* of plans, each holding its own pair while its children
+/// Not `pairs × the target`, because a pair is as big as its plan: what is alive at once
+/// is a root-to-leaf *chain* of plans, each holding its own pair while its children
 /// render, so the peak is the heaviest chain rather than the deepest one. A plan with two
 /// children pays for the heavier of them, not for both, because a sibling's pair is
 /// released before the next is acquired.
@@ -137,8 +131,8 @@ fn peak_pair_bytes(encoded: &Encoded, width: u32, height: u32) -> u64 {
             .saturating_mul(4)
             .saturating_mul(2)
     };
-    // Backwards, so every child a plan names is already costed (`peak_pairs` states the
-    // ordering invariant this relies on).
+    // Backwards, so every child a plan names is already costed: the encoder appends a
+    // child's plan before the plan that names it, so a child's index is always the lower.
     let mut chain = vec![0_u64; encoded.layers.len()];
     for index in (0..encoded.layers.len()).rev() {
         let plan = &encoded.layers[index];
@@ -175,21 +169,45 @@ fn peak_pair_bytes(encoded: &Encoded, width: u32, height: u32) -> u64 {
     pair_bytes(&encoded.root, true).saturating_add(below_root.max(masks))
 }
 
+/// The bytes the frame's reduced soft masks hold at once.
+///
+/// One R8 texel per pixel of each mask's own plan (ADR 0037), and *summed* rather than
+/// maximised: unlike a layer pair, a mask lives from its reduction to the last pass that
+/// samples it, because draws all over the frame read it.
+fn mask_bytes(encoded: &Encoded, width: u32, height: u32) -> u64 {
+    encoded
+        .mask_plans
+        .iter()
+        .flatten()
+        .map(|mask| {
+            let bounds = encoded.layers.get(mask.root).and_then(|plan| plan.bounds);
+            let region = crate::compose::Region::of(bounds, width, height);
+            u64::from(region.width).saturating_mul(u64::from(region.height))
+        })
+        .fold(0, u64::saturating_add)
+}
+
+/// What the compositor's internal textures cost this frame, for the budget check before
+/// any of them exist (§5: count then allocate; the refusal names both numbers).
+///
+/// The heaviest chain of layer pairs, plus every reduced mask — each at its own plan's
+/// rectangle rather than at the target (ADR 0036 for the pairs, ADR 0037 for the masks).
+/// `force_layers` prices the root pair a damage-patched flat frame renders through
+/// (ADR 0012).
 pub(crate) fn internal_texture_bytes(
     encoded: &Encoded,
     width: u32,
     height: u32,
     force_layers: bool,
 ) -> u64 {
-    let masks_used = encoded.mask_plans.iter().flatten().count() as u64;
+    let masks_used = encoded.mask_plans.iter().flatten().count();
     let needs_layers = !encoded.layers.is_empty() || masks_used > 0 || force_layers;
     if !needs_layers {
         return 0;
     }
-    // Pairs by the heaviest chain of plans, each at its own size (ADR 0036); masks are
-    // still realised at the target's size, which is what ADR 0037 takes off this number.
-    let per_mask = u64::from(width).saturating_mul(u64::from(height));
-    peak_pair_bytes(encoded, width, height).saturating_add(masks_used.saturating_mul(per_mask))
+    // Pairs by the heaviest chain of plans and masks by their own rectangles, each at its
+    // own size (ADR 0036, ADR 0037).
+    peak_pair_bytes(encoded, width, height).saturating_add(mask_bytes(encoded, width, height))
 }
 
 #[cfg(test)]

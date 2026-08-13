@@ -202,19 +202,16 @@ impl Executor<'_> {
             let Some(plan) = &self.encoded.mask_plans[index] else {
                 continue;
             };
-            // A soft mask's group renders on its own, onto transparency (§11.5), at the
-            // target's size whatever it covers — ADR 0037 makes that its plan's rectangle
-            // instead, and this commit is the machinery at the size it already had, whose
-            // correctness is checkable by equality.
+            // A soft mask's group renders on its own, onto transparency (§11.5), at its
+            // own plan's rectangle like every other layer (ADR 0037).
             //
-            // **The reduce below needs no origin either way**: it reads the group at the
-            // fragment's own position and writes the R8 at the same one, and the two
-            // textures are the same size, so they map 1:1 wherever that rectangle sits.
-            // What the frame's five sampling sites need is where the R8 *is* and what
-            // surrounds it, which is the placement below.
-            let region = Region::whole(self.width, self.height);
-            let group =
-                self.render_plan(recorder, plan.root.saturating_add(1), None, Some(region))?;
+            // **The reduce below needs no origin**: it reads the group at the fragment's
+            // own position and writes the R8 at the same one, and the two textures are
+            // the same size, so they map 1:1 wherever that rectangle sits. What the
+            // frame's five sampling sites need is where the R8 *is* and what surrounds
+            // it, which is the placement below.
+            let group = self.render_plan(recorder, plan.root.saturating_add(1), None)?;
+            let region = group.region;
             let group_view = group.view();
             let mask_texture = self.device.create_internal_texture(
                 "quorra soft mask",
@@ -299,7 +296,6 @@ impl Executor<'_> {
         recorder: &mut wgpu::CommandEncoder,
         plan_index: usize,
         seed: Option<&wgpu::TextureView>,
-        forced: Option<Region>,
     ) -> Result<Rendered, RenderError> {
         let plan = if plan_index == 0 {
             &self.encoded.root
@@ -317,10 +313,10 @@ impl Executor<'_> {
         //
         // A plan that marks nothing still needs somewhere for the composite to read, and
         // one texel is enough for a rectangle nobody samples.
-        let region = match forced {
-            Some(region) => region,
-            None if plan_index == 0 || seed.is_some() => self.region,
-            None => Region::of(plan.bounds, self.width, self.height),
+        let region = if plan_index == 0 || seed.is_some() {
+            self.region
+        } else {
+            Region::of(plan.bounds, self.width, self.height)
         };
         let pair = self.pool.acquire(self.device, region.width, region.height);
         let outer = std::mem::replace(&mut self.region, region);
@@ -374,7 +370,7 @@ impl Executor<'_> {
                     // (ADR 0019), which is why this seeding is only half a change.
                     let seed = (!child_op.isolated).then_some(&backdrop_view);
                     let child =
-                        self.render_plan(recorder, child_op.layer.saturating_add(1), seed, None)?;
+                        self.render_plan(recorder, child_op.layer.saturating_add(1), seed)?;
                     let flip = 1_usize.saturating_sub(current);
                     let out_view = pair[flip].create_view(&wgpu::TextureViewDescriptor::default());
                     self.composite_pass(
