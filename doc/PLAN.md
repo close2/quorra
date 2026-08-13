@@ -2,7 +2,8 @@
 
 The brief is `RENDER_LIBRARY.md`; this file is the design in its current state of
 belief, the order of work, and the state of both. Bare section numbers (§) are the
-brief's; "clause" numbers are ISO 32000-2's.
+brief's; "clause" numbers are ISO 32000-2's. **Picking the work up cold: `HANDOVER.md`
+has what to do next and the traps that cost a round each.**
 
 The file has two parts. **Part 1 says how the library will work** — the architecture as
 currently believed, with each piece naming the measurement that could overturn it,
