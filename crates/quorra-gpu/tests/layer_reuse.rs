@@ -93,7 +93,17 @@ fn siblings(count: usize) -> Scene {
 fn nested(depth: usize) -> Result<Scene, SceneError> {
     fn nest(builder: &mut SceneBuilder, remaining: usize) -> Result<(), SceneError> {
         if remaining == 0 {
-            return builder.rect(patch(3), Affine::IDENTITY, colour(2), None, None);
+            // The whole target, not a patch: since ADR 0036 a layer is as big as its
+            // plan, so a chain of *small* groups costs almost nothing and this test would
+            // be about a budget nobody could exceed. What it is about is the chain, and
+            // the chain has to be made of full-sized plans to weigh anything.
+            return builder.rect(
+                Rect::new(Point::new(0.0, 0.0), Point::new(W as f32, H as f32)),
+                Affine::IDENTITY,
+                colour(2),
+                None,
+                None,
+            );
         }
         builder.group(group(BlendMode::Normal), |body| nest(body, remaining - 1))
     }
@@ -212,6 +222,9 @@ fn the_budget_prices_the_peak_and_still_refuses_past_it() {
 
     let (_, textures) = render(&mut device, &siblings(16));
     assert_eq!(textures, 6, "sixteen siblings fit a six-texture budget");
+    // And they fit it while each sibling's own layer is a patch rather than a page: the
+    // budget is spent on the chain that is alive at once, which ADR 0036 now prices at
+    // each plan's own size.
 
     // Four levels of nesting need ten textures, which this budget cannot hold.
     match device.render(

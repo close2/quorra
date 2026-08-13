@@ -1,13 +1,7 @@
 # ADR 0036 — A layer is as big as its plan
 
-Status: **accepted and landing in two commits**, 2026-08-13. The first is the origin, at
-zero everywhere and verified to change nothing; the second is the sizing that makes it
-non-zero. This file records the decision and says which half is in the tree, because a
-half-finished cross-cutting change that nobody wrote down is how a renderer acquires a
-defect nobody can attribute.
-
-**In the tree now:** the origin, plumbed through every stage that renders into a layer,
-with the value zero. **Not yet:** the plan bounds and the allocation that uses them.
+Status: accepted, 2026-08-13, and landed in two commits — the origin at zero everywhere
+(verified to change nothing), then the sizing that makes it non-zero.
 
 ## Context
 
@@ -53,10 +47,45 @@ It also caught the one thing a compiler cannot: the globals uniform was declared
 the **vertex stage only**, and reading it from a fragment stage is a validation error that
 refuses every pipeline. Better found by a zero-valued no-op than by a page drawn wrongly.
 
-The second commit computes the bounds and allocates from them, and its check is the corpus
-again — plus the three pages above, which should stop refusing.
+The second commit computes the bounds and allocates from them, and the corpus was again the
+check — and it earned its place twice, because the sizing shipped with two defects that no
+unit test in this tree would have caught.
 
-## What it will cost
+**A mask realised at its plan's size and reduced as though it were whole.** `realise_masks`
+renders the mask's group through the same `render_plan` and then reduces it into an R8
+mask the whole frame samples in device space; the reduce reads at the fragment's own
+position and has no origin to subtract. Thirty-one pages left *agree*. Mask plans now
+render at the target's size, which is what they did before this ADR — sizing them is the
+next thing to take off the number, and it needs the reduce and every sampler of a mask to
+learn an origin too.
+
+**A pair reused at somebody else's size.** `LayerPool::acquire` popped any free pair, which
+was the same as popping a matching one while every pair was the target's. Twelve pages,
+with a highlight sitting above the line it belongs to. The pool now matches on extent, and
+`layers.rs`'s own test states the property.
+
+Both were found by running the caller's corpus and comparing verdicts — 884, then 903,
+then 915 — which is the argument for the corpus being part of the change rather than a
+check after it.
+
+## What it bought
+
+The caller's corpus at scale 4, CPU lane, against the commit before:
+
+| | agree | differ | refused |
+|---|---:|---:|---:|
+| before | 925 | 16 | 11 |
+| after | **927** | 16 | **9** |
+
+`issue269_2.pdf` and `issue14297.pdf` refused for 296 and 321 MB of layer pairs and now
+draw — and agree with the oracle rather than merely drawing. At scale 1 nothing moves:
+915 / 37 / 5, the same pages for the same reasons.
+
+`issue16287.pdf` still refuses, at 291 MB, and its arithmetic says what is left: 186 MB is
+the **root's** pair, which is the target's size because the root *is* the target, and 93 MB
+is four full-target soft masks. Neither is a plan this ADR can shrink.
+
+## What it cost
 
 **Pages whose groups cover the whole target gain nothing**, and pay one subtraction per
 vertex and one addition per fragment for the privilege. That is the price of a uniform

@@ -150,6 +150,32 @@ pub(crate) struct Batch {
 #[derive(Debug, Default)]
 pub(crate) struct LayerPlan {
     pub ops: Vec<Op>,
+    /// Device-space union of everything this plan draws, including its children after
+    /// their own clips — `None` for a plan that marks nothing (ADR 0036).
+    ///
+    /// What the compositor allocates for it, rather than the whole target: on the three
+    /// corpus pages that refuse for bytes at 4× the plans cover 0.0 %, 0.1–0.4 % and
+    /// 4–6.5 % of the page. The root is the exception and is always the target's size,
+    /// because it *is* the target.
+    pub bounds: Option<[f32; 4]>,
+}
+
+impl LayerPlan {
+    /// Grow the plan's bounds to hold `rect`, which is already in device space.
+    fn mark(&mut self, rect: [f32; 4]) {
+        if !(rect[2] > rect[0] && rect[3] > rect[1]) {
+            return; // a mark with no area moves nothing
+        }
+        self.bounds = Some(match self.bounds {
+            None => rect,
+            Some(b) => [
+                b[0].min(rect[0]),
+                b[1].min(rect[1]),
+                b[2].max(rect[2]),
+                b[3].max(rect[3]),
+            ],
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -2327,6 +2353,8 @@ impl Encoder<'_> {
     }
 
     fn push_rect_instance(&mut self, rect: Rect, color: quorra_scene::Color, mask: Option<u32>) {
+        self.plan_mut()
+            .mark([rect.min.x, rect.min.y, rect.max.x, rect.max.y]);
         let premultiplied = [
             color.r * color.a,
             color.g * color.a,
@@ -2357,6 +2385,8 @@ impl Encoder<'_> {
         style: DrawStyle,
         mask: Option<u32>,
     ) {
+        self.plan_mut()
+            .mark([dest.x, dest.y, dest.x + width, dest.y + height]);
         let premultiplied = [
             color.r * color.a,
             color.g * color.a,
@@ -2396,7 +2426,33 @@ impl Encoder<'_> {
         }
     }
 
+    /// Append an op to the current plan, and grow the plan's bounds to hold it
+    /// (ADR 0036).
+    ///
+    /// Here rather than at the four call sites, because a site that forgot would give a
+    /// plan a texture too small for what it draws — and the mark would be *clipped*,
+    /// which is a plausible-looking wrong page rather than an error. A `Draw` is the
+    /// exception and marks as its instances are pushed: a batch is a range, and the
+    /// rectangles are the instances'.
     fn push_op(&mut self, op: Op) {
+        match &op {
+            Op::Image(image) => self.plan_mut().mark(image.dest),
+            Op::Shaded(shaded) => self.plan_mut().mark(shaded.dest),
+            Op::Child(child) => {
+                // What the child will actually put on this plan: its own marks, held to
+                // the clip the composite applies to them.
+                if let Some(bounds) = self.layers.get(child.layer).and_then(|plan| plan.bounds) {
+                    let clip = child.clip_rect;
+                    self.plan_mut().mark([
+                        bounds[0].max(clip[0]),
+                        bounds[1].max(clip[1]),
+                        bounds[2].min(clip[2]),
+                        bounds[3].min(clip[3]),
+                    ]);
+                }
+            }
+            Op::Draw(_) => {}
+        }
         self.plan_mut().ops.push(op);
     }
 

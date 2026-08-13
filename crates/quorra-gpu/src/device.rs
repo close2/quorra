@@ -32,7 +32,7 @@ use quorra_scene::{
 };
 
 use crate::atlas::AtlasStore;
-use crate::compose::{self, Executor};
+use crate::compose::{self, Executor, Region};
 use crate::encode::{self, ChildOp, Encoded, ImageOp, MaskPlan, PaintSource, ShadedOp};
 use crate::error::{DeviceError, RenderError};
 use crate::frame::{Counters, Frame, Payload, Raster, TimingProvenance, Timings};
@@ -157,7 +157,6 @@ enum DamagePlan {
 
 /// Phase 2's product: the frame's buffers and textures, scheduled for upload.
 struct Upload {
-    globals: wgpu::Buffer,
     /// `None` for a lane with nothing to draw — wgpu is never handed a zero-length
     /// buffer (§5: the `debug_layers` lesson).
     rect_instances: Option<wgpu::Buffer>,
@@ -703,7 +702,7 @@ impl Device {
         let paint_started = Instant::now();
         let paint_bytes = self.ensure_paint_textures(&encoded)?;
         let paint_time = paint_started.elapsed();
-        let upload = self.upload(&mut encoded, viewport)?;
+        let upload = self.upload(&mut encoded)?;
         let upload_time = upload.time.saturating_add(paint_time);
         let upload_bytes = upload.bytes.saturating_add(paint_bytes);
 
@@ -834,7 +833,6 @@ impl Device {
             mask_views: (0..mask_count).map(|_| None).collect(),
             rect_buffer: upload.rect_instances,
             quad_buffer: upload.quad_instances,
-            globals_bind: self.bind_globals(&upload.globals),
             lane_binds: HashMap::new(),
             scratch_view: upload.scratch_view.as_ref().map(|(_, view)| view.clone()),
             dummy_view,
@@ -843,6 +841,7 @@ impl Device {
             query,
             phases: Vec::new(),
             scissor: patch.map(|(bbox, _)| bbox),
+            region: Region::whole(width, height),
         };
         let target_view = bound
             .texture()
@@ -853,7 +852,7 @@ impl Device {
             // every pass scissored to the damage bounding box, then replace exactly
             // the damage rectangles on the caller's retained texture.
             executor.realise_masks(&mut recorder)?;
-            let root = executor.render_plan(&mut recorder, 0, None)?;
+            let root = executor.render_plan(&mut recorder, 0, None, None)?;
             executor.patch_to_target(
                 &mut recorder,
                 &root.view(),
@@ -870,7 +869,7 @@ impl Device {
             executor.draw_pass(&mut recorder, &target_view, target_format, true, &root_ops)?;
         } else {
             executor.realise_masks(&mut recorder)?;
-            let root = executor.render_plan(&mut recorder, 0, None)?;
+            let root = executor.render_plan(&mut recorder, 0, None, None)?;
             executor.blit_to_target(&mut recorder, &root.view(), &target_view, target_format);
         }
         executor.end_stamp(&mut recorder, &target_view);
@@ -1034,34 +1033,11 @@ impl Device {
     ///
     /// Whatever the GPU coverage lane refuses: its sheet is a texture like any other
     /// and is bounded by the adapter's dimension.
-    fn upload(
-        &mut self,
-        encoded: &mut Encoded,
-        viewport: &Viewport<'_>,
-    ) -> Result<Upload, RenderError> {
+    fn upload(&mut self, encoded: &mut Encoded) -> Result<Upload, RenderError> {
         let started = Instant::now();
-        let globals = self.gpu.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("quorra globals"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        {
-            // Exact for any plausible target size: f32 represents integers up to 2^24.
-            #[allow(clippy::cast_precision_loss)]
-            let values = [
-                viewport.width as f32,
-                viewport.height as f32,
-                0.0_f32,
-                0.0_f32,
-            ];
-            let mut bytes = [0_u8; 16];
-            for (slot, value) in bytes.chunks_exact_mut(4).zip(values) {
-                slot.copy_from_slice(&value.to_le_bytes());
-            }
-            self.queue.write_buffer(&globals, 0, &bytes);
-        }
-        let mut bytes = 16_u64;
+        // The globals are per plan now (ADR 0036) and made where the pass is recorded,
+        // so nothing is charged here for them.
+        let mut bytes = 0_u64;
         let make_instances = |gpu: &wgpu::Device, queue: &wgpu::Queue, label, data: &[u8]| {
             if data.is_empty() {
                 None
@@ -1096,7 +1072,6 @@ impl Device {
         self.flush_atlas_tiles(&mut bytes);
 
         Ok(Upload {
-            globals,
             rect_instances,
             quad_instances,
             scratch_view,
@@ -1327,6 +1302,30 @@ impl Device {
         Ok(())
     }
 
+    /// The globals a pass rendering into `region` reads: the attachment's size, and the
+    /// device corner its texel (0, 0) is (ADR 0036).
+    pub(crate) fn region_globals(&self, region: Region) -> wgpu::BindGroup {
+        #[allow(clippy::cast_precision_loss)] // extents inside f32's exact integer range
+        let values = [
+            region.width as f32,
+            region.height as f32,
+            region.x as f32,
+            region.y as f32,
+        ];
+        let mut bytes = [0_u8; 16];
+        for (slot, value) in bytes.chunks_exact_mut(4).zip(values) {
+            slot.copy_from_slice(&value.to_le_bytes());
+        }
+        let buffer = self.gpu.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quorra globals"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buffer, 0, &bytes);
+        self.bind_globals(&buffer)
+    }
+
     fn bind_globals(&self, globals: &wgpu::Buffer) -> wgpu::BindGroup {
         let layout = self.pipelines.globals_layout();
         self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1430,15 +1429,19 @@ impl Device {
     // Offsets below are literal layout positions inside fixed 64/288-byte arrays;
     // the index arithmetic cannot leave them.
     #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::too_many_arguments)] // one pass's inputs, named once at its one call
+    #[allow(clippy::cast_precision_loss)] // extents inside f32's exact integer range
     pub(crate) fn composite_bind(
         &self,
         op: &ChildOp,
+        region: Region,
+        child: Region,
         backdrop: &wgpu::TextureView,
         src: &wgpu::TextureView,
         mask: &wgpu::TextureView,
         scratch: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
-        let mut bytes = [0_u8; 64];
+        let mut bytes = [0_u8; 96];
         bytes[0..4].copy_from_slice(&op.mode.to_le_bytes());
         bytes[4..8].copy_from_slice(&op.alpha.to_le_bytes());
         let non_isolated = u32::from(!op.isolated);
@@ -1455,9 +1458,24 @@ impl Device {
             let at = 48 + i * 4;
             bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
         }
+        // Where this pass writes and where the child it reads lives (ADR 0036).
+        for (i, v) in [
+            region.x as f32,
+            region.y as f32,
+            child.x as f32,
+            child.y as f32,
+            child.width as f32,
+            child.height as f32,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at = 64 + i * 4;
+            bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        }
         let uniform = self.gpu.create_buffer(&wgpu::BufferDescriptor {
             label: Some("quorra composite params"),
-            size: 64,
+            size: 96,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1637,11 +1655,11 @@ impl Device {
     pub(crate) fn image_bind(
         &self,
         op: &ImageOp,
-        width: u32,
-        height: u32,
+        region: Region,
         mask: &wgpu::TextureView,
         scratch: &wgpu::TextureView,
     ) -> Result<wgpu::BindGroup, RenderError> {
+        let (width, height) = (region.width, region.height);
         let Some((_, image_view)) = self.image_textures.get(&op.image) else {
             return Err(RenderError::UnknownImage {
                 image: ImageId(op.image),
@@ -1677,6 +1695,10 @@ impl Device {
         put(92, if op.axis_aligned { 1.0 } else { 0.0 });
         put(96, width as f32);
         put(100, height as f32);
+        // The attachment's device origin (ADR 0036), which `vs_main` subtracts and
+        // `fs_main` adds back.
+        put(104, region.x as f32);
+        put(108, region.y as f32);
         let uniform = self.quad_uniform("quorra image params", &bytes);
         let layout = self.pipelines.image_layout();
         Ok(self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1714,11 +1736,11 @@ impl Device {
     pub(crate) fn shaded_bind(
         &self,
         op: &ShadedOp,
-        width: u32,
-        height: u32,
+        region: Region,
         scratch: &wgpu::TextureView,
         mask: &wgpu::TextureView,
     ) -> Result<wgpu::BindGroup, RenderError> {
+        let (width, height) = (region.width, region.height);
         let paint_view = match op.paint {
             PaintSource::Ramp(id) => {
                 let Some((_, view)) = self.ramp_textures.get(&id) else {
@@ -1768,6 +1790,9 @@ impl Device {
         }
         put(128, width as f32);
         put(132, height as f32);
+        // The attachment's device origin (ADR 0036).
+        put(136, region.x as f32);
+        put(140, region.y as f32);
         let uniform = self.quad_uniform("quorra shading params", &bytes);
         let layout = self.pipelines.shading_layout();
         Ok(self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {

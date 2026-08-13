@@ -28,6 +28,42 @@ shipped test asserts a property rather than a duration (a device warmed for this
 another, or for none draws the same bytes), because a re-measurement under load read 19.9
 against 20.0 and that is contention, not a result.
 
+**A layer is as big as its plan** (2026-08-13, ADR 0036): the compositor allocated a
+layer as a pair of *full-target* textures whatever the group covered, and on the three
+corpus pages that refuse for bytes at 4× the plans using them cover **0.0 %, 0.1–0.4 % and
+4–6.5 %** of the page — so a page was refused for a hundred times the memory its groups
+need. A plan's pair is now its own device bounds, with every stage that renders into it
+subtracting the origin and adding it back where a device coordinate is wanted. **At scale
+4: 925 agree / 16 differ / 11 refused becomes 927 / 16 / 9**, and the two pages that stop
+refusing *agree* with the oracle rather than merely drawing; at scale 1 nothing moves.
+
+It landed in two commits, and the split is the point: the first added the origin
+everywhere with the value **zero**, whose correctness is checkable by equality, and it
+immediately caught a globals uniform declared visible to the vertex stage alone. The
+second turned the origin on and the corpus caught two more — a mask realised at its plan's
+size and reduced as though it were whole (31 pages), and `LayerPool` handing a plan a pair
+of somebody else's size (12 pages, a highlight sitting above its line). 884, then 903, then
+915: the corpus was part of the change rather than a check after it.
+
+**What is left on this path** is `issue16287.pdf`'s 291 MB, and its arithmetic names both
+halves: 186 MB is the *root's* pair, which is target-sized because the root is the target,
+and 93 MB is four full-target soft masks. Sizing the masks is the next piece — it needs the
+reduce pass and every sampler of a mask to learn an origin, the same way the lanes just
+did.
+
+**A host can say what size is coming** (2026-08-13, ADR 0035): the rest of the caller's
+§9. ADR 0031 moved 2.4 ms of a first frame to device construction and wrote down that
+about six more scale with the target and cannot be warmed without knowing it. So a host
+says: `Device::warm_for(width, height)`, called where the device is constructed — off the
+critical path by §7's own advice, while a first frame is on it by definition. On a
+2 448 × 4 752 page with eight groups, six devices per configuration: **a first frame of
+24.7 ms becomes 10.3**, against steady frames of five. The pair it makes is held until the
+frame that wants it takes it and no longer — keeping pairs *between* frames was
+implemented and measured and moved nothing, so ADR 0012's per-frame pool stands. The
+shipped test asserts a property rather than a duration (a device warmed for this size, for
+another, or for none draws the same bytes), because a re-measurement under load read 19.9
+against 20.0 and that is contention, not a result.
+
 **A layer is as big as its plan** (2026-08-13, ADR 0036, **half landed**): the compositor
 allocates a layer pair at the *full target*, and on the three corpus pages that refuse for
 bytes at 4× the plans using them cover **0.0 %, 0.1–0.4 % and 4–6.5 %** of the page — 279,

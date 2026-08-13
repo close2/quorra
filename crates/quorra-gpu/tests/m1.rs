@@ -611,7 +611,13 @@ fn frame_budget_refusal_precedes_target_binding() {
     ) {
         Err(RenderError::FrameBudgetExceeded { needed, budget: b }) => {
             assert_eq!(b, budget);
-            assert_eq!(needed, 2 * 2 * 64 * 64 * 4, "two plans, one pair each");
+            // Two plans, one pair each — and since ADR 0036 a pair is as big as its
+            // plan: the root is the target, the group is the 8 × 8 it draws.
+            assert_eq!(
+                needed,
+                2 * 64 * 64 * 4 + 2 * 8 * 8 * 4,
+                "the root's pair at the target's size and the group's at its own"
+            );
         }
         other => panic!("expected FrameBudgetExceeded before NoSurface, got {other:?}"),
     }

@@ -465,7 +465,7 @@ impl PipelineStore {
             composite: make(
                 "quorra composite",
                 &[
-                    uniform_entry(0, 64, wgpu::ShaderStages::FRAGMENT),
+                    uniform_entry(0, 96, wgpu::ShaderStages::FRAGMENT),
                     texture_entry(1),
                     texture_entry(2),
                     texture_entry(3),

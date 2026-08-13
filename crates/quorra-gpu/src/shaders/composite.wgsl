@@ -33,6 +33,18 @@ struct Params {
     // Region empty (min >= max in `clip_residue_rect`) means no residue.
     residue: vec4f,
     residue_rect: vec4f,
+    // Where this pass's attachment and the child it reads sit in device space, and how
+    // big the child is (ADR 0036).
+    //
+    // A layer is allocated at its plan's bounds, so three spaces meet in this pass: the
+    // attachment (the parent's region), device space (what every rectangle in this
+    // uniform is stated in), and the child's own texture. `origin` converts the first to
+    // the second and `child_origin` the second to the third; outside the child's
+    // rectangle there is nothing to read, and nothing is what a plan contributes there.
+    origin: vec2f,
+    child_origin: vec2f,
+    child_size: vec2f,
+    _pad2: vec2f,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -225,15 +237,22 @@ fn residue_value(p: vec2f) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
-    let p = floor(in.position.xy);
-    let pi = vec2i(p);
+    // Device space, which is what `clip`, `residue` and the mask are stated in; the
+    // attachment's own texel is `pi` (ADR 0036).
+    let p = floor(in.position.xy) + params.origin;
+    let pi = vec2i(floor(in.position.xy));
     let b = textureLoad(backdrop_tex, pi, 0);
-    var s = textureLoad(src_tex, pi, 0);
+    // The child's texture holds only its own rectangle of the frame.
+    let child = p - params.child_origin;
+    let inside = all(child >= vec2f(0.0)) && all(child < params.child_size);
+    var s = select(vec4f(0.0), textureLoad(src_tex, vec2i(child), 0), inside);
 
     // §11.4.5: the group's constant alpha; §11.6.4.3: its soft mask; ADR 0007: its
     // clip. All scale the group's premultiplied contribution uniformly.
     let mask_dims = textureDimensions(soft_mask_tex);
-    let mask_texel = min(pi, vec2i(mask_dims) - vec2i(1, 1));
+    // Device space: the mask is realised at the target's size, whatever region this
+    // pass writes into.
+    let mask_texel = min(vec2i(p), vec2i(mask_dims) - vec2i(1, 1));
     let soft = textureLoad(soft_mask_tex, mask_texel, 0).r;
     let w = params.alpha * soft * clip_coverage(p) * residue_value(p);
 

@@ -72,7 +72,6 @@ pub(crate) struct Executor<'a> {
     /// Lane instance buffers.
     pub rect_buffer: Option<wgpu::Buffer>,
     pub quad_buffer: Option<wgpu::Buffer>,
-    pub globals_bind: wgpu::BindGroup,
     /// Lane bind groups per mask index (`None` key = no mask), built lazily.
     pub lane_binds: HashMap<Option<u32>, wgpu::BindGroup>,
     pub scratch_view: Option<wgpu::TextureView>,
@@ -86,6 +85,9 @@ pub(crate) struct Executor<'a> {
     /// pixel-local (a fragment reads attachments only at its own coordinate), so
     /// pixels outside the scissor are never needed and never paid for.
     pub scissor: Option<[u32; 4]>,
+    /// The region of the frame the pass being recorded renders into (ADR 0036): the
+    /// whole target while the root is drawing, a plan's own rectangle inside a group.
+    pub region: Region,
 }
 
 /// One plan's finished pixels, and the pair they are in — returned rather than the
@@ -93,6 +95,60 @@ pub(crate) struct Executor<'a> {
 pub(crate) struct Rendered {
     pair: Pair,
     current: usize,
+    /// Where in device space this plan's texture sits, which the composite that reads it
+    /// must subtract (ADR 0036).
+    region: Region,
+}
+
+/// A plan's rectangle of the frame: where its texture starts and how big it is.
+///
+/// Whole pixels, clamped to the target — a layer never holds anything outside the frame,
+/// because every lane already draws into `bounds ∩ clip ∩ target` and no further.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Region {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Region {
+    /// The whole target, which is what the root plan renders into.
+    pub(crate) const fn whole(width: u32, height: u32) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    /// The pixels a plan's device bounds cover, rounded out and clamped.
+    ///
+    /// A plan that marks nothing gets one texel rather than none: wgpu refuses a
+    /// zero-sized texture, and a composite still reads whatever the plan left — which
+    /// for an empty plan is a cleared texel that contributes nothing.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // clamped below
+    pub(crate) fn of(bounds: Option<[f32; 4]>, width: u32, height: u32) -> Self {
+        let Some([x0, y0, x1, y1]) = bounds else {
+            return Self {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            };
+        };
+        let left = x0.floor().max(0.0).min(f32::from(u16::MAX)) as u32;
+        let top = y0.floor().max(0.0).min(f32::from(u16::MAX)) as u32;
+        let right = (x1.ceil().max(0.0).min(f32::from(u16::MAX)) as u32).min(width);
+        let bottom = (y1.ceil().max(0.0).min(f32::from(u16::MAX)) as u32).min(height);
+        Self {
+            x: left.min(width.saturating_sub(1)),
+            y: top.min(height.saturating_sub(1)),
+            width: right.saturating_sub(left).max(1),
+            height: bottom.saturating_sub(top).max(1),
+        }
+    }
 }
 
 impl Rendered {
@@ -119,7 +175,16 @@ impl Executor<'_> {
                 continue;
             };
             // A soft mask's group renders on its own, onto transparency (§11.5).
-            let group = self.render_plan(recorder, plan.root.saturating_add(1), None)?;
+            // **At the target's size**, whatever the mask's own plan covers: the reduce
+            // below reads it at the fragment's own position and writes an R8 mask the
+            // whole frame samples in device space, and neither has an origin to subtract
+            // (ADR 0036 sizes the layer *pairs*; the masks are the next thing to take off
+            // that number). Rendering a mask small and reducing it as though it were
+            // whole moved 31 pages of the caller's corpus off *agree*, which is how this
+            // line came to be written.
+            let whole = Region::whole(self.width, self.height);
+            let group =
+                self.render_plan(recorder, plan.root.saturating_add(1), None, Some(whole))?;
             let group_view = group.view();
             let mask_texture = self.device.create_internal_texture(
                 "quorra soft mask",
@@ -179,13 +244,31 @@ impl Executor<'_> {
         recorder: &mut wgpu::CommandEncoder,
         plan_index: usize,
         seed: Option<&wgpu::TextureView>,
+        forced: Option<Region>,
     ) -> Result<Rendered, RenderError> {
         let plan = if plan_index == 0 {
             &self.encoded.root
         } else {
             &self.encoded.layers[plan_index.saturating_sub(1)]
         };
-        let pair = self.pool.acquire(self.device, self.width, self.height);
+        // **As big as the plan, not as big as the target** (ADR 0036), with two
+        // exceptions. The root *is* the target. And a plan that is seeded takes its
+        // parent's region: §11.4.4's initial backdrop is copied in texel for texel
+        // (`seed_layer`), and a copy between two rectangles of different origins is a
+        // blit with an offset — which `blit.wgsl` does not have, and which two other
+        // paths share. A non-isolated group is rare enough (ADR 0019 refuses most of
+        // them) that paying the target's size for one costs less than an offset nobody
+        // else needs.
+        //
+        // A plan that marks nothing still needs somewhere for the composite to read, and
+        // one texel is enough for a rectangle nobody samples.
+        let region = match forced {
+            Some(region) => region,
+            None if plan_index == 0 || seed.is_some() => self.region,
+            None => Region::of(plan.bounds, self.width, self.height),
+        };
+        let pair = self.pool.acquire(self.device, region.width, region.height);
+        let outer = std::mem::replace(&mut self.region, region);
         let mut current = 0_usize;
         let mut cleared = false;
         if let Some(backdrop) = seed {
@@ -236,7 +319,7 @@ impl Executor<'_> {
                     // (ADR 0019), which is why this seeding is only half a change.
                     let seed = (!child_op.isolated).then_some(&backdrop_view);
                     let child =
-                        self.render_plan(recorder, child_op.layer.saturating_add(1), seed)?;
+                        self.render_plan(recorder, child_op.layer.saturating_add(1), seed, None)?;
                     let flip = 1_usize.saturating_sub(current);
                     let out_view = pair[flip].create_view(&wgpu::TextureViewDescriptor::default());
                     self.composite_pass(
@@ -244,6 +327,7 @@ impl Executor<'_> {
                         &out_view,
                         &backdrop_view,
                         &child.view(),
+                        child.region,
                         &child_op,
                     );
                     // Every pass that reads the child has been recorded; a sibling may
@@ -257,7 +341,12 @@ impl Executor<'_> {
             let view = pair[current].create_view(&wgpu::TextureViewDescriptor::default());
             self.draw_pass(recorder, &view, wgpu::TextureFormat::Rgba8Unorm, true, &[])?;
         }
-        Ok(Rendered { pair, current })
+        self.region = outer;
+        Ok(Rendered {
+            pair,
+            current,
+            region,
+        })
     }
 
     /// One render pass of lane batches and single-quad ops onto `view`. Public to
@@ -272,6 +361,9 @@ impl Executor<'_> {
         ops: &[RunOp],
     ) -> Result<(), RenderError> {
         let (ready, needed) = self.prepare_run(ops)?;
+        // The attachment this pass writes is the current plan's region, and every lane
+        // maps device space through it (ADR 0036).
+        let globals = self.device.region_globals(self.region);
         let mut pipelines = HashMap::new();
         for kind in needed {
             let (pipeline, compiled) = self.device.pipelines().get(kind, format);
@@ -328,7 +420,7 @@ impl Executor<'_> {
             let draw =
                 |pass: &mut wgpu::RenderPass<'_>, kind: &Kind, range: std::ops::Range<u32>| {
                     pass.set_pipeline(&pipelines[kind]);
-                    pass.set_bind_group(0, &self.globals_bind, &[]);
+                    pass.set_bind_group(0, &globals, &[]);
                     pass.set_bind_group(1, bind, &[]);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     pass.draw(0..4, range);
@@ -390,13 +482,9 @@ impl Executor<'_> {
                         .and_then(|m| self.mask_views[m as usize].as_ref())
                         .unwrap_or(&self.dummy_view);
                     let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
-                    let bind = self.device.image_bind(
-                        image,
-                        self.width,
-                        self.height,
-                        mask_view,
-                        scratch,
-                    )?;
+                    let bind = self
+                        .device
+                        .image_bind(image, self.region, mask_view, scratch)?;
                     ready.push(Ready::Single { kinds, bind });
                 }
                 RunOp::Shaded(shaded) => {
@@ -414,13 +502,9 @@ impl Executor<'_> {
                         .and_then(|m| self.mask_views[m as usize].as_ref())
                         .unwrap_or(&self.dummy_view);
                     let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
-                    let bind = self.device.shaded_bind(
-                        shaded,
-                        self.width,
-                        self.height,
-                        scratch,
-                        mask_view,
-                    )?;
+                    let bind = self
+                        .device
+                        .shaded_bind(shaded, self.region, scratch, mask_view)?;
                     ready.push(Ready::Single { kinds, bind });
                 }
             }
@@ -435,6 +519,7 @@ impl Executor<'_> {
         out: &wgpu::TextureView,
         backdrop: &wgpu::TextureView,
         child: &wgpu::TextureView,
+        child_region: Region,
         op: &ChildOp,
     ) {
         let mask_view = op
@@ -442,9 +527,15 @@ impl Executor<'_> {
             .and_then(|m| self.mask_views[m as usize].as_ref())
             .unwrap_or(&self.dummy_view);
         let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
-        let bind = self
-            .device
-            .composite_bind(op, backdrop, child, mask_view, scratch);
+        let bind = self.device.composite_bind(
+            op,
+            self.region,
+            child_region,
+            backdrop,
+            child,
+            mask_view,
+            scratch,
+        );
         let (pipeline, compiled) = self
             .device
             .pipelines()

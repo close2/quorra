@@ -26,7 +26,7 @@
 //! inserts the usage transitions between passes.
 
 use crate::device::Device;
-use crate::encode::{Encoded, Op};
+use crate::encode::{Encoded, LayerPlan, Op};
 use crate::pipeline::WARM_FORMAT;
 
 /// One plan's ping-pong textures.
@@ -73,15 +73,27 @@ impl LayerPool {
     /// A pair for a plan about to render. Reuses a released one when there is one;
     /// creates textures only when the depth of this frame's tree has grown past
     /// anything seen so far, which is what [`peak_pairs`] priced.
+    /// **A pair is reused only at its own size** (ADR 0036). Before layers were sized to
+    /// their plans every pair was the target's, and popping any free one was the same as
+    /// popping a matching one; now it is not, and handing a plan a texture of somebody
+    /// else's size draws its content in the wrong place — twelve pages of the caller's
+    /// corpus, with a highlight sitting above the line it belongs to.
     pub(crate) fn acquire(&mut self, device: &Device, width: u32, height: u32) -> Pair {
         self.live = self.live.saturating_add(1);
         self.peak = self.peak.max(self.live);
-        self.free.pop().unwrap_or_else(|| {
-            [
-                device.create_internal_texture("quorra layer", width, height, WARM_FORMAT),
-                device.create_internal_texture("quorra layer", width, height, WARM_FORMAT),
-            ]
-        })
+        let matching = self
+            .free
+            .iter()
+            .position(|pair| pair[0].width() == width && pair[0].height() == height);
+        matching.map_or_else(
+            || {
+                [
+                    device.create_internal_texture("quorra layer", width, height, WARM_FORMAT),
+                    device.create_internal_texture("quorra layer", width, height, WARM_FORMAT),
+                ]
+            },
+            |at| self.free.swap_remove(at),
+        )
     }
 
     /// Give a pair back, once every pass that reads it has been **recorded**. The
@@ -99,50 +111,6 @@ impl LayerPool {
     }
 }
 
-/// The most pairs that are alive at one moment: the depth of the plan tree, counting
-/// the root, and the deepest mask group's tree beside it.
-///
-/// Masks realise one at a time before the root renders and release their pairs to the
-/// same pool, so the peak is the deepest single tree rather than the sum.
-pub(crate) fn peak_pairs(encoded: &Encoded) -> usize {
-    let mut depth = vec![0_usize; encoded.layers.len()];
-    // A child plan is created by `plan_child` *during* its parent's body, so its index
-    // is always greater than its parent's: computing backwards, every child a plan
-    // names is already done. `debug_assert` states the invariant where it is relied on.
-    for index in (0..encoded.layers.len()).rev() {
-        let mut deepest_child = 0;
-        for op in &encoded.layers[index].ops {
-            if let Op::Child(child) = op {
-                debug_assert!(
-                    child.layer > index,
-                    "plan_child pushes a child after its parent, so indices increase"
-                );
-                deepest_child = deepest_child.max(depth.get(child.layer).copied().unwrap_or(0));
-            }
-        }
-        depth[index] = deepest_child.saturating_add(1);
-    }
-
-    let tree_depth = |ops: &[Op]| {
-        ops.iter()
-            .filter_map(|op| match op {
-                Op::Child(child) => depth.get(child.layer).copied(),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1)
-    };
-
-    let root = tree_depth(&encoded.root.ops);
-    encoded
-        .mask_plans
-        .iter()
-        .flatten()
-        .map(|plan| depth.get(plan.root).copied().unwrap_or(1))
-        .fold(root, usize::max)
-}
-
 /// What the compositor's internal textures cost this frame, for the budget check
 /// before any of them exist (§5: count then allocate; the refusal names both numbers).
 ///
@@ -150,6 +118,63 @@ pub(crate) fn peak_pairs(encoded: &Encoded) -> usize {
 /// reduced bytes are read by draws all over the frame, so unlike a layer it lives from
 /// its reduction to the last pass. `force_layers` prices the root pair a
 /// damage-patched flat frame renders through (ADR 0012).
+/// The bytes of layer pairs a frame will hold at its worst moment (ADR 0036).
+///
+/// Not `peak_pairs × the target`, because a pair is as big as its plan: what is alive at
+/// once is a root-to-leaf *chain* of plans, each holding its own pair while its children
+/// render, so the peak is the heaviest chain rather than the deepest one. A plan with two
+/// children pays for the heavier of them, not for both, because a sibling's pair is
+/// released before the next is acquired.
+fn peak_pair_bytes(encoded: &Encoded, width: u32, height: u32) -> u64 {
+    let pair_bytes = |plan: &LayerPlan, root: bool| -> u64 {
+        let region = if root {
+            crate::compose::Region::whole(width, height)
+        } else {
+            crate::compose::Region::of(plan.bounds, width, height)
+        };
+        u64::from(region.width)
+            .saturating_mul(u64::from(region.height))
+            .saturating_mul(4)
+            .saturating_mul(2)
+    };
+    // Backwards, so every child a plan names is already costed (`peak_pairs` states the
+    // ordering invariant this relies on).
+    let mut chain = vec![0_u64; encoded.layers.len()];
+    for index in (0..encoded.layers.len()).rev() {
+        let plan = &encoded.layers[index];
+        let heaviest_child = plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Child(child) => chain.get(child.layer).copied(),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        chain[index] = pair_bytes(plan, false).saturating_add(heaviest_child);
+    }
+    let below_root = encoded
+        .root
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Child(child) => chain.get(child.layer).copied(),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    // A soft mask realises before the root draws and gives its pairs back to the same
+    // pool, so the peak is the heavier of the two rather than their sum.
+    let masks = encoded
+        .mask_plans
+        .iter()
+        .flatten()
+        .filter_map(|plan| chain.get(plan.root).copied())
+        .max()
+        .unwrap_or(0);
+    pair_bytes(&encoded.root, true).saturating_add(below_root.max(masks))
+}
+
 pub(crate) fn internal_texture_bytes(
     encoded: &Encoded,
     width: u32,
@@ -164,8 +189,50 @@ pub(crate) fn internal_texture_bytes(
     if !needs_layers {
         return 0;
     }
-    (peak_pairs(encoded) as u64)
-        .saturating_mul(2)
-        .saturating_mul(per_layer)
-        .saturating_add(masks_used.saturating_mul(per_layer / 4))
+    // Pairs by the heaviest chain of plans, each at its own size (ADR 0036); masks are
+    // still realised at the target's size, which is the next thing to take off this
+    // number.
+    peak_pair_bytes(encoded, width, height).saturating_add(masks_used.saturating_mul(per_layer / 4))
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)] // a fixture that cannot run must fail loudly
+mod tests {
+    use super::LayerPool;
+    use crate::device::Device;
+    use crate::startup::Options;
+
+    /// **A released pair is reused only at its own size** (ADR 0036).
+    ///
+    /// While every layer was the target's size, popping any free pair was the same as
+    /// popping a matching one. It stopped being the same the moment a layer became as big
+    /// as its plan, and the difference is not an inefficiency: a plan handed somebody
+    /// else's texture draws its content in the wrong place. Twelve pages of the caller's
+    /// corpus said so, with a highlight sitting above the line it belongs to — which is
+    /// why this is a test rather than a comment.
+    #[test]
+    fn a_pair_is_reused_only_at_its_own_size() {
+        let device = Device::headless(&Options {
+            adapter: Some("llvmpipe".into()),
+            ..Options::default()
+        })
+        .expect("llvmpipe is present wherever this suite runs");
+        let mut pool = LayerPool::warmed(None);
+
+        let big = pool.acquire(&device, 64, 64);
+        assert_eq!((big[0].width(), big[0].height()), (64, 64));
+        pool.release(big);
+
+        let small = pool.acquire(&device, 32, 16);
+        assert_eq!(
+            (small[0].width(), small[0].height()),
+            (32, 16),
+            "the 64x64 pair in the pool is the wrong shape for this plan"
+        );
+        pool.release(small);
+
+        // And the big one is still there for a plan that wants it.
+        let again = pool.acquire(&device, 64, 64);
+        assert_eq!((again[0].width(), again[0].height()), (64, 64));
+    }
 }
