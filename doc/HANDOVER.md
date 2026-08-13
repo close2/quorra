@@ -32,16 +32,27 @@ answered it.
 
 ## What to do next, in this order
 
-### 1. Multi-sheet passes
+### 1. A page-sized coverage tile per clipped shape — **not** multi-sheet passes
 
 Three pages at 4× and one at scale 1 refuse with `ScratchExhausted` — the coverage sheet
 against the adapter's 16 384 limit, which is a different ceiling from the frame budget and
-one the pane work cannot reach. **It is now the only reason any frame of the corpus is
+one the pane work cannot reach. **It is the only reason any frame of the corpus is
 refused.** (The fourth refusal at 4×, `22060_A1_01_Plans.pdf`, is a third budget again: 548
 MB of resident images against `max_resource_bytes`, refused at upload rather than at the
-frame.) A frame would have to use more than one sheet, which means batches carrying a sheet
-index and touching the encoder, the compositor and the device together: the largest and
-least certain item on this list.
+frame.)
+
+This item used to read "a frame would have to use more than one sheet". **Measure before
+building that**: instrumenting the packer's refusal (six lines in `ScratchPacker::reserve`)
+says the three pages have placed **194, 240 and 253 MB of tiles** against a 268 MiB budget
+when they run out of *height*, and the tile that does not fit is 2 448 × 3 168 or
+4 763 × 7 204. A second sheet takes `bug1721218_reduced` to 287 013 092 bytes — it refuses
+again, on bytes — and lets the other two draw at a quarter of a gigabyte of per-frame
+coverage upload each. That is a page "drawn" at a cost §6.2 would call a failure.
+
+So the ceiling that bites is not the sheet's dimension. It is that a clipped shape becomes
+one coverage tile of its own device bounds, and at 4× a full-page clipped shape is a
+full-page tile. The work is on the *tiling* side — ADR 0028's panes are the nearest
+existing mechanism — and it is worth its own measurement before its own design.
 
 ### 2. The warm set is compiled for one format, and a surface has another
 

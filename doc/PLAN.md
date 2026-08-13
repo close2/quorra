@@ -16,6 +16,43 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A round cap is the half-disc outside the stroke, not the one inside it** (2026-08-13,
+the caller's `QUORRA_FEEDBACK.md` §21.1): they measured a round cap depositing exactly what
+a butt cap does, to the last digit, at every width and both angles, and offered the cause —
+`arc_fan` resolves an arc by its endpoints, a cap sweeps exactly π, and at exactly π "the
+shorter way round" cannot tell the outward half-disc from the inward one. It is the cause,
+and the effect is worse than the reading: the far cap is a correct outward semicircle
+(signed area −9.62, the body's winding) and the near cap is the **inward** one wound
+*against* the body it lies inside (+9.62), so under §8.5.3.3.2's non-zero rule the two
+cancel and a **hole** is punched where a cap belongs. Both ends wrong, equal and opposite,
+invisible to any instrument that sums ink. `cap_fan` builds the semicircle from the outward
+direction `cap_at` already holds, so the ambiguity cannot arise; `arc_fan` keeps the joins,
+whose sweep is strictly under π because `join_at` returns before it on `cross == 0.0`, and
+that invariant is now stated beside it. Against Table 53's own arithmetic: **−8.9 % becomes
+−0.1 %** on a 40 × 5 rule and **−74 % becomes −1.7 %** on a 0.15 × 0.5 one. On the caller's
+corpus at scale 1, **919 agree / 37 differ becomes 921 / 35** — `extgstate.pdf` and
+`inks_basic.pdf` join the oracle, and `bug1743245.pdf`'s mean deviation falls.
+
+**Multi-sheet passes would move three pages from one refusal to another** (2026-08-13,
+measured, not taken): `HANDOVER.md` named this the next item and the largest — the coverage
+sheet against the adapter's 16 384 ceiling, wanting batches to carry a sheet index and
+touching the encoder, the compositor and the device together. Instrumenting the packer's
+refusal says what those pages actually want:
+
+| page | shelves | tile area placed | the tile that did not fit |
+|---|---:|---:|---|
+| `bug1703683_page2_reduced` | 6 | 194 166 140 | 2 448 × 3 168 |
+| `issue1905` | 7 | 240 456 792 | 2 448 × 3 168 |
+| `bug1721218_reduced` | 2 | 252 700 440 | 4 763 × 7 204 |
+
+The sheet is R8 and is charged tile by tile against the frame budget, so those are **194 to
+253 MB of coverage against a 268 MiB budget**. Give `bug1721218_reduced` a second sheet and
+its next tile takes it to 287 013 092 bytes — it refuses again, on bytes. The other two
+would draw, at a quarter of a gigabyte of per-frame coverage upload each. So the ceiling
+that bites is not the dimension: it is that these pages ask for a page-sized coverage tile
+per clipped shape, and the answer is on the *tiling* side rather than the sheet's. Left
+undone deliberately, with the numbers, rather than built.
+
 **A child with nothing to give is not emitted** (2026-08-13, ADR 0041): ADR 0038 left the
 compositor discovering, after a child had been rendered, that it met its parent nowhere.
 The encoder now drops the `Op::Child` instead — the clip that empties a child is known
