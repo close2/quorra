@@ -14,6 +14,10 @@
 //! rather than looped inside one because the crash needed threads racing — one test
 //! constructing while another's device tore down — and the harness's parallelism is
 //! what supplies that.
+//!
+//! The two tests after the churn are the other half of a device's warm-up: **what the
+//! warm set has to cover** (ADR 0040) and **what warming may not change** (ADR 0035).
+//! Both assert properties rather than durations, for the reason each states.
 
 // Test-file lint policy as in m1.rs.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -73,6 +77,78 @@ fn a_warm_device_drops_too() {
     device.wait_until_warm();
     assert!(device.is_warm());
     drop(device);
+}
+
+/// **A warm device compiles nothing inside its first frame with a group** (ADR 0040).
+///
+/// A first frame costs 5 to 6 ms more than its successors on a page with a group, and
+/// 0.75 to 2.6 ms of that was two pipelines compiled the first time a composite and a
+/// blit needed them — measured on RADV in `Timings::phases`, which is where a frame
+/// reports a one-off cost it absorbed. Neither compilation depends on the target's size,
+/// so no size hint could reach them; the warm-up thread can, and does.
+///
+/// The assertion is on the *absence of the phase* rather than on a duration, because a
+/// wall clock on a loaded machine is context and not evidence (CLAUDE.md principle 2).
+/// A frame that compiles nothing has nothing to report there.
+#[test]
+fn a_warm_device_compiles_nothing_inside_a_layered_frame() {
+    let mut device = Device::headless(&Options {
+        adapter: Some("llvmpipe".into()),
+        ..Options::default()
+    })
+    .expect("llvmpipe is present wherever this suite runs");
+    device.wait_until_warm();
+
+    let mut builder = SceneBuilder::new();
+    builder
+        .group(
+            GroupSpec {
+                alpha: 0.6,
+                blend: BlendMode::Normal,
+                clip: None,
+                knockout: false,
+                mask: None,
+                isolated: true,
+                compose: Compose::SrcOver,
+            },
+            |body| {
+                body.rect(
+                    Rect::new(Point::new(4.0, 4.0), Point::new(48.0, 40.0)),
+                    Affine::IDENTITY,
+                    Color::new(0.2, 0.5, 0.9, 0.8),
+                    None,
+                    None,
+                )
+            },
+        )
+        .expect("a group of one rect");
+    let scene = builder.finish();
+
+    let frame = device
+        .render(
+            &scene,
+            &Viewport::full(64, 48, Affine::IDENTITY),
+            Target::Readback,
+        )
+        .expect("a group draws");
+    let compiled: Vec<&str> = frame
+        .timings()
+        .phases
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| name.contains("pipeline compile"))
+        .collect();
+    assert!(
+        compiled.is_empty(),
+        "a frame with a group compiled {} pipeline(s) the warm set should already hold",
+        compiled.len()
+    );
+    // The frame really did composite and blit — otherwise the assertion above is a
+    // statement about a frame that never asked for either pipeline.
+    assert!(
+        frame.counters().layer_textures > 0,
+        "no layer was allocated"
+    );
 }
 
 /// **A warmed device draws the same frame as a cold one** (ADR 0035).

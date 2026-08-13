@@ -268,12 +268,25 @@ impl PipelineStore {
         Some(handle)
     }
 
-    /// The warm-up itself: the two over-lanes a page of text needs (§7 — the
-    /// knockout variants, the compositor and the reduction compile on first use).
+    /// The warm-up itself: the two over-lanes a page of text needs, and the two passes
+    /// a page with a group needs (§7 — the knockout variants, the reduction and the
+    /// winding lane still compile on first use).
+    ///
+    /// **Why the compositor's two are here** (ADR 0040): a first frame with a group
+    /// compiles [`Kind::Composite`] and [`Kind::Blit`] inside itself, and
+    /// `Timings::phases` prices the pair at **0.75 ms at the minimum of 40 runs and
+    /// 2.6 ms on the quietest one** on RADV — a third to a half of the 5 to 6 ms such a
+    /// frame costs over its successors. Neither compile depends on the target's size,
+    /// which is why no size hint could ever have moved them, and why the thread nobody
+    /// blocks on is where they belong. A device that never composites pays for two
+    /// pipelines it does not use, off the critical path, and reaches `is_warm` about
+    /// 1.1 ms later.
     fn warm_up_now(&self) {
         let start = Instant::now();
         let (_pipeline, _compiled) = self.get(Kind::RectOver, WARM_FORMAT);
         let (_pipeline, _compiled) = self.get(Kind::CoverOver, WARM_FORMAT);
+        let (_pipeline, _compiled) = self.get(Kind::Composite, WARM_FORMAT);
+        let (_pipeline, _compiled) = self.get(Kind::Blit, WARM_FORMAT);
         let duration = start.elapsed();
         let mut state = self.lock();
         state.warm = true;

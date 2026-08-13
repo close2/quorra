@@ -62,10 +62,10 @@ impl LayerPool {
     /// A pool for one frame, holding what a host warmed if anything (ADR 0035).
     ///
     /// Per frame, not per device: ADR 0012 declined to keep the compositor's textures
-    /// "until a measurement says otherwise", and the measurement that prompted this — a
-    /// first frame costing 25 ms against a steady 5 — turned out to be about the *first*
-    /// allocation of a size rather than about reuse. Keeping pairs between frames was
-    /// implemented and measured and moved nothing either way.
+    /// "until a measurement says otherwise", and keeping them between frames was
+    /// implemented and measured and moved nothing either way. ADR 0040 re-measured the
+    /// allocation those decisions were arguing about and found it worth **0.06 ms**,
+    /// which settles the question in the direction ADR 0012 had already taken.
     pub(crate) fn warmed(texture: Option<wgpu::Texture>) -> Self {
         Self {
             free: texture.into_iter().collect(),
@@ -84,6 +84,11 @@ impl LayerPool {
     /// as popping a matching one; now it is not, and handing a plan a texture of somebody
     /// else's size draws its content in the wrong place — twelve pages of the caller's
     /// corpus, with a highlight sitting above the line it belongs to.
+    ///
+    /// A *larger* texture could be made to serve a smaller plan — every pass into it
+    /// would have to set a viewport, since the lane shaders divide by the attachment's
+    /// extent — and ADR 0040 measured what that would buy before building it: **0.06 ms**,
+    /// the cost of the allocation it would save. Not taken.
     pub(crate) fn acquire(&mut self, device: &Device, width: u32, height: u32) -> wgpu::Texture {
         self.live = self.live.saturating_add(1);
         self.peak = self.peak.max(self.live);
