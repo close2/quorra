@@ -16,8 +16,9 @@ library as a git dependency, pinned by their `Cargo.lock`.
 each is: 0032 and 0033 answer the caller's §14.2, then the sheet packer (0034), the size
 hint (0035), layers sized to their plans (0036, in two commits), a scissor fix that 0036
 made necessary (no ADR — a defect), masks sized to their plans (0037, in two commits), and
-one accumulator per plan instead of a ping-pong pair (0038, in two commits), and the root
-sized like every other plan (0039).
+one accumulator per plan instead of a ping-pong pair (0038, in two commits), the root
+sized like every other plan (0039), and a child the encoder drops when its clip leaves it
+nothing to contribute (0041).
 
 **What the caller must do to take it** is written for them in
 `/home/cl/projects/pdf-viewer/doc/QUORRA_UPGRADE.md`: one line for `GroupSpec::compose`, a
@@ -73,9 +74,13 @@ Each of these has an ADR that states the measurement and why it was left:
   the blit it is copied by has an origin: §11.4.4's interpolation is stated over the whole
   of the group's buffer, so shrinking it is a clause question and not a plumbing one
   (0038);
-- **a child whose region misses its parent's is still rendered** before the composite
-  discovers there is nothing to write; culling it belongs in the encoder, which is where
-  the clip that emptied it is known (0038);
+- **a culled child's plan stays in `Encoded::layers`**, unreferenced, because that list is
+  indexed by `ChildOp::layer` *and* by `MaskPlan::root` and shifting either is a wrong page
+  rather than an error. It is priced at nothing — nothing reaches it — but `is_flat` asks
+  whether `layers` is empty rather than whether any plan is reachable, so a page whose only
+  group is clipped away renders through a root accumulator instead of straight into the
+  target (0041). The same shape of question is open for a culled group's soft mask, which
+  still realises;
 - **the hand-off gained a branch per pixel of the target**, which is the biggest thing a
   frame touches and is real work added to every layered frame; nothing surfaced above the
   run-to-run spread on the corpus, and that is the honest statement rather than a claim

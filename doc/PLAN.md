@@ -16,6 +16,20 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A child with nothing to give is not emitted** (2026-08-13, ADR 0041): ADR 0038 left the
+compositor discovering, after a child had been rendered, that it met its parent nowhere.
+The encoder now drops the `Op::Child` instead — the clip that empties a child is known
+exactly there, and a plan's bounds already grow by `child ∩ clip`, which is the same
+rectangle. Emptiness is decided at **pixel** granularity rather than on area, because the
+composite's `clip_coverage` is a box filter over the whole pixel cell: the intersection is
+rounded *out*, so the rule "culled implies the parent's bounds had already ignored it"
+holds. All four things `composite.wgsl` can be collapse to the backdrop — §11.3.6's
+formula, §11.4.6's erase and deposit, and §11.4.4's `mix(b, s, w)` where a seeded group's
+`s` *is* `b` — and the last is the case the compositor could never have caught, since a
+non-isolated group takes its parent's whole region. The cost is that the orphaned plan
+keeps `is_flat` false; `cull.rs` pins it. No corpus figure is claimed: the gate runs once
+over the parallel work.
+
 **The root is as big as what the page marks** (2026-08-13, ADR 0039): ADR 0036 sized every
 plan to its bounds and exempted the root, on the grounds that the root *is* the target —
 which sounded like a definition and was a choice. `HANDOVER.md` said to measure the

@@ -768,6 +768,7 @@ impl Device {
                 segments: encoded.segments,
                 tiles: encoded.tiles,
                 commands_culled: encoded.commands_culled,
+                layers_culled: encoded.layers_culled,
                 bytes_uploaded: upload_bytes,
                 layer_textures,
             },

@@ -13,6 +13,15 @@
 //! - **Visibility does not decide validity.** A command referring to a resource that
 //!   does not exist refuses wherever it lands: a refusal that depended on the
 //!   viewport would be a worse defect than the work culling saves.
+//!
+//! ADR 0041 adds the second thing a frame can drop: a **child layer** whose clip leaves
+//! it no pixel of its parent to contribute to. That is a claim about ISO 32000-2 clause
+//! 11 rather than about the encoder, so the tests are written as the clause states each
+//! composite — a group composited under §11.3.6, either half of §11.4.6's staged pair,
+//! and §11.4.4's non-isolated group — and each says the same thing: **a group that can
+//! reach no pixel leaves the page it was drawn on exactly as it found it.** The erase
+//! half is the one worth reading twice, because getting it wrong subtracts rather than
+//! adds, and a hole is what a reader would see.
 
 // Test-file lint policy as in m1.rs.
 #![allow(
@@ -25,8 +34,8 @@
 
 use quorra_gpu::{Counters, Device, Options, RenderError, Target, Viewport};
 use quorra_scene::{
-    Affine, BlendMode, Color, Compose, FillRule, LineCap, LineJoin, Paint, Point, RampId, Rect,
-    Scene, SceneBuilder, Segment, ShadingKind, Stroke,
+    Affine, BlendMode, ClipId, Color, Compose, FillRule, GroupSpec, LineCap, LineJoin, Paint,
+    Point, RampId, Rect, Scene, SceneBuilder, SceneError, Segment, ShadingKind, Stroke,
 };
 
 /// The software adapter, as everywhere in this suite: deterministic, always present.
@@ -330,4 +339,293 @@ fn an_unknown_ramp_refuses_even_out_of_sight() {
             "an unknown ramp refuses at {placement:?}, got {refused:?}"
         );
     }
+}
+
+// ------------------------------------------------- a child layer its clip leaves empty
+
+/// The page every group below is drawn over: opaque, so that §11.4.6's erase would show
+/// as a hole if it ran, and so that "nothing changed" is a statement about real pixels
+/// rather than about transparency.
+const PAGE: Rect = Rect {
+    min: Point { x: 2.0, y: 2.0 },
+    max: Point { x: 30.0, y: 30.0 },
+};
+
+/// What each group draws. Opaque and a different colour from the page, so that a group
+/// that reaches the page cannot fail to change it.
+const CONTENT: Rect = Rect {
+    min: Point { x: 6.0, y: 6.0 },
+    max: Point { x: 16.0, y: 16.0 },
+};
+
+/// A clip rectangle sharing no pixel with [`CONTENT`] — inside the target, so nothing
+/// here is about the target's edge, and four pixels clear of the content, so nothing is
+/// about the rounding at a shared boundary either.
+const ELSEWHERE: Rect = Rect {
+    min: Point { x: 20.0, y: 20.0 },
+    max: Point { x: 28.0, y: 28.0 },
+};
+
+/// A clip rectangle that admits the whole of [`CONTENT`] — the control every test below
+/// needs, since a cull that fired on both would prove nothing.
+const AROUND_CONTENT: Rect = Rect {
+    min: Point { x: 4.0, y: 4.0 },
+    max: Point { x: 18.0, y: 18.0 },
+};
+
+fn page(builder: &mut SceneBuilder) {
+    builder
+        .rect(
+            PAGE,
+            Affine::IDENTITY,
+            Color::new(0.9, 0.2, 0.1, 1.0),
+            None,
+            None,
+        )
+        .unwrap();
+}
+
+fn content(builder: &mut SceneBuilder) -> Result<(), SceneError> {
+    builder.rect(
+        CONTENT,
+        Affine::IDENTITY,
+        Color::new(0.1, 0.4, 0.9, 1.0),
+        None,
+        None,
+    )
+}
+
+/// A rectangular clip, which resolves to one device rectangle and no residue — so the
+/// only thing deciding whether the group can reach anything is `rect ∩ content`.
+fn clip(device: &mut Device, builder: &mut SceneBuilder, rect: Rect) -> ClipId {
+    let outline = device.upload_outline(&rect_outline(rect)).unwrap();
+    builder
+        .clip(outline, Affine::IDENTITY, FillRule::NonZero, None)
+        .unwrap()
+}
+
+fn group(clip: ClipId) -> GroupSpec {
+    GroupSpec {
+        alpha: 1.0,
+        blend: BlendMode::Normal,
+        clip: Some(clip),
+        knockout: false,
+        mask: None,
+        compose: Compose::SrcOver,
+        isolated: true,
+    }
+}
+
+/// The page on its own, which is what every "nothing changed" assertion compares to.
+fn bare_page() -> Scene {
+    let mut builder = SceneBuilder::new();
+    page(&mut builder);
+    builder.finish()
+}
+
+/// A group whose clip admits no pixel of what it draws contributes nothing, and is not
+/// composited at all.
+///
+/// §11.3.6 composites the finished group with its backdrop weighted by the group's alpha,
+/// soft mask and clip together; where the clip admits nothing that weight is zero, so
+/// `co = ab·Cb` and `ao = ab` — the backdrop, unchanged. The frame must therefore be the
+/// one the page alone produces, and the counters must say the group's whole rendering was
+/// skipped rather than performed and discarded.
+#[test]
+fn a_group_its_clip_empties_is_never_composited() {
+    let mut device = device();
+    let (want, plain) = render(&mut device, &bare_page());
+    assert_eq!(
+        plain.layers_culled, 0,
+        "a page with no group culls no layer"
+    );
+
+    let mut builder = SceneBuilder::new();
+    page(&mut builder);
+    let away = clip(&mut device, &mut builder, ELSEWHERE);
+    builder.group(group(away), content).unwrap();
+    let (got, counters) = render(&mut device, &builder.finish());
+
+    assert_eq!(got, want, "a group that can reach no pixel changes none");
+    assert_eq!(
+        counters.layers_culled, 1,
+        "and its layer was never rendered"
+    );
+    assert_eq!(
+        counters.layer_textures, 1,
+        "one texture, the root's accumulator: none was acquired for the group. It is 1 \
+         rather than 0 because the culled plan stays in the frame's layer list, which \
+         keeps the frame off the flat fast path (ADR 0041's stated cost)"
+    );
+
+    // The control: the same group under a clip that admits it draws, and costs what the
+    // cull saved — the root's accumulator, the group's, and the copy of the backdrop the
+    // composite reads (ADR 0038).
+    let mut builder = SceneBuilder::new();
+    page(&mut builder);
+    let around = clip(&mut device, &mut builder, AROUND_CONTENT);
+    builder.group(group(around), content).unwrap();
+    let (drawn, control) = render(&mut device, &builder.finish());
+
+    assert_eq!(control.layers_culled, 0, "this group reaches the page");
+    assert_eq!(control.layer_textures, 3);
+    assert_ne!(drawn, want, "and so it changes it");
+}
+
+/// **An erase weighted by a shape that is zero everywhere erases nothing**, and a deposit
+/// of nothing deposits nothing — ISO 32000-2 §11.4.6's two stages, each asked for by name
+/// on a group (ADR 0033).
+///
+/// The clause's stage is `P' = (1 − f) × P + S`. A group standing for the erase half
+/// contributes `f`, and one standing for the deposit half contributes `S`; a group its
+/// clip empties contributes zero to either, leaving `P' = P`. This is the case where a
+/// wrong cull would *subtract* — the erase is the only composite in the clause that can
+/// remove what is already on the page — so the control asserts that the same group, under
+/// a clip that admits it, really does punch the hole.
+#[test]
+fn a_staged_group_its_clip_empties_neither_erases_nor_deposits() {
+    let mut device = device();
+    let (want, _) = render(&mut device, &bare_page());
+
+    for stage in [Compose::DestOut, Compose::Plus] {
+        let mut builder = SceneBuilder::new();
+        page(&mut builder);
+        let away = clip(&mut device, &mut builder, ELSEWHERE);
+        builder
+            .group(
+                GroupSpec {
+                    compose: stage,
+                    ..group(away)
+                },
+                content,
+            )
+            .unwrap();
+        let (got, counters) = render(&mut device, &builder.finish());
+
+        assert_eq!(
+            got, want,
+            "{stage:?} of a group that reaches nothing is P' = P"
+        );
+        assert_eq!(counters.layers_culled, 1);
+    }
+
+    // The control, for the half that removes: this erase reaches the page, and where its
+    // opaque content lies the page is gone — `P' = (1 − 1) × P`.
+    let mut builder = SceneBuilder::new();
+    page(&mut builder);
+    let around = clip(&mut device, &mut builder, AROUND_CONTENT);
+    builder
+        .group(
+            GroupSpec {
+                compose: Compose::DestOut,
+                ..group(around)
+            },
+            content,
+        )
+        .unwrap();
+    let (erased, control) = render(&mut device, &builder.finish());
+
+    assert_eq!(control.layers_culled, 0);
+    assert_eq!(
+        alpha_at(&erased, 10, 10),
+        0,
+        "an erase by an opaque shape leaves nothing behind it"
+    );
+    assert_eq!(
+        alpha_at(&want, 10, 10),
+        255,
+        "which is a change, because the page is opaque there"
+    );
+}
+
+/// §11.4.4's non-isolated group is the case the compositor cannot catch for itself, and
+/// culling it is still exact.
+///
+/// A non-isolated group's buffer is seeded with a texel-for-texel copy of its backdrop,
+/// so it takes its parent's whole region (ADR 0038) and always meets it — the
+/// compositor's own "this child reaches nothing" test can never fire for one. It is exact
+/// all the same: wherever the group marked nothing its buffer *is* the backdrop, and the
+/// clause's `(1 − w) × B + w × E(B)` with `E(B) = B` is `B` for every weight.
+#[test]
+fn a_non_isolated_group_its_clip_empties_leaves_its_backdrop() {
+    let mut device = device();
+    let (want, _) = render(&mut device, &bare_page());
+
+    let mut builder = SceneBuilder::new();
+    page(&mut builder);
+    let away = clip(&mut device, &mut builder, ELSEWHERE);
+    builder
+        .group(
+            GroupSpec {
+                isolated: false,
+                ..group(away)
+            },
+            content,
+        )
+        .unwrap();
+    let (got, counters) = render(&mut device, &builder.finish());
+
+    assert_eq!(got, want, "the backdrop, as §11.4.4 leaves it");
+    assert_eq!(counters.layers_culled, 1);
+
+    let mut builder = SceneBuilder::new();
+    page(&mut builder);
+    let around = clip(&mut device, &mut builder, AROUND_CONTENT);
+    builder
+        .group(
+            GroupSpec {
+                isolated: false,
+                ..group(around)
+            },
+            content,
+        )
+        .unwrap();
+    let (drawn, control) = render(&mut device, &builder.finish());
+
+    assert_eq!(control.layers_culled, 0);
+    assert_ne!(drawn, want);
+}
+
+/// **A group that marks nothing is a different case from one a clip emptied**, and both
+/// are dropped.
+///
+/// Nothing here is clipped away — both groups are clipped to the whole page. The first
+/// has no elements; the second's one element is a rectangle with no area, a well-formed
+/// command that covers no pixel, which is what a real page produces from a collapsed
+/// transform. Their layers hold no bounds at all rather than bounds their clip misses, so
+/// this is the arm that reaches `bounds == None`, and the frame it draws is the page on
+/// its own.
+#[test]
+fn a_group_that_marks_nothing_is_dropped_too() {
+    let mut device = device();
+    let (want, _) = render(&mut device, &bare_page());
+
+    let mut builder = SceneBuilder::new();
+    page(&mut builder);
+    let over_the_page = clip(&mut device, &mut builder, PAGE);
+    builder.group(group(over_the_page), |_| Ok(())).unwrap();
+    builder
+        .group(group(over_the_page), |inner| {
+            inner.rect(
+                Rect::new(Point::new(10.0, 10.0), Point::new(10.0, 20.0)),
+                Affine::IDENTITY,
+                Color::new(0.1, 0.4, 0.9, 1.0),
+                None,
+                None,
+            )
+        })
+        .unwrap();
+    let (got, counters) = render(&mut device, &builder.finish());
+
+    assert_eq!(got, want, "neither group marks anything");
+    assert_eq!(
+        counters.layers_culled, 2,
+        "and neither is composited: an empty group, and one whose element has no area"
+    );
+    assert_eq!(
+        counters.commands_culled, 1,
+        "the two counters count different things and this scene has one of each: the \
+         rectangle with no area is a command that reaches no pixel, and the groups \
+         above it are layers with nothing to composite"
+    );
 }

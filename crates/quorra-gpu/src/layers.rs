@@ -124,6 +124,13 @@ impl LayerPool {
 /// still alive and a copy of the backdrop it covers is alive beside it, at the size of
 /// `child ∩ parent` (ADR 0038). So the cost of a child is the heavier of rendering it and
 /// compositing it, and that is what the max below is.
+///
+/// **A plan nobody names is priced at nothing, which is what it costs.** The encoder
+/// leaves a culled child's plan in `layers` so that every `ChildOp::layer` and
+/// `MaskPlan::root` after it still resolves (ADR 0041); this walk descends through
+/// `Op::Child` and starts from the root and the mask roots, so such a plan is reached
+/// from nowhere. Its `chain` entry below is computed and never read, and no texture is
+/// ever acquired for it.
 fn peak_layer_bytes(encoded: &Encoded, width: u32, height: u32) -> u64 {
     let region_of = |plan: &LayerPlan| crate::compose::Region::of(plan.bounds, width, height);
     let bytes_of = |region: crate::compose::Region| {
