@@ -536,18 +536,64 @@ fn cap_at(out: &mut Vec<Polyline>, end: Point, dir: Point, hw: f32, cap: LineCap
             ],
             closed: true,
         }),
-        LineCap::Round => {
-            let a = Point::new(end.x + n.x, end.y + n.y);
-            let b = Point::new(end.x - n.x, end.y - n.y);
-            out.push(arc_fan(end, a, b, hw));
-        }
+        // §8.4.3.3, Table 53: "[a] semicircular arc with a diameter equal to the line
+        // width shall be drawn around the endpoint and shall be filled in."
+        LineCap::Round => out.push(cap_fan(end, dir, hw)),
     }
 }
 
+/// The semicircle a round cap is, swept from one side of the stroke round **through
+/// `dir`** to the other — `dir` pointing away from the segment, as [`cap_at`] takes it.
+///
+/// Built from `dir` rather than from the two endpoint angles, and that is the whole
+/// point. A cap sweeps **exactly pi**, and an arc stated by its endpoints alone has two
+/// readings at exactly pi that no "shorter way round" rule can separate: [`arc_fan`] took
+/// whichever way `atan2`'s branch cut happened to give, which was the outward semicircle
+/// at the end of a subpath and the *inward* one at its start.
+///
+/// An inward semicircle is not merely invisible. It lies inside the stroke body and is
+/// wound **against** it, so the non-zero rule (§10.7.4's fill, `fill_mask`) cancels the
+/// two and punches a hole of exactly the area the far cap adds. Both ends of every
+/// round-capped subpath were wrong, and the two errors were equal and opposite: the
+/// caller's ink-total instrument read a round cap as depositing exactly what a butt cap
+/// does (`QUORRA_FEEDBACK.md` §21.1), which is the sum, not the picture.
+///
+/// The step count is [`ARC_STEP`]'s, as for any other arc.
+#[allow(clippy::arithmetic_side_effects)]
+fn cap_fan(end: Point, dir: Point, hw: f32) -> Polyline {
+    // `cap_at`'s `n` is `dir` turned a quarter turn, so the cap's two corners sit at
+    // `base ± pi/2` and the outward point at `base`. Sweeping downward from `+pi/2`
+    // passes through `base`, which is what makes this the outward half — and gives the
+    // fan the stroke body's own winding, so it adds rather than cancels.
+    let base = dir.y.atan2(dir.x);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // pi / ARC_STEP
+    let steps = ((std::f32::consts::PI / ARC_STEP).ceil() as usize).max(1);
+    let mut points = Vec::with_capacity(steps.saturating_add(2));
+    points.push(end);
+    for i in 0..=steps {
+        #[allow(clippy::cast_precision_loss)] // steps is a dozen
+        let t =
+            base + std::f32::consts::FRAC_PI_2 - std::f32::consts::PI * (i as f32) / (steps as f32);
+        points.push(Point::new(end.x + hw * t.cos(), end.y + hw * t.sin()));
+    }
+    Polyline {
+        points,
+        closed: true,
+    }
+}
+
+/// The angle one step of an arc advances: deterministic (§4.6), and within
+/// [`FLATTEN_TOLERANCE`] for any stroke width a page realistically holds.
+const ARC_STEP: f32 = 0.35;
+
 /// A fan of points approximating the arc from `from` to `to` around `centre` (both on
-/// the circle of radius `radius`), as one closed polygon including the centre. The
-/// step count comes from the swept angle at a fixed 0.35 rad step — deterministic,
-/// and within [`FLATTEN_TOLERANCE`] for any stroke width a page realistically holds.
+/// the circle of radius `radius`), as one closed polygon including the centre.
+///
+/// **The caller must guarantee a sweep of less than pi**, because that is what makes
+/// "the shorter way round" below name one arc rather than two. [`join_at`] is the only
+/// caller and it does: it returns before this on `cross == 0.0`, so the two segments are
+/// never collinear and never a reversal, and the gap a join fills is strictly under a
+/// half turn. A cap *is* exactly a half turn and has [`cap_fan`] for that reason.
 #[allow(clippy::arithmetic_side_effects)]
 fn arc_fan(centre: Point, from: Point, to: Point, radius: f32) -> Polyline {
     let a0 = (from.y - centre.y).atan2(from.x - centre.x);
@@ -560,7 +606,7 @@ fn arc_fan(centre: Point, from: Point, to: Point, radius: f32) -> Polyline {
         sweep += 2.0 * std::f32::consts::PI;
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let steps = ((sweep.abs() / 0.35).ceil() as usize).max(1);
+    let steps = ((sweep.abs() / ARC_STEP).ceil() as usize).max(1);
     let mut points = vec![centre, from];
     for i in 1..steps {
         #[allow(clippy::cast_precision_loss)]
@@ -582,7 +628,9 @@ fn arc_fan(centre: Point, from: Point, to: Point, radius: f32) -> Polyline {
 mod tests {
     use quorra_scene::{LineCap, LineJoin, Point, Segment, Stroke};
 
-    use super::{CoverageMask, DeviceTransform, Rule, fill_mask, flatten, stroke_polylines};
+    use super::{
+        CoverageMask, DeviceTransform, Polyline, Rule, fill_mask, flatten, stroke_polylines,
+    };
 
     const IDENTITY: DeviceTransform = DeviceTransform {
         a: 1.0,
@@ -788,5 +836,84 @@ mod tests {
         // Outside the stroke.
         assert_eq!(cov(&mask, 4, 4), 0);
         assert_eq!(cov(&mask, 1, 1), 0);
+    }
+
+    /// **Every cap deposits the area Table 53 gives it** (ISO 32000-2 §8.4.3.3), at both
+    /// ends of the subpath.
+    ///
+    /// The expectations are the clause's own arithmetic on a `length × width` rule, not
+    /// anything read off this rasteriser:
+    ///
+    /// - **Butt** — "the stroke shall be squared off at the endpoint": `length × width`.
+    /// - **Round** — "[a] semicircular arc with a diameter equal to the line width shall
+    ///   be drawn around the endpoint and shall be filled in": two half-discs of radius
+    ///   `width / 2`, so `length × width + π × width² / 4`.
+    /// - **Projecting square** — "the stroke shall continue beyond the endpoint for a
+    ///   distance equal to half the line width": `(length + width) × width`.
+    ///
+    /// Round was the butt figure **to four decimals** before this test existed, and the
+    /// reason is worth keeping beside the numbers: the cap at the far end was a correct
+    /// outward semicircle and the cap at the near end was the *inward* one, wound against
+    /// the body it lay inside, so the non-zero rule cancelled them to the texel. A total
+    /// that agrees is not a picture that agrees — this test measures the near end and the
+    /// far end separately for that reason.
+    #[test]
+    fn each_cap_deposits_the_area_table_53_gives_it() {
+        // The rule runs from x = 20 to x = 60 at y = 40, well inside an 80 × 80 mask so
+        // that no cap is clipped by the raster's edge. The column bounds below are those
+        // two numbers, as integers.
+        const X0: f32 = 20.0;
+        const LENGTH: f32 = 40.0;
+        const WIDTH: f32 = 5.0;
+        let ink = |cap: LineCap, left: i32, width: u32| -> f32 {
+            let y = 40.0;
+            let line = Polyline {
+                points: vec![Point::new(X0, y), Point::new(X0 + LENGTH, y)],
+                closed: false,
+            };
+            let stroke = Stroke {
+                width: WIDTH,
+                cap,
+                join: LineJoin::Round,
+                miter_limit: 10.0,
+            };
+            let mask = fill_mask(
+                &stroke_polylines(&[line], stroke),
+                Rule::NonZero,
+                left,
+                0,
+                width,
+                80,
+            );
+            mask.coverage.iter().map(|b| f32::from(*b) / 255.0).sum()
+        };
+        // A quarter of a texel: the sampling grid's own resolution, not a fitted bound.
+        let close = |got: f32, want: f32, what: &str| {
+            assert!(
+                (got - want).abs() < 0.25,
+                "{what}: {got:.4} against the clause's {want:.4}"
+            );
+        };
+
+        let body = LENGTH * WIDTH;
+        close(ink(LineCap::Butt, 0, 80), body, "butt");
+        close(
+            ink(LineCap::Square, 0, 80),
+            (LENGTH + WIDTH) * WIDTH,
+            "projecting square",
+        );
+        let discs = std::f32::consts::PI * WIDTH * WIDTH / 4.0;
+        close(ink(LineCap::Round, 0, 80), body + discs, "round");
+
+        // And each end on its own, because the defect this replaces was two errors of
+        // equal size in opposite directions: the near end must *gain* a half-disc over a
+        // butt cap, not lose one.
+        let half = discs / 2.0;
+        // Columns 0..20 hold only what lies left of the rule's start, and 60..80 only
+        // what lies right of its end.
+        close(ink(LineCap::Butt, 0, 20), 0.0, "butt, near end");
+        close(ink(LineCap::Butt, 60, 20), 0.0, "butt, far end");
+        close(ink(LineCap::Round, 0, 20), half, "round, near end");
+        close(ink(LineCap::Round, 60, 20), half, "round, far end");
     }
 }

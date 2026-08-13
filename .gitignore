@@ -15,6 +15,8 @@
 
 # Claude Code local settings (per-user, not shared).
 .claude/settings.local.json
+# Agent worktrees: separate checkouts of this repository, never content of it.
+.claude/worktrees/
 
 # Per-user cargo configuration. This tree is shared through a group, and the users who
 # build it have different `target-dir` settings for that reason; a committed absolute
