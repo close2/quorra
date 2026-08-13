@@ -57,13 +57,13 @@ pub mod viewport;
 mod winding;
 
 pub use device::{Device, Limits};
-pub use error::{DeviceError, RenderError, ResourceProblem, SurfaceProblem};
+pub use error::{DeviceError, PipelineProblem, RenderError, ResourceProblem, SurfaceProblem};
 pub use frame::{Counters, Frame, Raster, TimingProvenance, Timings};
 pub use report::{Report, ReportKind};
 pub use startup::{
     Coverage, DEFAULT_ATLAS_BUDGET, DEFAULT_COVERAGE_SAMPLES, DEFAULT_GLYPH_QUANTUM,
-    DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_RESOURCE_BYTES, Options, StartupTimings, create_instance,
-    create_instance_with,
+    DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_RESOURCE_BYTES, Options, StartupTimings, WarmUp,
+    create_instance, create_instance_with,
 };
 pub use target::Target;
 pub use viewport::Viewport;

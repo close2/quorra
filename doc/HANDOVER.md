@@ -145,11 +145,13 @@ one of three subtractions missing and drew nothing at all for every band after t
 The same change done as *plumbing at zero, verified by equality, then the value* caught a
 vertex-only uniform binding immediately and cost one extra commit.
 
-**A WGSL compile error hangs the test binary; it does not fail it.** A reserved keyword
-(`from`) in `blit.wgsl` made `create_shader_module` a validation error, which panicked the
-warm-up thread inside wgpu, and the process then sat forever instead of reporting anything.
-`cargo test` looks like an infinite hang with no output. Run the test binary directly with
-`--test-threads=1 --nocapture` and read the **last** lines: the panic is there.
+**A WGSL compile error now fails the suite by name** (ADR 0042). It used to hang it: a
+reserved keyword (`from`) in `blit.wgsl` panicked the warm-up thread inside wgpu, and
+every one of the nineteen test files that calls `wait_until_warm` then waited on a
+`Condvar` with no notifier left alive — `cargo test` looked like an infinite hang with no
+output at all. Today the same mistake ends the run in about a second with the WGSL span in
+the failure message. If you ever see a silent hang again, the shape to suspect is the same
+one: a `Condvar` whose only notifier can leave without notifying.
 
 **A refusal is arithmetic, a fidelity difference is not.** Which pages refuse is
 machine-independent and can be reasoned about; which lane is faster is a property of the

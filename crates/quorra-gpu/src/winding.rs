@@ -176,8 +176,9 @@ pub(crate) fn render_into(
     let winding_view = reuse.view_for(gpu, extent).clone();
 
     let buffers = Buffers::new(gpu, queue, sheet, &plan, samples);
-    let (winding_pipeline, _) = pipelines.get(Kind::Winding, WINDING_FORMAT);
-    let (resolve_pipeline, _) = pipelines.get(Kind::WindingResolve, wgpu::TextureFormat::R8Unorm);
+    let (winding_pipeline, _) = pipelines.get(Kind::Winding, WINDING_FORMAT)?;
+    let (resolve_pipeline, _) =
+        pipelines.get(Kind::WindingResolve, wgpu::TextureFormat::R8Unorm)?;
     let texture_layout = pipelines.sampled_layout();
     let winding_source = gpu.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("quorra winding source"),
