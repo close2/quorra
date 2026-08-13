@@ -16,6 +16,33 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A plan accumulates in one texture, not two** (2026-08-13, ADR 0038): `HANDOVER.md` put
+the root's ping-pong pair first — 91.6 % of `issue16287.pdf`'s frame at 4× — and asked
+whether it could ping-pong against the target. It cannot (a target is validated for
+`RENDER_ATTACHMENT` alone, a surface texture is a swapchain image in its own format, and a
+damage patch may touch nothing outside its rectangles), but the pair turns out not to be
+needed at all. **A composite does not change the pixels outside its child's rectangle**:
+with `s = 0` every branch of `composite.wgsl` — §11.3.6's formula, §11.4.6's erase and
+deposit — collapses to the backdrop it just read, and §11.4.4's non-isolated group has its
+parent's region so the case never arises. The full-target write was carrying pixels across
+a ping-pong that only existed to carry them.
+
+So a plan keeps one accumulator; before each composite the pixels that composite covers
+are copied out into a texture **the child's size**, and the composite writes back into the
+accumulator scissored to the same rectangle. `issue16287.pdf` at 4× goes **203 188 174 →
+104 120 206 bytes**, of which 93 063 168 is the root's one texture — there is no second
+full-target texture in a frame any more. A chain *n* plans deep holds `n + 1` textures
+where it held `2n`. No pixel moves: the corpus is unchanged at both scales, per page and to
+the last digit. On the artwork archetype (eight groups, llvmpipe, ten alternating cold
+frames on a quiet machine) minima read **138.5 ms before, 108.9 after**, spreads
+overlapping; through RADV on the corpus the difference does not surface, because most pages
+have no group.
+
+Staged as 0036 and 0037 were — the blit's source origin at zero first, verified by
+equality — and that stage found the GPU lane's resolve pass borrowing the *blit's*
+bind-group layout for its own sampled texture, the same shape and never the same
+responsibility.
+
 **A mask is as big as its plan, and outside it a constant** (2026-08-13, ADR 0037): the
 piece ADR 0036 named and specified. §11.5 makes a soft mask *a transparency group rendered
 at device resolution*, and a group covers what it draws — but a mask was realised at the
@@ -53,10 +80,9 @@ box is intersected with the pass's region and moved to its origin now; an empty
 intersection draws nothing and the load op still clears, which is what `layers.rs` relies
 on to hand a released pair to the next plan. `m8` holds the frame that panicked.
 
-**What is left on this path** is one texture: **91.6 % of `issue16287.pdf`'s frame is the
-root's ping-pong pair**, at the target's size because the root *is* the target. Whether it
-needs two full-target textures or can ping-pong against the target the frame draws into is
-unmeasured, and nothing else on that page is worth shrinking.
+**What was left on this path** was one texture: **91.6 % of `issue16287.pdf`'s frame was
+the root's ping-pong pair**, at the target's size because the root *is* the target.
+ADR 0038 above halved it and the entry says how.
 
 **A host can say what size is coming** (2026-08-13, ADR 0035): the rest of the caller's
 §9. ADR 0031 moved 2.4 ms of a first frame to device construction and wrote down that

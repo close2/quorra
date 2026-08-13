@@ -15,7 +15,8 @@ library as a git dependency, pinned by their `Cargo.lock`.
 **`a35dc70` is what the owner pushed.** Everything after it is local, and the ADRs say what
 each is: 0032 and 0033 answer the caller's §14.2, then the sheet packer (0034), the size
 hint (0035), layers sized to their plans (0036, in two commits), a scissor fix that 0036
-made necessary (no ADR — a defect), and masks sized to their plans (0037, in two commits).
+made necessary (no ADR — a defect), masks sized to their plans (0037, in two commits), and
+one accumulator per plan instead of a ping-pong pair (0038, in two commits).
 
 **What the caller must do to take it** is written for them in
 `/home/cl/projects/pdf-viewer/doc/QUORRA_UPGRADE.md`: one line for `GroupSpec::compose`, a
@@ -27,18 +28,21 @@ answered it.
 
 ## What to do next, in this order
 
-### 1. The root's pair
+### 1. The root's own size
 
 **No corpus page is refused for *frame* bytes any more** (ADR 0037 took the last one), so
 this is no longer about refusals — it is about what every page with a group pays on every
-frame. `issue16287.pdf` at 4× is now 203 MB, of which **186 MB, 91.6 %, is the root plan's
-ping-pong pair**, at the target's size because the root *is* the target.
+frame. After ADR 0038 there is exactly one full-target texture left in a frame:
+`issue16287.pdf` at 4× is 104 MB, of which **93 MB, 89 %, is the root plan's accumulator**,
+at the target's size because the root *is* the target.
 
-Worth asking whether it needs two full-target textures, or whether it can ping-pong against
-the target the frame is drawing into. Unmeasured. Note what makes it harder than 0036 and
-0037 were: the target is the caller's texture or a swapchain image, its format is not
-always `WARM_FORMAT`, and a damage patch must not touch a pixel outside its rectangles —
-so "draw into the target and read it back" is three contracts at once, not one.
+ADR 0036 sized every plan to the union of what it marks and exempted the root. Lifting that
+exemption is the same trick on the one plan that never got it, and it is untried. What it
+has to answer: `blit_to_target` must still clear the whole target and write the root's
+rectangle into the right place (the blit has a source origin since 0038, but not a
+destination one), and a damage patch must still touch nothing outside its rectangles. A
+page that marks its whole area gains nothing, and most pages do mark most of their area —
+so measure the corpus's *distribution* before building it, not one page.
 
 ### 2. Multi-sheet passes
 
@@ -64,7 +68,14 @@ Each of these has an ADR that states the measurement and why it was left:
 - **the mask's transparent value is computed on the CPU as well as in `reduce.wgsl`**,
   rather than fed into the reduce so the two cannot disagree — an independent
   implementation a test compares is stronger evidence than an agreement by construction
-  (0037).
+  (0037);
+- **a non-isolated group still takes its parent's region** rather than its own, now that
+  the blit it is copied by has an origin: §11.4.4's interpolation is stated over the whole
+  of the group's buffer, so shrinking it is a clause question and not a plumbing one
+  (0038);
+- **a child whose region misses its parent's is still rendered** before the composite
+  discovers there is nothing to write; culling it belongs in the encoder, which is where
+  the clip that emptied it is known (0038).
 
 ## Traps
 
@@ -119,7 +130,7 @@ CARGO_TARGET_DIR=<scratch>/target cargo test --release -p render-quorra --test c
 
 `PDFVIEWER_QUORRA_ONLY=a.pdf,b.pdf` narrows it (the ratchets are then *not* checked),
 `PDFVIEWER_QUORRA_COVERAGE=cpu|gpu` picks the lane and `PDFVIEWER_QUORRA_SCALE=n` the
-magnification. Verdict counts are stable and comparable across copies; **timings are not** —
+magnification. **Timings are not comparable across copies, and neither are verdicts** —
 compare before and after inside one copy, flipping only the `[patch]` between a
 `git worktree` at the base commit and the working tree.
 
