@@ -16,6 +16,48 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A mask is as big as its plan, and outside it a constant** (2026-08-13, ADR 0037): the
+piece ADR 0036 named and specified. §11.5 makes a soft mask *a transparency group rendered
+at device resolution*, and a group covers what it draws — but a mask was realised at the
+whole target, which on `issue16287.pdf` at 4× is 93 MB of a 291 MB frame. A mask is now
+realised at its plan's bounds like every other layer, and the five shaders that sample one
+carry where it sits. **The value outside that rectangle is what makes it a clause decision
+rather than a resizing**: not zero and not the nearest edge texel, but what the reduce
+writes for a *fully transparent* pixel, since that is what a whole-target realisation held
+there — `transfer[0]` under §11.5.2, the transferred luminosity of the backdrop under
+§11.5.3. Zero would have cropped every luminosity mask over a light backdrop to its
+group's rectangle and drawn a plausible-looking wrong page. An absent mask is the same
+case rather than a special one: size (0, 0), outside 1.
+
+The page's frame goes **291 199 104 → 203 188 174 bytes** (masks 93 063 168 → 5 052 238)
+and draws inside the caller's 268 MiB budget, agreeing with the oracle rather than merely
+drawing: **at scale 4, 931 agree / 16 differ / 5 refused becomes 932 / 16 / 4**; at scale 1
+nothing moves. The 37 differing pages are the same 37 at both scales to the last digit of
+every mean, worst tile and SSIM — the equality that says this moved memory and not pixels.
+Staged as ADR 0036 was: the placement everywhere at the target's rectangle first, verified
+by that equality, then the size.
+
+It also closed a gap ADR 0036 had opened in §5's count-then-allocate: a mask group's plan
+was *priced* at its own bounds and *realised* at the target, so the budget check passed
+frames that then allocated sixteen times what they promised. Both halves now go through one
+`Region::of`, and `tests/mask_regions.rs` asserts the whole sum exactly — 35 072 bytes for
+a 16 × 16 mask on a 64 × 64 page, drawn at that budget and refused one byte below it.
+
+**A scissor is stated where the pass writes, not where the page is** (2026-08-13, no ADR —
+a defect, not a decision): ADR 0036 made a layer as big as its plan while the damage patch
+of ADR 0012 kept scissoring every internal pass to a rectangle stated in *device* space. A
+patched frame containing any group smaller than its damage box died inside wgpu —
+`Scissor Rect { x: 0, y: 0, w: 20, h: 20 } is not contained in the render target
+(10, 10, 1)` — which is a panic in a library, and so worse than the refusal §5 allows. The
+box is intersected with the pass's region and moved to its origin now; an empty
+intersection draws nothing and the load op still clears, which is what `layers.rs` relies
+on to hand a released pair to the next plan. `m8` holds the frame that panicked.
+
+**What is left on this path** is one texture: **91.6 % of `issue16287.pdf`'s frame is the
+root's ping-pong pair**, at the target's size because the root *is* the target. Whether it
+needs two full-target textures or can ping-pong against the target the frame draws into is
+unmeasured, and nothing else on that page is worth shrinking.
+
 **A host can say what size is coming** (2026-08-13, ADR 0035): the rest of the caller's
 §9. ADR 0031 moved 2.4 ms of a first frame to device construction and wrote down that
 about six more scale with the target and cannot be warmed without knowing it. So a host
@@ -45,42 +87,6 @@ second turned the origin on and the corpus caught two more — a mask realised a
 size and reduced as though it were whole (31 pages), and `LayerPool` handing a plan a pair
 of somebody else's size (12 pages, a highlight sitting above its line). 884, then 903, then
 915: the corpus was part of the change rather than a check after it.
-
-**What is left on this path** is `issue16287.pdf`'s 291 MB, and its arithmetic names both
-halves: 186 MB is the *root's* pair, which is target-sized because the root is the target,
-and 93 MB is four full-target soft masks. Sizing the masks is the next piece, and ADR 0036 now
-specifies it: the reduce needs no origin (two textures of one size map 1:1), five sampling
-sites move, the value *outside* a mask's rectangle is what the reduce writes for a
-transparent pixel rather than zero, and an absent mask becomes "size (0, 0), outside 1.0"
-instead of the 1 × 1 white texture a clamp reads today.
-
-**A host can say what size is coming** (2026-08-13, ADR 0035): the rest of the caller's
-§9. ADR 0031 moved 2.4 ms of a first frame to device construction and wrote down that
-about six more scale with the target and cannot be warmed without knowing it. So a host
-says: `Device::warm_for(width, height)`, called where the device is constructed — off the
-critical path by §7's own advice, while a first frame is on it by definition. On a
-2 448 × 4 752 page with eight groups, six devices per configuration: **a first frame of
-24.7 ms becomes 10.3**, against steady frames of five. The pair it makes is held until the
-frame that wants it takes it and no longer — keeping pairs *between* frames was
-implemented and measured and moved nothing, so ADR 0012's per-frame pool stands. The
-shipped test asserts a property rather than a duration (a device warmed for this size, for
-another, or for none draws the same bytes), because a re-measurement under load read 19.9
-against 20.0 and that is contention, not a result.
-
-**A layer is as big as its plan** (2026-08-13, ADR 0036, **half landed**): the compositor
-allocates a layer pair at the *full target*, and on the three corpus pages that refuse for
-bytes at 4× the plans using them cover **0.0 %, 0.1–0.4 % and 4–6.5 %** of the page — 279,
-296 and 321 MB against a 268 MB budget, of which the pairs are 186, 296 and 257. So a page
-is refused for a hundred times the memory its groups need. Sizing a layer to its plan's
-bounds is the fix, and it is ADR 0028's mechanism with ADR 0028's hazard: a pane taught
-three places to subtract its origin, shipped with one missing, and drew nothing for every
-band after the first. **In the tree now: the origin, plumbed through every stage that
-renders into a layer, with the value zero** — a change whose correctness is checkable
-exactly, and which is checked (207 tests; the corpus at 915/37/5, unchanged). It has
-already earned its keep by catching what a compiler cannot: the globals uniform was
-vertex-visible only, and reading it from a fragment stage refuses every pipeline. **Not yet
-in the tree: the plan bounds and the allocation that uses them**, which is the commit that
-makes the origin non-zero and those three pages draw.
 
 **Shelves stay near one width, so the sheet stays near square** (2026-08-12, ADR 0034):
 the item ADR 0021 left — "the sheet's *height* … is a packer question with its own
