@@ -123,6 +123,33 @@ impl Region {
         }
     }
 
+    /// A device-space rectangle in this region's own coordinates: the two intersected,
+    /// then moved to the region's origin.
+    ///
+    /// What a pass rendering into this region must scissor to when the frame patches
+    /// damage (ADR 0012): the damage bounding box is stated in device space and a
+    /// scissor is stated in the attachment's, and wgpu refuses — with a validation
+    /// error, not a wrong picture — a scissor that leaves the attachment. Empty when the
+    /// two do not meet, which draws nothing; the pass's load op still clears, so the
+    /// attachment is written whole either way (`layers.rs` relies on that for reuse).
+    pub(crate) fn scissor_in(self, rect: [u32; 4]) -> [u32; 4] {
+        let [x, y, width, height] = rect;
+        let left = x.max(self.x);
+        let top = y.max(self.y);
+        let right = x
+            .saturating_add(width)
+            .min(self.x.saturating_add(self.width));
+        let bottom = y
+            .saturating_add(height)
+            .min(self.y.saturating_add(self.height));
+        [
+            left.saturating_sub(self.x),
+            top.saturating_sub(self.y),
+            right.saturating_sub(left),
+            bottom.saturating_sub(top),
+        ]
+    }
+
     /// The pixels a plan's device bounds cover, rounded out and clamped.
     ///
     /// A plan that marks nothing gets one texel rather than none: wgpu refuses a
@@ -217,7 +244,7 @@ impl Executor<'_> {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.apply_scissor(&mut pass);
+            self.apply_scissor(&mut pass, whole);
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
@@ -394,7 +421,7 @@ impl Executor<'_> {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        self.apply_scissor(&mut pass);
+        self.apply_scissor(&mut pass, self.region);
         for item in &ready {
             let batch = match item {
                 Ready::Batch(batch) => batch,
@@ -560,7 +587,7 @@ impl Executor<'_> {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        self.apply_scissor(&mut pass);
+        self.apply_scissor(&mut pass, self.region);
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
@@ -605,7 +632,7 @@ impl Executor<'_> {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        self.apply_scissor(&mut pass);
+        self.apply_scissor(&mut pass, self.region);
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
@@ -687,10 +714,16 @@ impl Executor<'_> {
         }
     }
 
-    /// Scissor an internal pass to the damage bounding box, when this frame
-    /// patches.
-    fn apply_scissor(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if let Some([x, y, w, h]) = self.scissor {
+    /// Scissor an internal pass to the damage bounding box, when this frame patches.
+    ///
+    /// `into` is the region of the frame the pass's attachment holds, because that is
+    /// the space a scissor is stated in and the damage box is stated in device space
+    /// (ADR 0036 made the two differ). A pass rendering into a plan smaller than the
+    /// damage box is a wgpu validation error otherwise, and that is a panic inside a
+    /// library rather than a refusal.
+    fn apply_scissor(&self, pass: &mut wgpu::RenderPass<'_>, into: Region) {
+        if let Some(rect) = self.scissor {
+            let [x, y, w, h] = into.scissor_in(rect);
             pass.set_scissor_rect(x, y, w, h);
         }
     }

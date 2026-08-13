@@ -276,6 +276,82 @@ fn layered_scenes_patch_too() {
     );
 }
 
+/// The same, for a group that covers a *corner* of the page rather than all of it.
+///
+/// A scissor is stated in the attachment's coordinates and the damage box in device
+/// space, and ADR 0036 made those two differ: a layer is as big as its plan. Passing the
+/// device rectangle straight through is a wgpu validation error — a panic inside a
+/// library, which is worse than the refusal §5 allows — for every patched frame with a
+/// group smaller than its damage. This test is the shape of that frame: a 10 × 10 group
+/// under a 20 × 20 damage rectangle.
+#[test]
+fn a_group_smaller_than_the_damage_patches_too() {
+    let mut device = device();
+    let scene_a = wash(Color::new(1.0, 1.0, 1.0, 1.0));
+    let mut b = SceneBuilder::new();
+    b.group(
+        quorra_scene::GroupSpec {
+            alpha: 0.5,
+            blend: BlendMode::Normal,
+            clip: None,
+            knockout: false,
+            mask: None,
+            isolated: true,
+            compose: Compose::SrcOver,
+        },
+        |body| {
+            body.rect(
+                Rect::new(Point::new(2.0, 2.0), Point::new(12.0, 12.0)),
+                Affine::IDENTITY,
+                Color::new(0.0, 0.0, 0.0, 1.0),
+                None,
+                None,
+            )
+        },
+    )
+    .unwrap();
+    let scene_b = b.finish();
+    let full = Viewport::full(SIZE, SIZE, Affine::IDENTITY);
+
+    let patched = target_texture(&device);
+    device
+        .render(&scene_a, &full, Target::Texture(&patched))
+        .expect("baseline");
+    let damage = [Rect::new(Point::new(0.0, 0.0), Point::new(20.0, 20.0))];
+    device
+        .render(
+            &scene_b,
+            &Viewport {
+                width: SIZE,
+                height: SIZE,
+                transform: Affine::IDENTITY,
+                damage: &damage,
+            },
+            Target::Texture(&patched),
+        )
+        .expect("patched");
+
+    let reference = target_texture(&device);
+    device
+        .render(&scene_b, &full, Target::Texture(&reference))
+        .expect("reference");
+
+    let got = read_texture(&device, &patched);
+    let want = read_texture(&device, &reference);
+    for (x, y) in [(4, 4), (11, 11), (16, 16)] {
+        assert_eq!(
+            pixel(&got, x, y),
+            pixel(&want, x, y),
+            "inside damage at ({x}, {y}): must equal a full redraw"
+        );
+    }
+    assert_eq!(
+        pixel(&got, 40, 40),
+        [255, 255, 255, 255],
+        "outside: the previous frame survives"
+    );
+}
+
 /// A `Readback` target has no retained contents to patch: the frame draws fully
 /// and says so — a `Report`, never a silent choice (§5).
 #[test]
