@@ -191,15 +191,21 @@ pub struct Counters {
     pub commands_culled: u32,
     /// Bytes scheduled for CPU→GPU transfer this frame.
     pub bytes_uploaded: u64,
-    /// Full-target internal layer textures this frame allocated — the compositor's
-    /// peak, not its total (ADR 0020).
+    /// Internal layer textures this frame allocated — the compositor's peak, not its
+    /// total (ADR 0020).
     ///
     /// A group and every element with a non-Normal blend mode is a plan, and each plan
-    /// renders into a ping-pong pair; the pairs are reused between siblings, so this is
-    /// twice the **depth** of the plan tree rather than twice its size. It is the
-    /// number `Limits::max_frame_bytes` is spent on for a page of nested artwork, which
-    /// is why it is a counter rather than an inference: a frame that reports 4 here
-    /// allocated 4, whatever its group count says.
+    /// accumulates in **one** texture the size of its own bounds (ADR 0036, ADR 0038);
+    /// textures are reused between siblings, so this follows the **depth** of the plan
+    /// tree rather than its size. One of them is not a plan's: while a child is being
+    /// composited, a copy of the pixels it covers is alive beside it, because a pass
+    /// cannot read the attachment it writes.
+    ///
+    /// It is the number `Limits::max_frame_bytes` is spent on for a page of nested
+    /// artwork, which is why it is a counter rather than an inference: a frame that
+    /// reports 4 here allocated 4, whatever its group count says. **A count, not a size**
+    /// — since ADR 0036 the textures differ in size, so this says how many existed at
+    /// once and `Timings`/the budget refusal say what they cost.
     pub layer_textures: u32,
 }
 

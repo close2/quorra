@@ -98,7 +98,7 @@ pub struct Device {
     winding_texture: crate::winding::WindingTexture,
     /// A layer pair made ahead of the frame that will want it (ADR 0035), and held only
     /// until that frame takes it — the pool itself stays per-frame, as ADR 0012 decided.
-    warmed_pair: Option<(u32, u32, layers::Pair)>,
+    warmed_layer: Option<(u32, u32, wgpu::Texture)>,
     timestamps: Option<TimestampSupport>,
     /// The frame's two timestamps and their buffers, kept for the device's life
     /// (ADR 0031). Absent when the adapter has no timestamp queries, and absent for
@@ -392,7 +392,7 @@ impl Device {
             coverage: options.coverage,
             instrument_encode: options.instrument_encode,
             winding_texture: crate::winding::WindingTexture::default(),
-            warmed_pair: None,
+            warmed_layer: None,
             // Rounded to a square grid and bounded, here rather than at the call site:
             // an option is a request, and what the lane can actually sample is ours.
             coverage_samples: {
@@ -578,18 +578,14 @@ impl Device {
         }
         // Held until the frame that wants it takes it, and no longer: the pool itself
         // stays per-frame, because ADR 0012 declined to keep one and nothing measured
-        // here overturns that. Making the pair and dropping it immediately was tried and
-        // measures the same on this driver (11.3 ms against 10.3 for a first frame), but
-        // it relies on the driver keeping a freed allocation warm, which is a promise no
-        // API makes.
-        self.warmed_pair = Some((
-            width,
-            height,
-            [
-                layers::warm_texture(self, width, height),
-                layers::warm_texture(self, width, height),
-            ],
-        ));
+        // here overturns that. Making the texture and dropping it immediately was tried
+        // and measures the same on this driver (11.3 ms against 10.3 for a first frame),
+        // but it relies on the driver keeping a freed allocation warm, which is a promise
+        // no API makes.
+        //
+        // One texture, since ADR 0038: a plan accumulates in one rather than ping-ponging
+        // between two, so a target-sized one is the whole of what the root will ask for.
+        self.warmed_layer = Some((width, height, layers::warm_texture(self, width, height)));
     }
 
     /// Block until the warm set is compiled. Startup measurement support; a caller
@@ -818,7 +814,7 @@ impl Device {
         let dummy_view = self.ensure_dummy();
         let mask_count = encoded.mask_plans.len();
         // Taken, not borrowed: it belongs to the first frame of its size and to no other.
-        let warmed = match self.warmed_pair.take() {
+        let warmed = match self.warmed_layer.take() {
             Some((w, h, pair)) if (w, h) == (width, height) => Some(pair),
             _ => None,
         };
@@ -874,8 +870,7 @@ impl Device {
             executor.blit_to_target(&mut recorder, &root.view(), &target_view, target_format);
         }
         executor.end_stamp(&mut recorder, &target_view);
-        let layer_textures =
-            u32::try_from(executor.pool.peak().saturating_mul(2)).unwrap_or(u32::MAX);
+        let layer_textures = u32::try_from(executor.pool.peak()).unwrap_or(u32::MAX);
         let phases = std::mem::take(&mut executor.phases);
         drop(executor);
         if let Some(q) = query {
@@ -1443,9 +1438,8 @@ impl Device {
         &self,
         op: &ChildOp,
         region: Region,
-        child: Region,
-        backdrop: &wgpu::TextureView,
-        src: &wgpu::TextureView,
+        backdrop: (&wgpu::TextureView, Region),
+        child: (&wgpu::TextureView, Region),
         mask: (&wgpu::TextureView, MaskPlacement),
         scratch: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
@@ -1466,14 +1460,17 @@ impl Device {
             let at = 48 + i * 4;
             bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
         }
-        // Where this pass writes and where the child it reads lives (ADR 0036).
+        // Where this pass writes, and where the two textures it reads live (ADR 0036,
+        // ADR 0038).
         for (i, v) in [
             region.x as f32,
             region.y as f32,
-            child.x as f32,
-            child.y as f32,
-            child.width as f32,
-            child.height as f32,
+            child.1.x as f32,
+            child.1.y as f32,
+            child.1.width as f32,
+            child.1.height as f32,
+            backdrop.1.x as f32,
+            backdrop.1.y as f32,
         ]
         .into_iter()
         .enumerate()
@@ -1500,11 +1497,11 @@ impl Device {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(backdrop),
+                    resource: wgpu::BindingResource::TextureView(backdrop.0),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(src),
+                    resource: wgpu::BindingResource::TextureView(child.0),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,

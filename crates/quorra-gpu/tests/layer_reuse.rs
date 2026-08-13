@@ -1,17 +1,22 @@
 //! What a frame's layer textures cost is the plan tree's **depth**, not its size.
 //!
 //! ADR 0020. A group — and every element with a non-Normal blend mode, which §11.3.5
-//! makes an implicit one-element group — renders into a ping-pong pair of full-target
-//! textures. Holding one pair per plan priced a page at `(plans + 1) × 2` full-target
-//! textures, which at 1191×1684 is 16.05 MB per plan: seventeen plans exceeded the
-//! default 256 MiB budget, and pages of nested artwork reach seventeen easily.
+//! makes an implicit one-element group — renders into a texture of its own. Holding one
+//! *pair* per plan priced a page at `(plans + 1) × 2` full-target textures, which at
+//! 1191×1684 is 16.05 MB per plan: seventeen plans exceeded the default 256 MiB budget,
+//! and pages of nested artwork reach seventeen easily.
 //!
-//! The compositor walks the tree depth-first and a child's pair is dead the moment its
-//! parent's composite has read it, so siblings can share. These tests hold both halves
-//! of that: the **count** a frame allocates (`Counters::layer_textures`), and that
-//! sharing textures between siblings does not change a single pixel — a frame drawn
-//! with reuse must equal one drawn without, which is what the golden comparison here
-//! is for.
+//! The compositor walks the tree depth-first and a child's texture is dead the moment its
+//! parent's composite has read it, so siblings can share. These tests hold both halves of
+//! that: the **count** a frame allocates (`Counters::layer_textures`), and that sharing
+//! textures between siblings does not change a single pixel — a frame drawn with reuse
+//! must equal one drawn without, which is what the golden comparison here is for.
+//!
+//! **What a level costs is one texture plus a transient** (ADR 0038): a plan accumulates
+//! in one texture rather than ping-ponging between two, and the composite that folds a
+//! child into it reads a copy of the pixels it covers — the child's size, alive only for
+//! that pass. So a chain `n` plans deep holds `n + 1` at its worst moment, where it held
+//! `2n`.
 
 // Test-file lint policy as in m1.rs.
 #![allow(
@@ -124,10 +129,11 @@ fn render(device: &mut Device, scene: &Scene) -> (Vec<u8>, u32) {
     (frame.into_raster().unwrap().into_pixels(), textures)
 }
 
-/// Sixteen sibling groups are thirty-three plans and still six textures, because at
-/// no moment are two siblings alive. Six and not four: each sibling is a group holding
-/// a *blended* rectangle, and §11.3.5 makes that element an implicit one-element group
-/// of its own — root, group, wrapper, three deep.
+/// Sixteen sibling groups are thirty-three plans and still four textures, because at no
+/// moment are two siblings alive. Three deep and not two: each sibling is a group holding
+/// a *blended* rectangle, and §11.3.5 makes that element an implicit one-element group of
+/// its own — root, group, wrapper. The fourth is the backdrop the innermost composite
+/// copies out of its parent (ADR 0038).
 #[test]
 fn siblings_share_the_same_textures() {
     let mut device = device_with_budget(quorra_gpu::DEFAULT_MAX_FRAME_BYTES);
@@ -135,32 +141,34 @@ fn siblings_share_the_same_textures() {
         let (_, textures) = render(&mut device, &siblings(count));
         assert_eq!(
             textures,
-            6,
-            "{count} sibling groups (each three plans deep) must cost the depth's six \
+            4,
+            "{count} sibling groups (each three plans deep) must cost the depth's four \
              textures, not the tree's {}",
-            2 * (2 * count + 1)
+            2 * count + 2
         );
     }
 }
 
-/// Nesting is what does cost: one pair per level, because a parent holds its own
-/// textures while its child renders into another's.
+/// Nesting is what does cost: one texture per level, because a parent holds its own while
+/// its child renders into another — plus the one transient copy the deepest composite
+/// reads (ADR 0038), which is one whatever the depth, since composites finish innermost
+/// first and each releases its copy before the next acquires one.
 #[test]
 fn nesting_is_what_costs_a_texture() {
     let mut device = device_with_budget(quorra_gpu::DEFAULT_MAX_FRAME_BYTES);
     for depth in [1_usize, 2, 5] {
         let (_, textures) = render(&mut device, &nested(depth).unwrap());
-        let expected = u32::try_from(2 * (depth + 1)).unwrap();
+        let expected = u32::try_from(depth + 2).unwrap();
         assert_eq!(
             textures, expected,
-            "{depth} nested groups hold {depth} pairs plus the root's"
+            "{depth} nested groups hold {depth} textures plus the root's and one copy"
         );
     }
 }
 
-/// The pixels are the point: reuse must be invisible. Sixteen sibling groups once
-/// needed sixty-six textures and now need six, and every patch must land exactly where
-/// the same group drew it alone.
+/// The pixels are the point: reuse must be invisible. Sixteen sibling groups once needed
+/// sixty-six textures and now need four, and every patch must land exactly where the same
+/// group drew it alone.
 #[test]
 fn reuse_changes_no_pixel() {
     let mut device = device_with_budget(quorra_gpu::DEFAULT_MAX_FRAME_BYTES);
@@ -212,29 +220,29 @@ fn single(index: usize) -> Scene {
     builder.finish()
 }
 
-/// The budget is spent on the peak, and the refusal still names both numbers: a scene
-/// of many siblings fits a budget sized for four textures, and one nested past it does
-/// not.
+/// The budget is spent on the peak, and the refusal still names both numbers: a scene of
+/// many siblings fits a budget sized for four textures, and one nested past it does not.
 #[test]
 fn the_budget_prices_the_peak_and_still_refuses_past_it() {
-    let six_textures = 6 * u64::from(W) * u64::from(H) * 4;
-    let mut device = device_with_budget(six_textures + 4096);
+    let page = u64::from(W) * u64::from(H) * 4;
+    let mut device = device_with_budget(4 * page + 4096);
 
     let (_, textures) = render(&mut device, &siblings(16));
-    assert_eq!(textures, 6, "sixteen siblings fit a six-texture budget");
+    assert_eq!(textures, 4, "sixteen siblings fit a four-texture budget");
     // And they fit it while each sibling's own layer is a patch rather than a page: the
-    // budget is spent on the chain that is alive at once, which ADR 0036 now prices at
-    // each plan's own size.
+    // budget is spent on the chain that is alive at once, which ADR 0036 prices at each
+    // plan's own size and ADR 0038 at one texture per plan.
 
-    // Four levels of nesting need ten textures, which this budget cannot hold.
+    // Four levels of nesting need six textures — five plans and the deepest composite's
+    // copy, all of them page-sized here because every group covers the page.
     match device.render(
         &nested(4).unwrap(),
         &Viewport::full(W, H, Affine::IDENTITY),
         Target::Readback,
     ) {
         Err(RenderError::FrameBudgetExceeded { needed, budget }) => {
-            assert_eq!(needed, 10 * u64::from(W) * u64::from(H) * 4);
-            assert_eq!(budget, six_textures + 4096);
+            assert_eq!(needed, 6 * page);
+            assert_eq!(budget, 4 * page + 4096);
         }
         other => panic!("expected the depth to be refused by name, got {other:?}"),
     }

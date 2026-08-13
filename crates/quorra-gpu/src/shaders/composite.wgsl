@@ -33,18 +33,20 @@ struct Params {
     // Region empty (min >= max in `clip_residue_rect`) means no residue.
     residue: vec4f,
     residue_rect: vec4f,
-    // Where this pass's attachment and the child it reads sit in device space, and how
-    // big the child is (ADR 0036).
+    // Where this pass's attachment, the child it reads and the backdrop copy it reads sit
+    // in device space, and how big the child is (ADR 0036, ADR 0038).
     //
-    // A layer is allocated at its plan's bounds, so three spaces meet in this pass: the
+    // A layer is allocated at its plan's bounds, so four spaces meet in this pass: the
     // attachment (the parent's region), device space (what every rectangle in this
-    // uniform is stated in), and the child's own texture. `origin` converts the first to
-    // the second and `child_origin` the second to the third; outside the child's
-    // rectangle there is nothing to read, and nothing is what a plan contributes there.
+    // uniform is stated in), the child's own texture, and the copy of the pixels this
+    // pass is about to cover. `origin` converts the first to the second, `child_origin`
+    // and `backdrop_origin` the second to the last two. Outside the child's rectangle
+    // there is nothing to read, and nothing is what a plan contributes there — which is
+    // why the pass is scissored to the child and never asked to shade beyond it.
     origin: vec2f,
     child_origin: vec2f,
     child_size: vec2f,
-    _pad2: vec2f,
+    backdrop_origin: vec2f,
     // Where the group's soft mask sits (ADR 0037): its device corner in .xy, its size
     // in texels in .zw.
     mask_rect: vec4f,
@@ -257,8 +259,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     // Device space, which is what `clip`, `residue` and the mask are stated in; the
     // attachment's own texel is `pi` (ADR 0036).
     let p = floor(in.position.xy) + params.origin;
-    let pi = vec2i(floor(in.position.xy));
-    let b = textureLoad(backdrop_tex, pi, 0);
+    let b = textureLoad(backdrop_tex, vec2i(p - params.backdrop_origin), 0);
     // The child's texture holds only its own rectangle of the frame.
     let child = p - params.child_origin;
     let inside = all(child >= vec2f(0.0)) && all(child < params.child_size);

@@ -460,8 +460,10 @@ fn render(device: &mut Device, scene: &Scene) -> (Counters, Duration) {
 ///   The two clips resolve to one rectangle, the shape living in the residue.
 /// - **artwork** — 684 top-level nodes are 676 draws plus 8 groups (`Counters::commands`
 ///   counts the scene's top level). **600 tiles** are the 600 curve-clipped commands,
-///   and **4 layer textures** are two pairs: the root's, and one group's at a time,
-///   which is ADR 0020's depth pricing showing its work on eight sibling groups.
+///   and **3 layer textures** are the root's accumulator, one group's at a time, and the
+///   copy of the pixels that group's composite covers — ADR 0020's depth pricing showing
+///   its work on eight sibling groups, at ADR 0038's one texture per plan. It was 4 while
+///   a plan ping-ponged between two.
 /// - **image page** — 200 fills and 32 images under *rectangular* clips: **no tiles at
 ///   all**, against dense text's 40. That contrast is ADR 0007's whole claim, and it is
 ///   the reason `rect_clips` is a field of the archetype.
@@ -474,7 +476,7 @@ fn render(device: &mut Device, scene: &Scene) -> (Counters, Duration) {
 const BASELINE: [(&str, [u32; 7]); 6] = [
     ("median page", [12, 0, 9, 12, 0, 0, 0]),
     ("dense text", [4320, 0, 818, 2164, 1, 40, 0]),
-    ("artwork", [684, 0, 300, 300, 1, 600, 4]),
+    ("artwork", [684, 0, 300, 300, 1, 600, 3]),
     ("image page", [232, 0, 60, 158, 4, 0, 0]),
     ("clip mountain", [1200, 0, 200, 800, 1200, 0, 0]),
     ("giant", [1500, 0, 1500, 1500, 0, 0, 0]),

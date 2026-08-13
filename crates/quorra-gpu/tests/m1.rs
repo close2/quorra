@@ -570,10 +570,14 @@ fn refusals_name_what_they_refuse() {
 #[test]
 fn frame_budget_refusal_precedes_target_binding() {
     let adapter = &vulkan_adapters()[0];
-    // One group at 64×64 needs two ping-pong pairs: 2 plans × 2 × 64 × 64 × 4 =
-    // 65536 internal bytes. A 32 KiB budget admits the scene's few hundred
+    // One group at 64×64 needs 16 896 internal bytes: the root's texture at the target
+    // (16 384), the group's at the 8 × 8 it draws (256), and the copy of those same
+    // pixels its composite reads (256). A 16 KiB budget admits the scene's few hundred
     // instance bytes through encode and refuses on the internal textures.
-    let budget = 32 * 1024;
+    //
+    // It was 32 KiB while the same scene needed 65 536 — two plans, a ping-pong pair
+    // each, both at the target (ADR 0036 sized them, ADR 0038 halved them).
+    let budget = 16 * 1024;
     let mut device = Device::headless(&Options {
         adapter: Some(adapter.clone()),
         max_frame_bytes: budget,
@@ -611,12 +615,14 @@ fn frame_budget_refusal_precedes_target_binding() {
     ) {
         Err(RenderError::FrameBudgetExceeded { needed, budget: b }) => {
             assert_eq!(b, budget);
-            // Two plans, one pair each — and since ADR 0036 a pair is as big as its
-            // plan: the root is the target, the group is the 8 × 8 it draws.
+            // Two plans, one texture each (ADR 0038) at their own sizes (ADR 0036): the
+            // root is the target, the group is the 8 × 8 it draws — plus the copy of
+            // those same 8 × 8 pixels its composite reads out of the root.
             assert_eq!(
                 needed,
-                2 * 64 * 64 * 4 + 2 * 8 * 8 * 4,
-                "the root's pair at the target's size and the group's at its own"
+                64 * 64 * 4 + 2 * 8 * 8 * 4,
+                "the root at the target's size, the group at its own, and the backdrop \
+                 its composite covers"
             );
         }
         other => panic!("expected FrameBudgetExceeded before NoSurface, got {other:?}"),

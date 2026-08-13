@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use crate::device::{Device, PassQuery};
 use crate::encode::{Batch, BatchKind, ChildOp, DrawStyle, Encoded, ImageOp, Op, ShadedOp};
 use crate::error::RenderError;
-use crate::layers::{LayerPool, Pair};
+use crate::layers::LayerPool;
 use crate::mask::{MaskPlacement, Realised};
 use crate::pipeline::Kind;
 
@@ -91,11 +91,10 @@ pub(crate) struct Executor<'a> {
     pub region: Region,
 }
 
-/// One plan's finished pixels, and the pair they are in — returned rather than the
-/// view alone, because the caller is what gives the pair back (ADR 0020).
+/// One plan's finished pixels — the texture itself rather than a view, because the
+/// caller is what gives it back to the pool (ADR 0020).
 pub(crate) struct Rendered {
-    pair: Pair,
-    current: usize,
+    texture: wgpu::Texture,
     /// Where in device space this plan's texture sits, which the composite that reads it
     /// must subtract (ADR 0036).
     region: Region,
@@ -151,6 +150,29 @@ impl Region {
         ]
     }
 
+    /// This region as a device-space rectangle.
+    pub(crate) const fn rect(self) -> [u32; 4] {
+        [self.x, self.y, self.width, self.height]
+    }
+
+    /// The rectangle two regions share, or `None` when they do not meet.
+    ///
+    /// A child's region and its parent's need not contain one another: a plan's bounds
+    /// grow by each child's bounds **intersected with the clip the composite will apply**
+    /// (`encode.rs`), so a child clipped down to a corner has a region larger than the
+    /// part of the parent it can reach. Their meeting is what the composite writes, and
+    /// `None` is a child the clip removed entirely — which composites to nothing, since
+    /// `clip_coverage` is zero everywhere it could have contributed.
+    pub(crate) fn meet(self, other: Self) -> Option<Self> {
+        let [x, y, width, height] = self.scissor_in(other.rect());
+        (width > 0 && height > 0).then_some(Self {
+            x: self.x.saturating_add(x),
+            y: self.y.saturating_add(y),
+            width,
+            height,
+        })
+    }
+
     /// The pixels a plan's device bounds cover, rounded out and clamped.
     ///
     /// A plan that marks nothing gets one texel rather than none: wgpu refuses a
@@ -182,8 +204,27 @@ impl Region {
 impl Rendered {
     /// The texture holding this plan's result.
     pub(crate) fn view(&self) -> wgpu::TextureView {
-        self.pair[self.current].create_view(&wgpu::TextureViewDescriptor::default())
+        view_of(&self.texture)
     }
+}
+
+/// The default view of a whole texture, which is the only kind this crate makes.
+fn view_of(texture: &wgpu::Texture) -> wgpu::TextureView {
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// The rectangle two scissor rectangles share, in the coordinates both are stated in.
+fn overlap(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
+    let left = a[0].max(b[0]);
+    let top = a[1].max(b[1]);
+    let right = a[0].saturating_add(a[2]).min(b[0].saturating_add(b[2]));
+    let bottom = a[1].saturating_add(a[3]).min(b[1].saturating_add(b[3]));
+    [
+        left,
+        top,
+        right.saturating_sub(left),
+        bottom.saturating_sub(top),
+    ]
 }
 
 impl Executor<'_> {
@@ -244,13 +285,13 @@ impl Executor<'_> {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.apply_scissor(&mut pass, region);
+            self.scissor_pass(&mut pass, region, None);
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
             drop(pass);
             // The reduce has read it; the mask's own R8 is what outlives this loop.
-            self.pool.release(group.pair);
+            self.pool.release(group.texture);
             if let Some(slot) = self.masks.get_mut(index) {
                 *slot = Some(Realised {
                     view: mask_view,
@@ -304,12 +345,9 @@ impl Executor<'_> {
         };
         // **As big as the plan, not as big as the target** (ADR 0036), with two
         // exceptions. The root *is* the target. And a plan that is seeded takes its
-        // parent's region: §11.4.4's initial backdrop is copied in texel for texel
-        // (`seed_layer`), and a copy between two rectangles of different origins is a
-        // blit with an offset — which `blit.wgsl` does not have, and which two other
-        // paths share. A non-isolated group is rare enough (ADR 0019 refuses most of
-        // them) that paying the target's size for one costs less than an offset nobody
-        // else needs.
+        // parent's region: §11.4.4's initial backdrop is copied in texel for texel, and
+        // the interpolation that later takes it back out (ADR 0019) is stated over the
+        // whole of the group's own buffer.
         //
         // A plan that marks nothing still needs somewhere for the composite to read, and
         // one texel is enough for a rectangle nobody samples.
@@ -318,13 +356,22 @@ impl Executor<'_> {
         } else {
             Region::of(plan.bounds, self.width, self.height)
         };
-        let pair = self.pool.acquire(self.device, region.width, region.height);
+        // One texture, not a ping-pong pair (ADR 0038): a child's composite writes into
+        // this same accumulator, because the pixels it needs to read are copied out of it
+        // first — at the child's size, which is all the composite writes.
+        let accumulator = self.pool.acquire(self.device, region.width, region.height);
+        let view = view_of(&accumulator);
         let outer = std::mem::replace(&mut self.region, region);
-        let mut current = 0_usize;
         let mut cleared = false;
         if let Some(backdrop) = seed {
-            let view = pair[0].create_view(&wgpu::TextureViewDescriptor::default());
-            self.seed_layer(recorder, backdrop, &view);
+            self.copy_pass(
+                recorder,
+                "quorra seed non-isolated group",
+                backdrop,
+                [0.0, 0.0],
+                &view,
+                region,
+            );
             cleared = true;
         }
         let mut op_index = 0;
@@ -336,7 +383,6 @@ impl Executor<'_> {
                     while op_index < plan.ops.len() && !matches!(plan.ops[op_index], Op::Child(_)) {
                         op_index = op_index.saturating_add(1);
                     }
-                    let view = pair[current].create_view(&wgpu::TextureViewDescriptor::default());
                     let run = run_ops(&plan.ops[run_start..op_index]);
                     self.draw_pass(
                         recorder,
@@ -350,14 +396,12 @@ impl Executor<'_> {
                 Op::Child(child) => {
                     let child_op = *child;
                     op_index = op_index.saturating_add(1);
-                    let backdrop_view =
-                        pair[current].create_view(&wgpu::TextureViewDescriptor::default());
                     if !cleared {
-                        // The composite reads the backdrop, so it must exist even if
-                        // nothing was drawn yet: clear it with an empty pass.
+                        // The composite reads the accumulator through a copy, so it must
+                        // exist even if nothing was drawn yet: clear it with an empty pass.
                         self.draw_pass(
                             recorder,
-                            &backdrop_view,
+                            &view,
                             wgpu::TextureFormat::Rgba8Unorm,
                             true,
                             &[],
@@ -368,36 +412,73 @@ impl Executor<'_> {
                     // group's backdrop, so its buffer begins as a copy of what is under
                     // it. The composite that follows takes that contribution back out
                     // (ADR 0019), which is why this seeding is only half a change.
-                    let seed = (!child_op.isolated).then_some(&backdrop_view);
+                    let seed = (!child_op.isolated).then_some(&view);
                     let child =
                         self.render_plan(recorder, child_op.layer.saturating_add(1), seed)?;
-                    let flip = 1_usize.saturating_sub(current);
-                    let out_view = pair[flip].create_view(&wgpu::TextureViewDescriptor::default());
-                    self.composite_pass(
-                        recorder,
-                        &out_view,
-                        &backdrop_view,
-                        &child.view(),
-                        child.region,
-                        &child_op,
-                    );
+                    self.composite_child(recorder, &view, region, &child, &child_op);
                     // Every pass that reads the child has been recorded; a sibling may
-                    // have its textures now.
-                    self.pool.release(child.pair);
-                    current = flip;
+                    // have its texture now.
+                    self.pool.release(child.texture);
                 }
             }
         }
         if !cleared {
-            let view = pair[current].create_view(&wgpu::TextureViewDescriptor::default());
             self.draw_pass(recorder, &view, wgpu::TextureFormat::Rgba8Unorm, true, &[])?;
         }
         self.region = outer;
         Ok(Rendered {
-            pair,
-            current,
+            texture: accumulator,
             region,
         })
+    }
+
+    /// Composite one finished child onto the plan accumulating it (§11.3.6).
+    ///
+    /// Two passes, and the first is what lets there be one texture per plan rather than
+    /// two (ADR 0038): the composite cannot read the attachment it writes, so the pixels
+    /// it is about to cover are copied out — **at the size of `child ∩ parent`**, because
+    /// that is the whole of what it writes. Outside the child's own rectangle every branch
+    /// of `composite.wgsl` collapses to the backdrop it read, so those pixels are already
+    /// what the pass would put there.
+    ///
+    /// A child that meets its parent nowhere composites to nothing: the clip that shrank
+    /// the parent's bounds is the same clip whose coverage the pass would multiply by, and
+    /// it is zero everywhere the child could have contributed.
+    fn composite_child(
+        &mut self,
+        recorder: &mut wgpu::CommandEncoder,
+        accumulator: &wgpu::TextureView,
+        region: Region,
+        child: &Rendered,
+        op: &ChildOp,
+    ) {
+        let Some(onto) = region.meet(child.region) else {
+            return;
+        };
+        let copy = self.pool.acquire(self.device, onto.width, onto.height);
+        let copy_view = view_of(&copy);
+        #[allow(clippy::cast_precision_loss)] // extents are exact in f32
+        let from = [
+            onto.x.saturating_sub(region.x) as f32,
+            onto.y.saturating_sub(region.y) as f32,
+        ];
+        self.copy_pass(
+            recorder,
+            "quorra composite backdrop",
+            accumulator,
+            from,
+            &copy_view,
+            onto,
+        );
+        self.composite_pass(
+            recorder,
+            accumulator,
+            region,
+            (&copy_view, onto),
+            (&child.view(), child.region),
+            op,
+        );
+        self.pool.release(copy);
     }
 
     /// One render pass of lane batches and single-quad ops onto `view`. Public to
@@ -445,7 +526,7 @@ impl Executor<'_> {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        self.apply_scissor(&mut pass, self.region);
+        self.scissor_pass(&mut pass, self.region, None);
         for item in &ready {
             let batch = match item {
                 Ready::Batch(batch) => batch,
@@ -555,27 +636,27 @@ impl Executor<'_> {
         Ok((ready, needed))
     }
 
-    /// One composite pass: `out = child over/blended-onto backdrop` per §11.3.6.
+    /// One composite pass: `accumulator = child over/blended-onto backdrop` per §11.3.6.
+    ///
+    /// The attachment is the plan's own accumulator and the pass is **scissored to
+    /// `onto`** — the part of it the child can reach (ADR 0038). `backdrop` holds the copy
+    /// of exactly those pixels, made before this pass because a pass cannot read what it
+    /// writes. The load op is `Load` for the same reason: everything outside the scissor
+    /// is already what this pass would have written there.
     fn composite_pass(
         &mut self,
         recorder: &mut wgpu::CommandEncoder,
-        out: &wgpu::TextureView,
-        backdrop: &wgpu::TextureView,
-        child: &wgpu::TextureView,
-        child_region: Region,
+        accumulator: &wgpu::TextureView,
+        region: Region,
+        backdrop: (&wgpu::TextureView, Region),
+        child: (&wgpu::TextureView, Region),
         op: &ChildOp,
     ) {
         let mask = self.mask_for(op.mask);
         let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
-        let bind = self.device.composite_bind(
-            op,
-            self.region,
-            child_region,
-            backdrop,
-            child,
-            mask,
-            scratch,
-        );
+        let bind = self
+            .device
+            .composite_bind(op, region, backdrop, child, mask, scratch);
         let (pipeline, compiled) = self
             .device
             .pipelines()
@@ -587,11 +668,11 @@ impl Executor<'_> {
         let mut pass = recorder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("quorra composite"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: out,
+                view: accumulator,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -600,27 +681,34 @@ impl Executor<'_> {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        self.apply_scissor(&mut pass, self.region);
+        self.scissor_pass(&mut pass, region, Some(backdrop.1));
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
     }
 
-    /// Seed a non-isolated group's buffer with its backdrop (§11.4.4): one REPLACE
-    /// blit of the parent's accumulated texture into the child's first texture.
+    /// One rectangle of one texture copied into another, whole and unchanged.
+    ///
+    /// Two callers. §11.4.4's **seed**: a non-isolated group's buffer begins as a copy of
+    /// what is under it (ADR 0019), at the parent's own origin. And the **backdrop** a
+    /// composite is about to cover, read from `from` in the accumulator because the copy
+    /// is the child's size rather than the plan's (ADR 0038).
     ///
     /// A blit rather than `copy_texture_to_texture` because it needs no copy usage on
-    /// every internal texture in the frame, and because it is scissored by the same
-    /// rule as every other pass — under a damage patch (ADR 0012) the seed is only the
-    /// pixels the frame is allowed to touch. `blit.wgsl` is a `textureLoad` and a store
-    /// with no blending, so between two `Rgba8Unorm` textures it is exact.
-    fn seed_layer(
+    /// every internal texture in the frame, and because it is scissored by the same rule
+    /// as every other pass — under a damage patch (ADR 0012) it copies only the pixels the
+    /// frame is allowed to touch. `blit.wgsl` is a `textureLoad` and a store with no
+    /// blending, so between two `Rgba8Unorm` textures it is exact.
+    fn copy_pass(
         &mut self,
         recorder: &mut wgpu::CommandEncoder,
-        backdrop: &wgpu::TextureView,
+        label: &str,
+        src: &wgpu::TextureView,
+        from: [f32; 2],
         into: &wgpu::TextureView,
+        into_region: Region,
     ) {
-        let bind = self.device.blit_bind(backdrop, [0.0, 0.0]);
+        let bind = self.device.blit_bind(src, from);
         let (pipeline, compiled) = self
             .device
             .pipelines()
@@ -630,7 +718,7 @@ impl Executor<'_> {
         }
         let stamp = self.pass_stamp();
         let mut pass = recorder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("quorra seed non-isolated group"),
+            label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: into,
                 depth_slice: None,
@@ -645,7 +733,7 @@ impl Executor<'_> {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        self.apply_scissor(&mut pass, self.region);
+        self.scissor_pass(&mut pass, into_region, None);
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
@@ -727,18 +815,30 @@ impl Executor<'_> {
         }
     }
 
-    /// Scissor an internal pass to the damage bounding box, when this frame patches.
+    /// Scissor an internal pass: to the damage bounding box when this frame patches, and
+    /// to `limit` when the pass writes only part of its attachment.
     ///
-    /// `into` is the region of the frame the pass's attachment holds, because that is
-    /// the space a scissor is stated in and the damage box is stated in device space
+    /// `into` is the region of the frame the pass's attachment holds, because that is the
+    /// space a scissor is stated in while both of the others are stated in device space
     /// (ADR 0036 made the two differ). A pass rendering into a plan smaller than the
     /// damage box is a wgpu validation error otherwise, and that is a panic inside a
     /// library rather than a refusal.
-    fn apply_scissor(&self, pass: &mut wgpu::RenderPass<'_>, into: Region) {
-        if let Some(rect) = self.scissor {
-            let [x, y, w, h] = into.scissor_in(rect);
-            pass.set_scissor_rect(x, y, w, h);
+    ///
+    /// `limit` is the composite's `child ∩ parent` (ADR 0038), and is the reason this
+    /// takes two rectangles rather than one: a patched frame compositing a small group
+    /// must honour both, and only their overlap does.
+    fn scissor_pass(&self, pass: &mut wgpu::RenderPass<'_>, into: Region, limit: Option<Region>) {
+        if self.scissor.is_none() && limit.is_none() {
+            return;
         }
+        let mut rect = [0, 0, into.width, into.height];
+        if let Some(damage) = self.scissor {
+            rect = overlap(rect, into.scissor_in(damage));
+        }
+        if let Some(limit) = limit {
+            rect = overlap(rect, into.scissor_in(limit.rect()));
+        }
+        pass.set_scissor_rect(rect[0], rect[1], rect[2], rect[3]);
     }
 
     /// The end-of-frame timestamp: an empty pass whose only job is the second

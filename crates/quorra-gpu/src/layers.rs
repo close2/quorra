@@ -1,26 +1,32 @@
 //! The frame's layer textures: how many exist at once, and what that costs.
 //!
-//! A group renders into a ping-pong **pair** of full-target textures — a pass cannot
-//! read its own attachment, so a child's composite writes the other one (ADR 0010).
-//! Until ADR 0020 a frame held one pair per plan, all of them alive from the first pass
-//! to the last, and priced that way: `(plans + 1) × 2` full-target textures. At
-//! 1191×1684 that is 16.05 MB per plan, so seventeen plans exceeded the default 256 MiB
-//! budget — and a plan is created per group *and* per element with a non-Normal blend
-//! mode, because §11.3.5 for a single element is an implicit one-element group.
+//! A plan renders into **one** texture the size of its own bounds (ADR 0036), and a
+//! child's composite writes into that same texture: a pass cannot read its own
+//! attachment, so the pixels it is about to cover are copied out first — into a texture
+//! the size of the *child*, which is the only part the composite writes (ADR 0038).
+//!
+//! It was a ping-pong **pair** per plan until then, each texture the full target. Until
+//! ADR 0020 a frame held one pair per plan alive from the first pass to the last, and
+//! priced that way: `(plans + 1) × 2` full-target textures. At 1191×1684 that is 16.05 MB
+//! per plan, so seventeen plans exceeded the default 256 MiB budget — and a plan is
+//! created per group *and* per element with a non-Normal blend mode, because §11.3.5 for
+//! a single element is an implicit one-element group.
 //!
 //! **The lifetime is a depth, not a count.** The compositor walks the plan tree
-//! depth-first: a child's pair is needed while it renders and while the parent's
-//! composite pass reads it, and never again. Siblings therefore never need pairs at the
-//! same time. [`LayerPool`] hands out the same textures again, and [`peak_pair_bytes`]
-//! prices exactly that peak — the heaviest root-to-leaf chain of the plan tree, once a
-//! pair is as big as its plan (ADR 0036).
+//! depth-first: a child's texture is needed while it renders and while the parent's
+//! composite pass reads it, and never again. Siblings therefore never need textures at
+//! the same time. [`LayerPool`] hands out the same ones again, and [`peak_layer_bytes`]
+//! prices exactly that peak — the heaviest root-to-leaf chain of the plan tree, each plan
+//! at its own size (ADR 0036).
 //!
 //! **Why handing back a texture with someone else's pixels in it is safe:** every
-//! acquired pair is fully written before it is read — the first draw pass clears it, a
-//! seeded non-isolated group blits its backdrop over it (ADR 0019), a composite writes
-//! its whole attachment, and a plan with no ops at all clears once. Under a damage
-//! scissor the written region and the read region are the same region. Nothing ever
-//! reads a texel this frame did not write.
+//! acquired texture is fully written before it is read — the first draw pass clears it, a
+//! seeded non-isolated group blits its backdrop over it (ADR 0019), a copied backdrop is
+//! written whole by its blit, and a plan with no ops at all clears once. A composite is
+//! the one pass that writes only part of its attachment, and it writes into the plan's
+//! own accumulator, which was cleared before anything drew. Under a damage scissor the
+//! written region and the read region are the same region. Nothing ever reads a texel
+//! this frame did not write.
 //!
 //! Passes recorded into one command encoder execute in order, so a texture reused by a
 //! later sibling is written after the earlier sibling's composite has read it; `wgpu`
@@ -30,9 +36,6 @@ use crate::device::Device;
 use crate::encode::{Encoded, LayerPlan, Op};
 use crate::pipeline::WARM_FORMAT;
 
-/// One plan's ping-pong textures.
-pub(crate) type Pair = [wgpu::Texture; 2];
-
 /// The frame's layer textures, reused across siblings.
 ///
 /// Not a cache: there is nothing to look up, and a pair carries no identity between
@@ -40,7 +43,7 @@ pub(crate) type Pair = [wgpu::Texture; 2];
 /// need at once".
 #[derive(Debug)]
 pub(crate) struct LayerPool {
-    free: Vec<Pair>,
+    free: Vec<wgpu::Texture>,
     live: usize,
     peak: usize,
 }
@@ -63,102 +66,108 @@ impl LayerPool {
     /// first frame costing 25 ms against a steady 5 — turned out to be about the *first*
     /// allocation of a size rather than about reuse. Keeping pairs between frames was
     /// implemented and measured and moved nothing either way.
-    pub(crate) fn warmed(pair: Option<Pair>) -> Self {
+    pub(crate) fn warmed(texture: Option<wgpu::Texture>) -> Self {
         Self {
-            free: pair.into_iter().collect(),
+            free: texture.into_iter().collect(),
             live: 0,
             peak: 0,
         }
     }
 
-    /// A pair for a plan about to render. Reuses a released one when there is one;
-    /// creates textures only when the depth of this frame's tree has grown past
-    /// anything seen so far, which is what [`peak_pair_bytes`] priced.
-    /// **A pair is reused only at its own size** (ADR 0036). Before layers were sized to
-    /// their plans every pair was the target's, and popping any free one was the same as
-    /// popping a matching one; now it is not, and handing a plan a texture of somebody
+    /// A texture for a plan about to render, or for the backdrop a composite copies out.
+    /// Reuses a released one when there is one; creates one only when this frame has
+    /// needed more at once than anything before it, which is what [`peak_layer_bytes`]
+    /// priced.
+    ///
+    /// **A texture is reused only at its own size** (ADR 0036). Before layers were sized
+    /// to their plans every one was the target's, and popping any free one was the same
+    /// as popping a matching one; now it is not, and handing a plan a texture of somebody
     /// else's size draws its content in the wrong place — twelve pages of the caller's
     /// corpus, with a highlight sitting above the line it belongs to.
-    pub(crate) fn acquire(&mut self, device: &Device, width: u32, height: u32) -> Pair {
+    pub(crate) fn acquire(&mut self, device: &Device, width: u32, height: u32) -> wgpu::Texture {
         self.live = self.live.saturating_add(1);
         self.peak = self.peak.max(self.live);
         let matching = self
             .free
             .iter()
-            .position(|pair| pair[0].width() == width && pair[0].height() == height);
+            .position(|texture| texture.width() == width && texture.height() == height);
         matching.map_or_else(
-            || {
-                [
-                    device.create_internal_texture("quorra layer", width, height, WARM_FORMAT),
-                    device.create_internal_texture("quorra layer", width, height, WARM_FORMAT),
-                ]
-            },
+            || device.create_internal_texture("quorra layer", width, height, WARM_FORMAT),
             |at| self.free.swap_remove(at),
         )
     }
 
-    /// Give a pair back, once every pass that reads it has been **recorded**. The
+    /// Give a texture back, once every pass that reads it has been **recorded**. The
     /// module comment has the ordering argument; the pixels in it are dead from here.
-    pub(crate) fn release(&mut self, pair: Pair) {
+    pub(crate) fn release(&mut self, texture: wgpu::Texture) {
         self.live = self.live.saturating_sub(1);
-        self.free.push(pair);
+        self.free.push(texture);
     }
 
-    /// How many pairs existed at once at the worst moment — the depth
-    /// [`peak_pair_bytes`] walked, and the number a `Frame` reports as
-    /// `Counters::layer_textures` (doubled: a pair is two textures).
+    /// How many textures existed at once at the worst moment — what
+    /// [`peak_layer_bytes`] priced, and the number a `Frame` reports as
+    /// `Counters::layer_textures`.
     pub(crate) const fn peak(&self) -> usize {
         self.peak
     }
 }
 
-/// The bytes of layer pairs a frame will hold at its worst moment (ADR 0036).
+/// The bytes of layer textures a frame will hold at its worst moment (ADR 0036, 0038).
 ///
-/// Not `pairs × the target`, because a pair is as big as its plan: what is alive at once
-/// is a root-to-leaf *chain* of plans, each holding its own pair while its children
-/// render, so the peak is the heaviest chain rather than the deepest one. A plan with two
-/// children pays for the heavier of them, not for both, because a sibling's pair is
-/// released before the next is acquired.
-fn peak_pair_bytes(encoded: &Encoded, width: u32, height: u32) -> u64 {
-    let pair_bytes = |plan: &LayerPlan, root: bool| -> u64 {
-        let region = if root {
-            crate::compose::Region::whole(width, height)
-        } else {
-            crate::compose::Region::of(plan.bounds, width, height)
-        };
+/// Not `plans × the target`, because a texture is as big as its plan: what is alive at
+/// once is a root-to-leaf *chain* of plans, each holding its own accumulator while its
+/// children render, so the peak is the heaviest chain rather than the deepest one. A plan
+/// with two children pays for the heavier of them, not for both, because a sibling's
+/// texture is released before the next is acquired.
+///
+/// One term is not a plan's: while a child is being **composited** its own texture is
+/// still alive and a copy of the backdrop it covers is alive beside it, at the size of
+/// `child ∩ parent` (ADR 0038). So the cost of a child is the heavier of rendering it and
+/// compositing it, and that is what the max below is.
+fn peak_layer_bytes(encoded: &Encoded, width: u32, height: u32) -> u64 {
+    let region_of = |plan: &LayerPlan| crate::compose::Region::of(plan.bounds, width, height);
+    let bytes_of = |region: crate::compose::Region| {
         u64::from(region.width)
             .saturating_mul(u64::from(region.height))
             .saturating_mul(4)
-            .saturating_mul(2)
+    };
+    // What a child costs its parent at the worst moment: rendering its own subtree, or
+    // holding its result beside the backdrop copy the composite reads.
+    let child_peak = |chain: &[u64], index: usize, parent: crate::compose::Region| -> u64 {
+        let Some(plan) = encoded.layers.get(index) else {
+            return 0;
+        };
+        let own = region_of(plan);
+        let backdrop = own.meet(parent).map_or(0, bytes_of);
+        chain
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .max(bytes_of(own).saturating_add(backdrop))
+    };
+    let heaviest_child = |chain: &[u64], plan: &LayerPlan, parent: crate::compose::Region| {
+        plan.ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Child(child) => Some(child_peak(chain, child.layer, parent)),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
     };
     // Backwards, so every child a plan names is already costed: the encoder appends a
     // child's plan before the plan that names it, so a child's index is always the lower.
     let mut chain = vec![0_u64; encoded.layers.len()];
     for index in (0..encoded.layers.len()).rev() {
         let plan = &encoded.layers[index];
-        let heaviest_child = plan
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                Op::Child(child) => chain.get(child.layer).copied(),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0);
-        chain[index] = pair_bytes(plan, false).saturating_add(heaviest_child);
+        let region = region_of(plan);
+        chain[index] = bytes_of(region).saturating_add(heaviest_child(&chain, plan, region));
     }
-    let below_root = encoded
-        .root
-        .ops
-        .iter()
-        .filter_map(|op| match op {
-            Op::Child(child) => chain.get(child.layer).copied(),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
-    // A soft mask realises before the root draws and gives its pairs back to the same
-    // pool, so the peak is the heavier of the two rather than their sum.
+    let root_region = crate::compose::Region::whole(width, height);
+    let below_root = heaviest_child(&chain, &encoded.root, root_region);
+    // A soft mask realises before the root draws and gives its textures back to the same
+    // pool, so the peak is the heavier of the two rather than their sum. A mask's group is
+    // never composited onto a parent, so it costs its own chain and no backdrop copy.
     let masks = encoded
         .mask_plans
         .iter()
@@ -166,13 +175,13 @@ fn peak_pair_bytes(encoded: &Encoded, width: u32, height: u32) -> u64 {
         .filter_map(|plan| chain.get(plan.root).copied())
         .max()
         .unwrap_or(0);
-    pair_bytes(&encoded.root, true).saturating_add(below_root.max(masks))
+    bytes_of(root_region).saturating_add(below_root.max(masks))
 }
 
 /// The bytes the frame's reduced soft masks hold at once.
 ///
 /// One R8 texel per pixel of each mask's own plan (ADR 0037), and *summed* rather than
-/// maximised: unlike a layer pair, a mask lives from its reduction to the last pass that
+/// maximised: unlike a layer, a mask lives from its reduction to the last pass that
 /// samples it, because draws all over the frame read it.
 fn mask_bytes(encoded: &Encoded, width: u32, height: u32) -> u64 {
     encoded
@@ -190,10 +199,10 @@ fn mask_bytes(encoded: &Encoded, width: u32, height: u32) -> u64 {
 /// What the compositor's internal textures cost this frame, for the budget check before
 /// any of them exist (§5: count then allocate; the refusal names both numbers).
 ///
-/// The heaviest chain of layer pairs, plus every reduced mask — each at its own plan's
-/// rectangle rather than at the target (ADR 0036 for the pairs, ADR 0037 for the masks).
-/// `force_layers` prices the root pair a damage-patched flat frame renders through
-/// (ADR 0012).
+/// The heaviest chain of layer textures, plus every reduced mask — each at its own plan's
+/// rectangle rather than at the target (ADR 0036 for the layers, ADR 0037 for the masks,
+/// ADR 0038 for the backdrop a composite copies). `force_layers` prices the root texture a
+/// damage-patched flat frame renders through (ADR 0012).
 pub(crate) fn internal_texture_bytes(
     encoded: &Encoded,
     width: u32,
@@ -205,9 +214,7 @@ pub(crate) fn internal_texture_bytes(
     if !needs_layers {
         return 0;
     }
-    // Pairs by the heaviest chain of plans and masks by their own rectangles, each at its
-    // own size (ADR 0036, ADR 0037).
-    peak_pair_bytes(encoded, width, height).saturating_add(mask_bytes(encoded, width, height))
+    peak_layer_bytes(encoded, width, height).saturating_add(mask_bytes(encoded, width, height))
 }
 
 #[cfg(test)]
@@ -217,16 +224,20 @@ mod tests {
     use crate::device::Device;
     use crate::startup::Options;
 
-    /// **A released pair is reused only at its own size** (ADR 0036).
+    /// **A released texture is reused only at its own size** (ADR 0036).
     ///
-    /// While every layer was the target's size, popping any free pair was the same as
+    /// While every layer was the target's size, popping any free one was the same as
     /// popping a matching one. It stopped being the same the moment a layer became as big
     /// as its plan, and the difference is not an inefficiency: a plan handed somebody
     /// else's texture draws its content in the wrong place. Twelve pages of the caller's
     /// corpus said so, with a highlight sitting above the line it belongs to — which is
     /// why this is a test rather than a comment.
+    ///
+    /// It matters twice over since ADR 0038, because the pool now also hands out the
+    /// backdrop copy a composite reads — which is the child's size, not the plan's, and so
+    /// asks for a second size in the middle of a frame as a matter of course.
     #[test]
-    fn a_pair_is_reused_only_at_its_own_size() {
+    fn a_texture_is_reused_only_at_its_own_size() {
         let device = Device::headless(&Options {
             adapter: Some("llvmpipe".into()),
             ..Options::default()
@@ -235,19 +246,19 @@ mod tests {
         let mut pool = LayerPool::warmed(None);
 
         let big = pool.acquire(&device, 64, 64);
-        assert_eq!((big[0].width(), big[0].height()), (64, 64));
+        assert_eq!((big.width(), big.height()), (64, 64));
         pool.release(big);
 
         let small = pool.acquire(&device, 32, 16);
         assert_eq!(
-            (small[0].width(), small[0].height()),
+            (small.width(), small.height()),
             (32, 16),
-            "the 64x64 pair in the pool is the wrong shape for this plan"
+            "the 64x64 texture in the pool is the wrong shape for this plan"
         );
         pool.release(small);
 
         // And the big one is still there for a plan that wants it.
         let again = pool.acquire(&device, 64, 64);
-        assert_eq!((again[0].width(), again[0].height()), (64, 64));
+        assert_eq!((again.width(), again.height()), (64, 64));
     }
 }

@@ -213,14 +213,16 @@ fn a_mask_is_its_groups_reduction_inside_the_rectangle_it_marks() {
 ///
 /// | | bytes |
 /// |---|---:|
-/// | the root's pair, `64 × 64 × 4 × 2` — always the target's, because the root *is* it | 32 768 |
-/// | the mask group's pair, `16 × 16 × 4 × 2`, released before the root draws | 2 048 |
+/// | the root's texture, `64 × 64 × 4` — always the target's, because the root *is* it | 16 384 |
+/// | the mask group's, `16 × 16 × 4`, released before the root draws | 1 024 |
 /// | the reduced mask, one R8 byte per texel of the same rectangle | 256 |
-/// | | **35 072** |
+/// | | **17 664** |
 ///
 /// Where a mask realised at the whole target adds `64 × 64` = 4 096 instead of 256 and
-/// renders its group into a target-sized pair rather than a 16 × 16 one, for 68 608.
-/// A budget of 35 072 draws this page; one byte less refuses it, naming both numbers (§5).
+/// renders its group into a target-sized texture rather than a 16 × 16 one, for 36 864.
+/// A budget of 17 664 draws this page; one byte less refuses it, naming both numbers (§5).
+/// (It read 35 072 against 68 608 until ADR 0038 gave every plan one texture instead of
+/// two; a mask group is never composited onto a parent, so it pays no backdrop copy.)
 ///
 /// The exactness is the point twice over. Before this sizing the two halves disagreed:
 /// a mask group's plan was *priced* at its own bounds and *realised* at the target, so
@@ -240,12 +242,12 @@ fn a_mask_over_a_corner_is_priced_for_the_corner() {
         })
     };
 
-    let mut exact = budgeted(35_072);
+    let mut exact = budgeted(17_664);
     exact
         .render(&scene, &viewport, Target::Readback)
         .expect("a mask over a sixteenth of the page is priced for a sixteenth of it");
 
-    let mut short = budgeted(35_071);
+    let mut short = budgeted(17_663);
     let refused = short
         .render(&scene, &viewport, Target::Readback)
         .expect_err("one byte short of the frame's own arithmetic");
@@ -253,8 +255,8 @@ fn a_mask_over_a_corner_is_priced_for_the_corner() {
         matches!(
             refused,
             quorra_gpu::RenderError::FrameBudgetExceeded {
-                needed: 35_072,
-                budget: 35_071,
+                needed: 17_664,
+                budget: 17_663,
             }
         ),
         "the refusal names what overflowed and by how much, got {refused:?}"
