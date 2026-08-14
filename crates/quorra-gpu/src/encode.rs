@@ -229,6 +229,43 @@ pub(crate) struct ChildOp {
     pub isolated: bool,
 }
 
+impl ChildOp {
+    /// The composite of the implicit one-element group a blended element draws through
+    /// (ISO 32000-2 §11.3.5).
+    ///
+    /// §11.3.5's blend function takes the *group's* backdrop, so an element whose blend
+    /// mode is not `Normal` is wrapped in a group holding it alone and composited once,
+    /// under the element's own mode — which is what makes the mode see the element's
+    /// colour rather than the accumulated layer's.
+    ///
+    /// The wrapper is a device trick and not a PDF group, and every field this fixes
+    /// says so: no group alpha, because the element's paint carries its own; no clip
+    /// rectangle and no residue, because the element resolved its clip before it was
+    /// wrapped and draws through it inside the layer; no stage of §11.4.6 (ADR 0033's
+    /// `compose`), because a group that *is* an erase or a deposit is a group the scene
+    /// asked for; and isolated, because a wrapper has no backdrop of its own to seed
+    /// (ADR 0019). The soft mask is the one thing the wrapper does take over: the
+    /// element is re-encoded without it, so the mask weighs the finished group once
+    /// rather than each draw inside it.
+    ///
+    /// Three arms reach this — a fill, a stroke and an image — and while each wrote the
+    /// eleven fields out, a field that came to differ between them would have been
+    /// three lanes disagreeing about one clause.
+    fn implicit_blend_group(layer: usize, blend: BlendMode, mask: Option<u32>) -> Self {
+        Self {
+            layer,
+            mode: blend_word(blend),
+            alpha: 1.0,
+            clip_rect: OPEN_CLIP,
+            residue_rect: [0.0; 4],
+            residue_origin: [0.0; 2],
+            compose: 0,
+            mask,
+            isolated: true,
+        }
+    }
+}
+
 /// A soft mask's realisation plan: its group's layer tree plus the reduction
 /// parameters (§11.5, mirrored byte-for-byte against the caller's rule).
 #[derive(Debug)]
@@ -765,17 +802,7 @@ impl Encoder<'_> {
                 };
                 encoder.command(index, &plain)
             })?;
-            self.push_op(Op::Child(ChildOp {
-                layer: child,
-                mode: blend_word(blend),
-                alpha: 1.0,
-                clip_rect: OPEN_CLIP,
-                residue_rect: [0.0; 4],
-                residue_origin: [0.0; 2],
-                compose: 0,
-                mask,
-                isolated: true,
-            }));
+            self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)));
             return Ok(());
         }
         self.distinct_outlines.insert(outline.0);
@@ -1177,17 +1204,7 @@ impl Encoder<'_> {
                 None,
             )
         })?;
-        self.push_op(Op::Child(ChildOp {
-            layer: child,
-            mode: blend_word(blend),
-            alpha: 1.0,
-            clip_rect: OPEN_CLIP,
-            residue_rect: [0.0; 4],
-            residue_origin: [0.0; 2],
-            compose: 0,
-            mask,
-            isolated: true,
-        }));
+        self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)));
         Ok(())
     }
 

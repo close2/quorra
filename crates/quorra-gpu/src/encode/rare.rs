@@ -20,10 +20,8 @@ use quorra_scene::{
     Affine, BlendMode, ClipId, ImageFilter, ImageId, MaskId, Paint, Point, Rect, ShadingKind,
 };
 
-use super::clips::{OPEN_CLIP, ResolvedClip};
-use super::{
-    ChildOp, DrawStyle, Encoder, Op, apply, blend_word, compose, transform_preserves_axes,
-};
+use super::clips::ResolvedClip;
+use super::{ChildOp, DrawStyle, Encoder, Op, apply, compose, transform_preserves_axes};
 use crate::error::RenderError;
 use crate::raster::{DeviceTransform, Polyline, Rule};
 
@@ -140,17 +138,7 @@ impl Encoder<'_> {
                     None,
                 )
             })?;
-            self.push_op(Op::Child(ChildOp {
-                layer: child,
-                mode: blend_word(blend),
-                alpha: 1.0,
-                clip_rect: OPEN_CLIP,
-                residue_rect: [0.0; 4],
-                residue_origin: [0.0; 2],
-                compose: 0,
-                mask,
-                isolated: true,
-            }));
+            self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)));
             return Ok(());
         }
         if self.resources.image(image).is_none() {
