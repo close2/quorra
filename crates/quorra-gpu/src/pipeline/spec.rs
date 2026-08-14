@@ -5,11 +5,18 @@
 //! that `pipeline.rs` is the store's laziness and its warm-up rather than a table of
 //! entry-point names. The three blend states below are the whole of ADR 0010's algebra
 //! as `wgpu` factors, named once and referred to by name from the arms that use them.
+//!
+//! The table has two axes and is written as two: twelve of the seventeen kinds are a
+//! [`Lane`] family — rectangles, coverage quads, images, shadings — in one of three
+//! [`Style`]s, and the style means the same thing in every family. Three more are the
+//! compositor's full-screen passes, which differ only in what they read. Writing the
+//! product out would be four copies of one two-line rule, which is a promise of
+//! sameness that nothing checks.
 
 use super::{Layouts, Modules};
 
-/// Which pipeline: the two lanes in their three blend styles, plus the compositor's
-/// own passes.
+/// Which pipeline: the four lane families in their three blend styles, plus the
+/// compositor's own passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Kind {
     /// Analytic rectangles, premultiplied over (`rect.wgsl` `fs_main`, ADR 0005).
@@ -106,121 +113,123 @@ pub(crate) struct Spec<'a> {
     pub(crate) strip: bool,
 }
 
+/// Which of ADR 0010's three styles a lane draws its quad in.
+///
+/// The four lane families differ in their shader, their bind-group layout and their
+/// instance buffer. They do *not* differ in this: in all four, knockout's shape-erase
+/// is `fs_shape` under [`ERASE`] and its deposit is `fs_main` under [`ADD`]. Naming the
+/// style once makes that agreement a fact of the code rather than four copies of a
+/// two-line rule that would have to be diffed to be checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Style {
+    /// The ordinary mark: premultiplied over.
+    Over,
+    /// Knockout's shape-erase, which writes only the source's shape.
+    Erase,
+    /// Knockout's additive deposit.
+    Add,
+}
+
+/// What distinguishes one lane family from another; [`Style`] is what they share.
+struct Lane<'a> {
+    label: &'static str,
+    shader: &'a wgpu::ShaderModule,
+    layout: &'a wgpu::PipelineLayout,
+    /// The instance buffer, when the lane has one. The image and shading lanes read
+    /// their placement from a uniform instead, so they draw from no vertex buffer at
+    /// all.
+    buffer: Option<(u64, &'static [wgpu::VertexAttribute])>,
+}
+
+impl<'a> Lane<'a> {
+    fn rect(layouts: &'a Layouts, modules: &'a Modules) -> Self {
+        Lane {
+            label: "quorra rect",
+            shader: &modules.rect,
+            layout: &layouts.lane_pipe,
+            buffer: Some((crate::encode::RECT_INSTANCE_STRIDE, &RECT_ATTRIBUTES)),
+        }
+    }
+
+    fn cover(layouts: &'a Layouts, modules: &'a Modules) -> Self {
+        Lane {
+            label: "quorra coverage",
+            shader: &modules.cover,
+            layout: &layouts.lane_pipe,
+            buffer: Some((crate::encode::QUAD_INSTANCE_STRIDE, &COVER_ATTRIBUTES)),
+        }
+    }
+
+    fn image(layouts: &'a Layouts, modules: &'a Modules) -> Self {
+        Lane {
+            label: "quorra image",
+            shader: &modules.image,
+            layout: &layouts.image_pipe,
+            buffer: None,
+        }
+    }
+
+    fn shading(layouts: &'a Layouts, modules: &'a Modules) -> Self {
+        Lane {
+            label: "quorra shading",
+            shader: &modules.shading,
+            layout: &layouts.shading_pipe,
+            buffer: None,
+        }
+    }
+
+    /// The family in one style. Every lane draws one four-corner strip quad per
+    /// instance; only the entry point and the blend state turn on the style.
+    fn spec(self, style: Style) -> Spec<'a> {
+        Spec {
+            label: self.label,
+            shader: self.shader,
+            layout: self.layout,
+            vertex: "vs_main",
+            entry: match style {
+                Style::Erase => "fs_shape",
+                Style::Over | Style::Add => "fs_main",
+            },
+            blend: Some(match style {
+                Style::Over => OVER,
+                Style::Erase => ERASE,
+                Style::Add => ADD,
+            }),
+            buffer: self.buffer,
+            step: wgpu::VertexStepMode::Instance,
+            strip: true,
+        }
+    }
+}
+
 impl<'a> Spec<'a> {
-    // One match arm per pipeline kind: irreducible dispatch, each arm a handful of
-    // lines (clippy.toml's stated exception style).
-    #[allow(clippy::too_many_lines)]
+    /// Which pipeline each [`Kind`] is: the lanes as a family and a style, the
+    /// compositor's passes one at a time.
     pub(crate) fn of(kind: Kind, layouts: &'a Layouts, modules: &'a Modules) -> Self {
         match kind {
-            Kind::RectOver | Kind::RectErase | Kind::RectAdd => Spec {
-                label: "quorra rect",
-                shader: &modules.rect,
-                layout: &layouts.lane_pipe,
-                vertex: "vs_main",
-                entry: if kind == Kind::RectErase {
-                    "fs_shape"
-                } else {
-                    "fs_main"
-                },
-                blend: Some(match kind {
-                    Kind::RectErase => ERASE,
-                    Kind::RectAdd => ADD,
-                    _ => OVER,
-                }),
-                buffer: Some((crate::encode::RECT_INSTANCE_STRIDE, &RECT_ATTRIBUTES)),
-                step: wgpu::VertexStepMode::Instance,
-                strip: true,
-            },
-            Kind::CoverOver | Kind::CoverErase | Kind::CoverAdd => Spec {
-                label: "quorra coverage",
-                shader: &modules.cover,
-                layout: &layouts.lane_pipe,
-                vertex: "vs_main",
-                entry: if kind == Kind::CoverErase {
-                    "fs_shape"
-                } else {
-                    "fs_main"
-                },
-                blend: Some(match kind {
-                    Kind::CoverErase => ERASE,
-                    Kind::CoverAdd => ADD,
-                    _ => OVER,
-                }),
-                buffer: Some((crate::encode::QUAD_INSTANCE_STRIDE, &COVER_ATTRIBUTES)),
-                step: wgpu::VertexStepMode::Instance,
-                strip: true,
-            },
-            Kind::ImageOver | Kind::ImageErase | Kind::ImageAdd => Spec {
-                label: "quorra image",
-                shader: &modules.image,
-                layout: &layouts.image_pipe,
-                vertex: "vs_main",
-                entry: if kind == Kind::ImageErase {
-                    "fs_shape"
-                } else {
-                    "fs_main"
-                },
-                blend: Some(match kind {
-                    Kind::ImageErase => ERASE,
-                    Kind::ImageAdd => ADD,
-                    _ => OVER,
-                }),
-                buffer: None,
-                step: wgpu::VertexStepMode::Instance,
-                strip: true,
-            },
-            Kind::ShadedOver | Kind::ShadedErase | Kind::ShadedAdd => Spec {
-                label: "quorra shading",
-                shader: &modules.shading,
-                layout: &layouts.shading_pipe,
-                vertex: "vs_main",
-                entry: if kind == Kind::ShadedErase {
-                    "fs_shape"
-                } else {
-                    "fs_main"
-                },
-                blend: Some(match kind {
-                    Kind::ShadedErase => ERASE,
-                    Kind::ShadedAdd => ADD,
-                    _ => OVER,
-                }),
-                buffer: None,
-                step: wgpu::VertexStepMode::Instance,
-                strip: true,
-            },
-            Kind::Composite => Spec {
-                label: "quorra composite",
-                shader: &modules.composite,
-                layout: &layouts.composite_pipe,
-                vertex: "vs_main",
-                entry: "fs_main",
-                blend: None, // REPLACE: the shader computes §11.3.6 wholly itself
-                buffer: None,
-                step: wgpu::VertexStepMode::Instance,
-                strip: false,
-            },
-            Kind::Reduce => Spec {
-                label: "quorra reduce",
-                shader: &modules.reduce,
-                layout: &layouts.reduce_pipe,
-                vertex: "vs_main",
-                entry: "fs_main",
-                blend: None,
-                buffer: None,
-                step: wgpu::VertexStepMode::Instance,
-                strip: false,
-            },
-            Kind::Blit => Spec {
-                label: "quorra blit",
-                shader: &modules.blit,
-                layout: &layouts.blit_pipe,
-                vertex: "vs_main",
-                entry: "fs_main",
-                blend: None,
-                buffer: None,
-                step: wgpu::VertexStepMode::Instance,
-                strip: false,
-            },
+            Kind::RectOver => Lane::rect(layouts, modules).spec(Style::Over),
+            Kind::RectErase => Lane::rect(layouts, modules).spec(Style::Erase),
+            Kind::RectAdd => Lane::rect(layouts, modules).spec(Style::Add),
+            Kind::CoverOver => Lane::cover(layouts, modules).spec(Style::Over),
+            Kind::CoverErase => Lane::cover(layouts, modules).spec(Style::Erase),
+            Kind::CoverAdd => Lane::cover(layouts, modules).spec(Style::Add),
+            Kind::ImageOver => Lane::image(layouts, modules).spec(Style::Over),
+            Kind::ImageErase => Lane::image(layouts, modules).spec(Style::Erase),
+            Kind::ImageAdd => Lane::image(layouts, modules).spec(Style::Add),
+            Kind::ShadedOver => Lane::shading(layouts, modules).spec(Style::Over),
+            Kind::ShadedErase => Lane::shading(layouts, modules).spec(Style::Erase),
+            Kind::ShadedAdd => Lane::shading(layouts, modules).spec(Style::Add),
+            // REPLACE on all three: each computes what it writes wholly in the shader,
+            // the composite because §11.3.6's arithmetic is not a pair of wgpu factors.
+            Kind::Composite => Self::full_screen(
+                "quorra composite",
+                &modules.composite,
+                &layouts.composite_pipe,
+            ),
+            Kind::Reduce => {
+                Self::full_screen("quorra reduce", &modules.reduce, &layouts.reduce_pipe)
+            }
+            Kind::Blit => Self::full_screen("quorra blit", &modules.blit, &layouts.blit_pipe),
             // Additive, and that is the whole mechanism: what lands in the sheet is
             // the sum of every triangle's ±1, which is the winding number (ADR 0016).
             Kind::Winding => Spec {
@@ -247,6 +256,26 @@ impl<'a> Spec<'a> {
                 step: wgpu::VertexStepMode::Instance,
                 strip: true,
             },
+        }
+    }
+
+    /// A full-screen-triangle pass with no blend state and no vertex buffer: the
+    /// compositor's three, which differ from each other only in what they read.
+    fn full_screen(
+        label: &'static str,
+        shader: &'a wgpu::ShaderModule,
+        layout: &'a wgpu::PipelineLayout,
+    ) -> Self {
+        Spec {
+            label,
+            shader,
+            layout,
+            vertex: "vs_main",
+            entry: "fs_main",
+            blend: None,
+            buffer: None,
+            step: wgpu::VertexStepMode::Instance,
+            strip: false,
         }
     }
 }

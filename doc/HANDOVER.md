@@ -159,15 +159,6 @@ re-auditing. Each is one sitting:
   rectangle**, it is where most of the caller's §19 lives, and it is four lines against a
   recogniser they would otherwise write. Take it with a corpus run: it moves which lane a
   page takes, and `HANDOVER`'s "the corpus is part of a change" trap applies exactly.
-- **`SceneError` is a tenant of `scene.rs`** (~180 lines at `scene.rs:392-570`) while
-  serving the whole crate — CLAUDE.md names this exact anti-pattern, and `quorra-gpu`'s
-  `error.rs` is the in-tree example of the fix.
-- **`pipeline/spec.rs:112`** carries a bare `#[allow(clippy::too_many_lines)]` on a
-  138-line `fn of` — split into named phases or write the reason.
-- **`resources.rs:32`'s `#[allow(dead_code)]` reason** ("consumed by the lanes from
-  M4/M5") describes a state that shipped; refresh or remove.
-- **`criterion` is pinned in the workspace with no bench anywhere** — add the benchmark
-  the pin promises or drop the pin.
 - **`device.rs` hosts ramp sampling** (`sample_ramp`, `ramp_color_at`,
   `RAMP_RESOLUTION`) outside its stated responsibility — a candidate seam whenever that
   file is next open.

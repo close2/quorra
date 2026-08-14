@@ -58,7 +58,15 @@ png = "0.18.1"
 # `unsafe` borrow of a hand-rolled X11 handle, which principle 3 prices higher than a
 # dev-only dependency. Never a dependency of the library itself.
 winit = "0.30.12"
-criterion = "0.8.2"
+
+# `criterion` was pinned here in the setup commit and never referenced by anything.
+# It is deliberately not replaced: this tree's performance discipline is a set of
+# gates rather than a benchmark harness — `tests/perf_gate.rs` with numbers attached,
+# `tests/archetypes.rs`'s counter equalities, `tests/lane_crossover.rs`'s tables, and
+# the `examples/` instruments that measure a whole frame on a real page at a real
+# size. §6.1's ranking is the reason: the frame is what the brief judges, and a
+# harness that reports a function's throughput would measure the four per cent of it
+# that runs on the device. A dependency nothing imports is a promise nobody kept.
 
 # Lints applied to every member via `[lints] workspace = true`.
 #

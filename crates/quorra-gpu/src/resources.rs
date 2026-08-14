@@ -28,8 +28,9 @@ use crate::error::{DeviceError, ResourceProblem};
 /// A validated, resident outline.
 #[derive(Debug)]
 pub(crate) struct StoredOutline {
-    /// The segments, as uploaded.
-    #[allow(dead_code)] // consumed by the lanes from M4/M5; identity and budget are M2's part
+    /// The segments, as uploaded. Read every frame by the encoder — for device bounds,
+    /// for flattening into the coverage lane, and for the segment counter — so this is
+    /// the form the lanes work from, not an archive of the upload.
     pub segments: Box<[Segment]>,
     /// The same outline as closed contours of quadratic segments, for the GPU lane.
     ///
@@ -115,6 +116,15 @@ impl ResourceStore {
         self.meshes.get(&id.0)
     }
 
+    /// Validate an outline, price it, and store both the segments and the quadratic
+    /// form the GPU lane needs.
+    ///
+    /// The path must be non-empty, must start with a `MoveTo` — nothing else has a
+    /// current point to draw from (ISO 32000-2 §8.5.2) — and every coordinate must be
+    /// finite and within `MAX_COORDINATE`. Each failure is a
+    /// [`DeviceError::InvalidResource`] naming its own [`ResourceProblem`]; a path over
+    /// the store's budget is [`DeviceError::ResourceBudgetExceeded`]. Either way
+    /// nothing is stored and nothing is charged.
     pub(crate) fn upload_outline(&mut self, path: &[Segment]) -> Result<OutlineId, DeviceError> {
         if path.is_empty() {
             return Err(DeviceError::InvalidResource {
@@ -168,6 +178,14 @@ impl ResourceStore {
         Ok(OutlineId(id))
     }
 
+    /// Validate an image against its own dimensions, price it, and store it.
+    ///
+    /// The one check is [`ImageSpec::is_consistent`]: no zero side, and a byte length
+    /// that is exactly `width × height × 4`. A disagreement is
+    /// [`ResourceProblem::ImageInconsistent`] carrying all three numbers, because a
+    /// 60 000×60 000 claim over four bytes and four bytes claimed over a real buffer
+    /// are different defects upstream. Bytes over the budget are
+    /// [`DeviceError::ResourceBudgetExceeded`]; neither path stores or charges.
     pub(crate) fn upload_image(&mut self, image: &ImageSpec) -> Result<ImageId, DeviceError> {
         if !image.is_consistent() {
             return Err(DeviceError::InvalidResource {
@@ -191,6 +209,17 @@ impl ResourceStore {
         Ok(ImageId(id))
     }
 
+    /// Validate a colour ramp's stops, price it, and store it.
+    ///
+    /// A ramp must have at least one stop, offsets that are finite, within `0..=1` and
+    /// ascending, and colours that are valid. Ascending order is a requirement rather
+    /// than something to sort into place: sampling walks the stops in the order given
+    /// and interpolates between neighbours, so reordering them here would silently
+    /// redraw a document's gradient rather than refuse it (§4.7). Each failure
+    /// names itself — [`ResourceProblem::RampEmpty`],
+    /// [`ResourceProblem::RampOffsetOutOfRange`], [`ResourceProblem::RampUnordered`],
+    /// [`ResourceProblem::RampColorInvalid`] — and a ramp over the budget is
+    /// [`DeviceError::ResourceBudgetExceeded`].
     pub(crate) fn upload_ramp(&mut self, stops: &[Stop]) -> Result<RampId, DeviceError> {
         if stops.is_empty() {
             return Err(DeviceError::InvalidResource {
@@ -231,6 +260,14 @@ impl ResourceStore {
         Ok(RampId(id))
     }
 
+    /// Validate a pre-rasterised mesh, price it, and store it.
+    ///
+    /// A mesh is an image plus a device-space anchor, so the check is the image's:
+    /// [`ResourceProblem::ImageInconsistent`] on a zero side or a byte length that
+    /// disagrees with the dimensions, [`DeviceError::ResourceBudgetExceeded`] on the
+    /// budget. The anchor is validated by nothing here because there is nothing to
+    /// validate — `left` and `top` are integers, so no value of them is non-finite, and
+    /// one that puts the raster off the target is culled at encode like any other mark.
     pub(crate) fn upload_mesh(&mut self, mesh: &MeshSpec) -> Result<MeshId, DeviceError> {
         if !mesh.image.is_consistent() {
             return Err(DeviceError::InvalidResource {
