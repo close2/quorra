@@ -22,12 +22,17 @@
 //! # Storage, eviction, and honesty
 //!
 //! One R8 texture sized from [`crate::startup::Options::atlas_budget`], shelf-packed.
-//! When a frame's tiles no longer fit, the atlas resets and repacks what *this* frame
-//! needs; tiles that still do not fit fall through to the scratch path (drawn
-//! uncached, correctly) rather than failing the frame. `Counters` reports
-//! `atlas_distinct_keys` — the count of distinct keys a frame asked for, deliberately
-//! not a hit rate (§6.3's lesson: a hit rate describes the lookups you made, never
-//! the ones you should have made).
+//! A tile that does not fit falls through to the scratch path — drawn uncached, and
+//! correctly — rather than failing the frame. Between frames the device may repack
+//! (`Device::settle_atlas`), and only when repacking can change the outcome: an atlas
+//! holding nothing but the tiles the frame itself put there re-packs to the layout it
+//! already has, so taking the reset would buy nothing and would cost every retained
+//! encode keyed on that layout (ADR 0024, ADR 0050).
+//!
+//! `Counters` reports `atlas_distinct_keys` — the count of distinct keys a frame asked
+//! for, deliberately not a hit rate (§6.3's lesson: a hit rate describes the lookups you
+//! made, never the ones you should have made) — `atlas_working_set_bytes` for what
+//! holding all of them would cost, and `atlas_repacked` for the event that moves them.
 
 use crate::keyhash::FastMap;
 use crate::raster::{CoverageMask, DeviceTransform, Rule};
@@ -248,7 +253,14 @@ pub(crate) struct AtlasStore {
     next_shelf_y: u32,
     entries: FastMap<GlyphKey, AtlasEntry>,
     pending: Vec<AtlasUpload>,
-    /// Bumped on every reset; the device recreates its bind group when it changes.
+    /// Bumped by [`AtlasStore::reset`] and by nothing else — insertion appends and
+    /// never moves an entry, so this is exactly a count of the times every texel origin
+    /// in the sheet stopped meaning what it meant.
+    ///
+    /// Read by one thing: the key a [`RetainedScene`](crate::retained::RetainedScene)
+    /// encode is stored under (ADR 0048). The texture is not recreated on a reset and
+    /// neither is any bind group — the stale pixels are simply never named again,
+    /// because the entries that named them are gone.
     pub generation: u64,
 }
 
@@ -339,12 +351,16 @@ impl AtlasStore {
         std::mem::take(&mut self.pending)
     }
 
-    /// Insert a rasterised tile under its key. `None` when the tile cannot fit even
-    /// in an empty atlas — the caller then draws it through the scratch path instead.
+    /// Insert a rasterised tile under its key. `None` when there is no room for it —
+    /// the caller then draws it through the scratch path instead, which is correct and
+    /// uncached.
     ///
-    /// On a full atlas this does **not** evict piecemeal: it fails, and the encoder
-    /// resets and repacks the frame's working set (`reset`), which keeps the packing
-    /// deterministic — the same scene always produces the same atlas layout (§4.6).
+    /// On a full atlas this does **not** evict piecemeal: it fails, and the *device*
+    /// may repack between frames (`reset`, `Device::settle_atlas`), which keeps the
+    /// packing deterministic — the same scene always produces the same atlas layout
+    /// (§4.6). Insertion itself never moves an entry that is already here, which is what
+    /// lets a retained encode name absolute texel origins and still be replayed after a
+    /// frame that inserted more tiles.
     pub(crate) fn insert(&mut self, key: GlyphKey, mask: &CoverageMask) -> Option<AtlasEntry> {
         let (x, y) = self.allocate(mask.width, mask.height)?;
         let entry = AtlasEntry {
@@ -368,6 +384,13 @@ impl AtlasStore {
 
     /// Drop every entry and start packing afresh. Pending uploads die with the
     /// layout they were packed for.
+    ///
+    /// **Called between frames and never inside an encode**, and that is load-bearing
+    /// rather than incidental: a retained encode is keyed on the generation read
+    /// *before* the walk (`retained::EncodeKey`), so a reset taken half way through one
+    /// would leave the first half of the encode naming texels that had moved while the
+    /// key still read valid — a plausible wrong page, which is principle 6's worst
+    /// outcome. The one call site is `Device::settle_atlas`, after the frame is drawn.
     pub(crate) fn reset(&mut self) {
         self.shelves.clear();
         self.next_shelf_y = 0;

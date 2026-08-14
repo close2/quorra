@@ -62,10 +62,13 @@ use crate::viewport::Viewport;
 ///   — it chooses which lane makes coverage bytes, per frame, by design;
 /// - **the atlas generation** — a repack moves every tile, and the retained quad
 ///   instances carry absolute texel origins into the sheet. Insertion never moves an
-///   existing entry, so only [`AtlasStore::reset`](crate::atlas) bumps this;
+///   existing entry, so only [`AtlasStore::reset`](crate::atlas) bumps this, and ADR
+///   0050 is what stops a page too large for the atlas from resetting it every frame;
 /// - **the resource generation** — a released id must never be drawn from a stale
-///   instance stream. An upload cannot invalidate anything: ids are minted from a
-///   monotonic counter, so a retained encode's ids cannot come to name other bytes.
+///   instance stream. An upload cannot invalidate anything *while ids remain*: they are
+///   minted by increment from a counter that has never wrapped, so a retained encode's
+///   ids cannot come to name other bytes. `ResourceStore::allocate_id` states the bound
+///   that claim rests on, which is the one this key does not cover.
 ///
 /// **The damage list is deliberately absent**, and so is the target. `encode` never
 /// reads `Viewport::damage` — damage is planned target-side (ADR 0012) — and phase 1

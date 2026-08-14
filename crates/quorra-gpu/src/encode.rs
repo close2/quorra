@@ -322,6 +322,14 @@ pub(crate) struct Encoded {
     /// working set is simply larger than the cache and resetting would throw away the
     /// part that does fit and hit (ADR 0024).
     pub atlas_requested_bytes: u64,
+    /// Atlas entries this frame's distinct keys reached — a resident hit or a fresh
+    /// insert, counted once per key.
+    ///
+    /// The atlas holds at least this many entries afterwards, because insertion never
+    /// removes one; anything above it belongs to an **earlier** frame. That difference
+    /// is the whole of what a repack can reclaim, and ADR 0050 is the argument that when
+    /// it is zero a repack provably cannot change the outcome.
+    pub atlas_entries_used: u32,
     /// What the walk above spent its time on, when the caller asked for the
     /// subdivision (ADR 0023); empty otherwise.
     pub encode_phases: EncodeClock,
@@ -480,6 +488,8 @@ struct Encoder<'a> {
     atlas_pressure: bool,
     /// See `Encoded::atlas_requested_bytes`.
     atlas_requested_bytes: u64,
+    /// See `Encoded::atlas_entries_used`.
+    atlas_entries_used: u32,
     /// Sheet bytes already charged tile by tile, so the sheet's own extent can be
     /// charged once at the end without paying twice (ADR 0021).
     scratch_charged: u64,
@@ -589,6 +599,7 @@ pub(crate) fn encode(
         culled_layers: 0,
         atlas_pressure: false,
         atlas_requested_bytes: 0,
+        atlas_entries_used: 0,
         scratch_charged: 0,
         clock: EncodeClock::new(instrument),
         hulls: hull::HullMemo::default(),
@@ -660,6 +671,7 @@ pub(crate) fn encode(
         winding,
         atlas_pressure: encoder.atlas_pressure,
         atlas_requested_bytes: encoder.atlas_requested_bytes,
+        atlas_entries_used: encoder.atlas_entries_used,
     })
 }
 
@@ -1409,6 +1421,13 @@ impl Encoder<'_> {
                 inserted
             }
         };
+        // One count per distinct key that reached an entry, however it reached it. The
+        // atlas holds at least this many entries when the frame ends, and what it holds
+        // *beyond* this many is an earlier frame's — which is the only thing a repack
+        // reclaims, and so the only thing that can make one worth taking (ADR 0050).
+        if first_use && entry.is_some() {
+            self.atlas_entries_used = self.atlas_entries_used.saturating_add(1);
+        }
         if let Some(entry) = entry {
             let dest = Point::new(ix + entry.tile_left as f32, iy + entry.tile_top as f32);
             let device_rect = Rect::new(

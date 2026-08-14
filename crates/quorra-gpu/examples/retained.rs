@@ -222,6 +222,139 @@ fn compare_pixels(device: &mut Device, scene: &Scene, retained: &mut RetainedSce
     );
 }
 
+/// The atlas budget the section below runs against, and the page it runs on.
+///
+/// **The band ADR 0050 is about is narrow, and that is the point.** A working set far
+/// larger than the atlas never repacked even before it — ADR 0024's byte test blocks
+/// that — and one that fits the atlas never overflows at all. What used to repack for
+/// ever is the page in between: one that fits the atlas **by bytes** and does not fit it
+/// **by shelves**, because a shelf packer wastes the remainder of two divisions and the
+/// byte test cannot see either.
+///
+/// A quarter-megabyte atlas (512×512) holding a page of 107 letterforms magnified
+/// fourfold is measured to be exactly that: 107 distinct keys, 102 of them resident,
+/// five tiles a frame onto the scratch sheet. The archetype above is *not* usable here —
+/// at 4× it culls 94 % of its commands and the 234 keys that survive ask for 736 KB,
+/// which is the other regime — so this section carries its own page, and asserts the
+/// condition rather than trusting these numbers to keep meaning what they mean.
+const OVERFLOW_ATLAS: u64 = 256 * 1024;
+const OVERFLOW_DISTINCT: u32 = 107;
+const OVERFLOW_PLACEMENTS: u32 = 5_933;
+
+/// A viewport magnified about the dense page's middle — `examples/zoom.rs`'s own
+/// `zoomed`, so the two examples ask for the same frame: the same scene, four times the
+/// size, which is the frame a reader zoomed in is holding still.
+fn magnified(scale: f32) -> Affine {
+    Affine::translate(-580.0, -565.0)
+        .then(Affine::scale(scale, scale))
+        .then(Affine::translate(WIDTH as f32 / 2.0, HEIGHT as f32 / 2.0))
+}
+
+/// The overflow section's page: **`examples/zoom.rs`'s dense page, verbatim** — 5 933
+/// fills over 107 letterforms of five widths and seven heights, on a 14.5 × 15.25 grid.
+///
+/// Not the archetype above, and not a variation on it. The band this section measures is
+/// a relation between the tile sizes a page produces and the two divisions a shelf
+/// packer performs, so the page is the one the band was *measured* on: substituting a
+/// different letterform changes the tile size, which moves the working set, which is how
+/// an instrument silently stops measuring what it names. The assertion at the end is the
+/// guard, and it is what caught two earlier substitutions of exactly this kind.
+fn overflow_page(device: &mut Device) -> Scene {
+    let outlines: Vec<OutlineId> = (0..OVERFLOW_DISTINCT)
+        .map(|i| {
+            let (w, h) = (6.0 + (i % 5) as f32, 8.0 + (i % 7) as f32);
+            device
+                .upload_outline(&[
+                    Segment::MoveTo(Point::new(0.3, 0.2)),
+                    Segment::LineTo(Point::new(w, 0.0)),
+                    Segment::CubicTo {
+                        c1: Point::new(w + 1.0, h * 0.3),
+                        c2: Point::new(w + 1.0, h * 0.7),
+                        to: Point::new(w * 0.8, h),
+                    },
+                    Segment::LineTo(Point::new(0.0, h * 0.9)),
+                    Segment::Close,
+                ])
+                .unwrap()
+        })
+        .collect();
+    let ink = Color::new(0.12, 0.13, 0.16, 1.0);
+    let mut builder = SceneBuilder::new();
+    for index in 0..OVERFLOW_PLACEMENTS {
+        builder
+            .fill(
+                outlines[(index as usize) % outlines.len()],
+                Affine::translate((index % 80) as f32 * 14.5, (index / 80) as f32 * 15.25),
+                FillRule::NonZero,
+                Paint::Solid(ink),
+                None,
+                BlendMode::Normal,
+                Compose::SrcOver,
+                None,
+            )
+            .unwrap();
+    }
+    builder.finish()
+}
+
+/// **Does the atlas settle?** — the second measurement in this file, and a property
+/// rather than a clock (ADR 0050).
+///
+/// A page whose glyph tiles overflow the atlas used to invalidate its own retained
+/// encode: the tile that fell through to the scratch sheet made the device repack, the
+/// repack moved every texel origin the encode had just been stored under, and the next
+/// frame did all of it again. The instrument for that is not a duration — it is the
+/// **sequence of encode sources**, which is the same on an idle machine and on this one.
+///
+/// `E` is a frame that encoded, `.` a frame that replayed. A settled atlas reads
+/// `E...........`; the pathology reads `EEEEEEEEEEEE`.
+fn overflow_section(adapter: Option<&str>, frames: usize) {
+    let mut device = Device::headless(&Options {
+        adapter: adapter.map(str::to_owned),
+        atlas_budget: OVERFLOW_ATLAS,
+        ..Options::default()
+    })
+    .expect("an adapter");
+    device.wait_until_warm();
+    let scene = overflow_page(&mut device);
+    let viewport = Viewport::full(WIDTH, HEIGHT, magnified(4.0));
+    let mut retained = RetainedScene::new(scene);
+
+    let mut sources = String::new();
+    let mut repacks = 0_u32;
+    let mut last: Option<Counters> = None;
+    for _ in 0..frames {
+        let frame = device
+            .render_retained(&mut retained, &viewport, Target::Readback)
+            .expect("a page too large for the atlas still draws — through the scratch sheet");
+        sources.push(if frame.encode_source() == EncodeSource::Encoded {
+            'E'
+        } else {
+            '.'
+        });
+        repacks += u32::from(frame.counters().atlas_repacked);
+        last = Some(frame.counters());
+    }
+    let counters = last.expect("at least one frame");
+    println!(
+        "\na page the atlas cannot hold — {OVERFLOW_DISTINCT} letterforms at 4×, atlas \
+         {OVERFLOW_ATLAS} bytes"
+    );
+    println!(
+        "  working set {} bytes over {} distinct keys; {} resident, {} tiles on the scratch sheet",
+        counters.atlas_working_set_bytes,
+        counters.atlas_distinct_keys,
+        counters.atlas_entries,
+        counters.tiles
+    );
+    println!("  encode sources [{sources}], repacks {repacks}");
+    assert!(
+        counters.tiles > 0 && counters.atlas_working_set_bytes <= OVERFLOW_ATLAS,
+        "this section measures nothing unless the atlas refused a tile for a working set \
+         that fits it by bytes: {counters:?}"
+    );
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let adapter = args.next();
@@ -324,4 +457,6 @@ fn main() {
         println!("{name} upload  {}", column(runs, |r| r.upload));
         println!("{name} execute {}", column(runs, |r| r.execute));
     }
+
+    overflow_section(adapter.as_deref(), 12);
 }

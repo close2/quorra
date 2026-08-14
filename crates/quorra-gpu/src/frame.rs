@@ -165,6 +165,37 @@ pub struct Counters {
     /// answered all 303 lookups a page made and built 303 identical page-wide masks,
     /// because the key was a name rather than the region.
     pub atlas_distinct_keys: u32,
+    /// Atlas bytes this frame's distinct glyph keys asked for, hits included — the
+    /// **working set**, which is the number [`Options::atlas_budget`] has to be compared
+    /// against (ADR 0050).
+    ///
+    /// [`atlas_distinct_keys`](Counters::atlas_distinct_keys) says how many things a
+    /// page repeats; this says what holding all of them would cost. A page whose working
+    /// set exceeds the budget cannot keep its glyphs cached however the packer behaves,
+    /// and will rasterise the remainder into the scratch sheet on every frame that
+    /// encodes — so this is the number a host raises the budget from, and the only one
+    /// that distinguishes "the atlas is too small for this page" from "the atlas is
+    /// holding another page's tiles".
+    ///
+    /// [`Options::atlas_budget`]: crate::startup::Options::atlas_budget
+    pub atlas_working_set_bytes: u64,
+    /// Whether the atlas was repacked after this frame — the one event that moves every
+    /// tile, and so the one that makes a [`RetainedScene`] encode stale (ADR 0050).
+    ///
+    /// **The instrument for a thrashing atlas.** A repack happens when the atlas is
+    /// holding tiles this frame did not use and this frame's own working set would fit
+    /// without them; a page that changes settles after at most one. What this counter
+    /// exists to make visible is the pathology: if it is true on frame after frame, the
+    /// atlas is being repacked for a working set it cannot hold, every retained encode
+    /// dies with the layout it named, and every frame pays a full encode. That state was
+    /// reachable before ADR 0050 and is not now, and a counter that says so is worth
+    /// more than an argument that it cannot happen.
+    ///
+    /// Always `false` on a replayed frame, which repacks nothing because it inserted
+    /// nothing.
+    ///
+    /// [`RetainedScene`]: crate::retained::RetainedScene
+    pub atlas_repacked: bool,
     /// §6.4's instrument: how many **distinct clip regions** this frame resolved,
     /// after chains collapsed to device-space rectangles. Deliberately not a hit
     /// rate, and keyed by the resolved region rather than by identifier — the

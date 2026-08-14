@@ -493,7 +493,10 @@ impl Device {
     /// # Errors
     ///
     /// [`DeviceError::InvalidResource`] naming what §4.7 refused, or
-    /// [`DeviceError::ResourceBudgetExceeded`] naming all three numbers.
+    /// [`DeviceError::ResourceBudgetExceeded`] naming all three numbers. A device that
+    /// has issued all `u32::MAX` identifiers refuses with
+    /// [`DeviceError::ResourceIdsExhausted`] — ids are never reused, because a reissued
+    /// one would make a retained encode draw a resource it did not name (ADR 0050).
     pub fn upload_outline(&mut self, path: &[Segment]) -> Result<OutlineId, DeviceError> {
         self.resources.upload_outline(path)
     }
@@ -707,7 +710,7 @@ impl Device {
         let encoded = self.encode_scene(scene, viewport)?;
         let encode_time = encode_started.elapsed();
 
-        let frame = self.draw_encoded(
+        let mut frame = self.draw_encoded(
             &encoded,
             viewport,
             &into,
@@ -716,7 +719,10 @@ impl Device {
             encode_time,
             EncodeSource::Encoded,
         )?;
-        self.settle_atlas(&encoded);
+        // Reported on the frame that caused it rather than on the one that pays for it:
+        // this is the frame whose atlas layout stopped being the layout, and a caller
+        // holding a `RetainedScene` learns here that its encode is now stale.
+        frame.counters.atlas_repacked = self.settle_atlas(&encoded);
         Ok(frame)
     }
 
@@ -771,7 +777,7 @@ impl Device {
             retained.prepare(key, |scene| self.encode_scene(scene, viewport))?;
         let encode_time = encode_started.elapsed();
 
-        let frame = self.draw_encoded(
+        let mut frame = self.draw_encoded(
             encoded,
             viewport,
             &into,
@@ -783,8 +789,10 @@ impl Device {
         // A replay inserted nothing, so there is nothing for a repack to settle — and
         // resetting after one would bump the generation the replayed encode is keyed
         // under and cost the next frame an encode for no reason.
-        if source == EncodeSource::Encoded && frame.is_ok() {
-            self.settle_atlas(encoded);
+        if let Ok(frame) = frame.as_mut()
+            && source == EncodeSource::Encoded
+        {
+            frame.counters.atlas_repacked = self.settle_atlas(encoded);
         }
         frame
     }
@@ -923,6 +931,11 @@ impl Device {
                 distinct_outlines: encoded.distinct_outlines,
                 atlas_entries: u32::try_from(self.atlas.entry_count()).unwrap_or(u32::MAX),
                 atlas_distinct_keys: encoded.atlas_distinct_keys,
+                atlas_working_set_bytes: encoded.atlas_requested_bytes,
+                // Set by the caller of `draw_encoded`, which is where the repack is
+                // decided: a frame that has not settled its atlas yet has not repacked
+                // it, and a `Frame` may not carry a number that is not true.
+                atlas_repacked: false,
                 segments: encoded.segments,
                 tiles: encoded.tiles,
                 commands_culled: encoded.commands_culled,
@@ -937,20 +950,37 @@ impl Device {
     }
 
     /// After a drawn frame that encoded: repack the atlas when this frame's tiles no
-    /// longer fit it and the frame's own working set would (ADR 0024).
+    /// longer fit it, and only when repacking can change that (ADR 0024, ADR 0050).
     ///
-    /// A tile fell through to scratch this frame. Repack from empty on the next one
-    /// *only if this frame's working set would then fit*: a repack settles an atlas
-    /// holding a previous page's tiles, but when the frame's own distinct keys are
-    /// simply larger than the cache it throws away the part that fits and hits, and
-    /// every frame pays the packing again. Measured at 100× on the zoom ladder, where
-    /// resetting each frame cost 6.0 ms of encode against 0.6 ms for keeping what fits.
-    fn settle_atlas(&mut self, encoded: &Encoded) {
+    /// Answers `true` when the atlas was reset, which is the one event that moves every
+    /// tile and so invalidates every [`RetainedScene`] encode keyed on the layout
+    /// ([`Counters::atlas_repacked`](crate::frame::Counters::atlas_repacked) reports it).
+    ///
+    /// Three conditions, and the third is ADR 0050's:
+    ///
+    /// - **a tile fell through to scratch** — otherwise the atlas is serving the frame;
+    /// - **the frame's own working set would fit an empty atlas by bytes**. When the
+    ///   distinct keys are simply larger than the cache, resetting throws away the part
+    ///   that fits and hits and every frame pays the packing again: measured at 100× on
+    ///   the zoom ladder, 6.0 ms of encode against 0.6 ms for keeping what fits;
+    /// - **the atlas holds entries this frame did not use**. A repack reclaims exactly
+    ///   those, and nothing else: the survivors are re-inserted in the frame's own
+    ///   encounter order, which is the order they were inserted in to begin with, so a
+    ///   repack of an atlas holding nothing else *provably* reproduces the layout it
+    ///   replaced — the same tiles in the same shelves, and the same tile overflowing at
+    ///   the end. Taking it anyway was an atlas that reset on every frame of a page it
+    ///   could never hold, and a retained encode that never survived one.
+    fn settle_atlas(&mut self, encoded: &Encoded) -> bool {
         let (atlas_width, atlas_height) = self.atlas.dimensions();
         let atlas_bytes = u64::from(atlas_width).saturating_mul(u64::from(atlas_height));
-        if encoded.atlas_pressure && encoded.atlas_requested_bytes <= atlas_bytes {
+        let resident = u32::try_from(self.atlas.entry_count()).unwrap_or(u32::MAX);
+        let repack = encoded.atlas_pressure
+            && encoded.atlas_requested_bytes <= atlas_bytes
+            && resident > encoded.atlas_entries_used;
+        if repack {
             self.atlas.reset();
         }
+        repack
     }
 
     /// Phase 3: the whole device side of one frame — mask realisation, layers,
