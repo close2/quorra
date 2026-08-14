@@ -151,6 +151,11 @@ evidence:
 | execute | 0.11–0.13 | **0.071** | the GPU is still about 4 %, of a smaller frame |
 | submit + device wait | 0.55–0.71 | **0.380** | |
 
+*(Re-confirmed on the merged tree later the same day, after ADRs 0047 and 0048 and the
+knockout-stroke fix all landed: `wall − acquire` **1.806 ms** minimum, geometry 0.160,
+compiles none on eight first frames of eight, artwork 43.089 — nothing the round landed
+moved the presenting frame either way.)*
+
 What moved it is this session's two landed encode changes and nothing else: the
 `(outline, linear)` bound memo (ADR 0045, −21.2 % of a dense-text encode by instruction
 count) and the three free rows before it (−6.4 %, the largest being the glyph key probed
