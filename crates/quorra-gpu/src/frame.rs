@@ -203,6 +203,23 @@ pub struct Counters {
     /// 303 identical page-wide masks, because its key was a name (its ADR 0132; the
     /// same page collapses to 1 here).
     pub clip_distinct_regions: u32,
+    /// Distinct **residue clip regions** this frame rasterised: a chain whose links are
+    /// not all rectangles becomes one coverage region, cut into a window for every mark
+    /// drawn under it (ADR 0049).
+    ///
+    /// The other half of §6.4's instrument, and keys again rather than lookups: a page
+    /// that states one curved clip and draws six hundred marks under it reports **1**
+    /// here and 600 in [`tiles`](Counters::tiles).
+    pub clip_residue_regions: u32,
+    /// Residue rasterisations this frame charged to a single command's tile — the work
+    /// [`clip_residue_regions`](Counters::clip_residue_regions) did **not** remove.
+    ///
+    /// A chain pays per tile when its region would cost more than the tiles it would
+    /// replace (a page-sized clip over a paragraph of small marks) or when the frame's
+    /// regions have reached their share of `Options::max_frame_bytes`. Neither is an
+    /// error and neither changes a pixel; this is the counter that says how often it
+    /// happened, because a decline nobody counts is a cost nobody adds up.
+    pub clip_residue_tiles: u32,
     /// Coverage tiles this frame placed on the scratch sheet — the general path lane's
     /// output, and the GPU lane's, since both go through the one packer.
     ///

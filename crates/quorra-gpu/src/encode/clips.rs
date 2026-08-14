@@ -4,19 +4,23 @@
 //! ISO 32000-2 §8.5.4 makes a chain one region arrived at by intersection, and this
 //! module holds the whole of that reading. A link whose outline is a rectangle under
 //! its own transform intersects into the resolved rectangle and is applied by geometry
-//! alone (ADR 0007); a link that is anything else is kept as a residue and rasterised
-//! into one coverage tile at draw time, where the links intersect rather than multiply
-//! (ADR 0030). Chains are memoised across shared prefixes, because a page shares them:
-//! the caller's worst holds 3 608.
+//! alone (ADR 0007); a link that is anything else is kept as a residue and rasterised at
+//! draw time, where the links intersect rather than multiply (ADR 0030) and where the
+//! chain covers the region it occupies rather than the mark that asked (ADR 0049).
+//! Chains are memoised across shared prefixes, because a page shares them: the caller's
+//! worst holds 3 608.
 //!
 //! The residue chain's shape is this module's alone — [`Encoder::residue_intersection`]
 //! is the only reader of a link, which is why it sits here rather than beside the
-//! rasterising lanes it hands its tile to.
+//! rasterising lanes it hands its tile to. **Whether a region is worth keeping is not
+//! this module's question**: that is [`super::residue`], which knows what the scene will
+//! ask for and what the frame may spend, and knows nothing about a link.
 
 use std::sync::Arc;
 
 use quorra_scene::{ClipId, FillRule, Point, Rect, Scene};
 
+use super::residue::Verdict;
 use super::{Encoder, apply, compose, transform_preserves_axes};
 use crate::error::RenderError;
 use crate::raster::{self, Rule};
@@ -143,6 +147,12 @@ impl Encoder<'_> {
     /// together owes the clause an intersection. `min` is that: idempotent, so restating
     /// a clip changes nothing the way intersecting a region with itself changes nothing,
     /// and exact wherever two boundaries coincide or nest.
+    ///
+    /// **The chain is rasterised over its own region and this is a window on it**
+    /// wherever that region is worth keeping (ADR 0049) — which is the same reading one
+    /// step further on, since a region that does not depend on the mark asking about it
+    /// has no business being rasterised once per mark. [`super::residue::ResidueRegions`] holds
+    /// the rule; what is left here is the chain, which is this module's own.
     pub(super) fn residue_intersection(
         &mut self,
         resolved: &ResolvedClip,
@@ -151,8 +161,41 @@ impl Encoder<'_> {
         width: u32,
         height: u32,
     ) -> Result<Option<raster::CoverageMask>, RenderError> {
-        let mut combined: Option<raster::CoverageMask> = None;
-        let mut residue = resolved.residues.clone();
+        let Some(leaf) = resolved.residues.clone() else {
+            return Ok(None);
+        };
+        let key = leaf.clip.0;
+        if let Verdict::Region(region) = self.residue.verdict(key) {
+            let span = self.clock.start();
+            let tile = window(region, left, top, width, height);
+            self.clock.geometry(span);
+            return Ok(Some(tile));
+        }
+        let links = self.flatten_chain(&leaf)?;
+        if matches!(self.residue.verdict(key), Verdict::Undecided) {
+            let region = chain_region(&links, self.visible);
+            let region_bytes = region.map_or(0, |(_, _, w, h)| area(w, h));
+            let tile_bytes = area(width, height);
+            if self.residue.admit(key, region_bytes, tile_bytes) {
+                let mask = region.map(|(l, t, w, h)| self.intersect_links(&links, l, t, w, h));
+                let tile = window(mask.as_ref(), left, top, width, height);
+                self.residue.insert(key, mask);
+                return Ok(Some(tile));
+            }
+        }
+        self.residue.note_tile();
+        Ok(Some(self.intersect_links(&links, left, top, width, height)))
+    }
+
+    /// Every link of a chain, flattened into device space once.
+    ///
+    /// The whole chain at once rather than a link at a time, because both callers below
+    /// rasterise every link and the region path would otherwise flatten them again. What
+    /// is held is bounded by the outlines the chain names, which were budgeted when the
+    /// caller uploaded them.
+    fn flatten_chain(&self, leaf: &Arc<ResidueLink>) -> Result<Vec<FlatLink>, RenderError> {
+        let mut links = Vec::new();
+        let mut residue = Some(Arc::clone(leaf));
         while let Some(link) = residue.take() {
             let def = &self.scene.clips()[link.clip.0 as usize];
             let stored =
@@ -161,27 +204,101 @@ impl Encoder<'_> {
                     .ok_or(RenderError::UnknownOutline {
                         outline: def.outline,
                     })?;
-            let link_transform = compose(def.transform, self.viewport);
             let span = self.clock.start();
-            let link_polylines = raster::flatten(&stored.segments, link_transform);
-            let link_rule = match def.rule {
-                FillRule::NonZero => Rule::NonZero,
-                FillRule::EvenOdd => Rule::EvenOdd,
-            };
-            let link_mask = raster::fill_mask(&link_polylines, link_rule, left, top, width, height);
+            let polylines =
+                raster::flatten(&stored.segments, compose(def.transform, self.viewport));
             self.clock.geometry(span);
+            links.push(FlatLink {
+                polylines,
+                rule: match def.rule {
+                    FillRule::NonZero => Rule::NonZero,
+                    FillRule::EvenOdd => Rule::EvenOdd,
+                },
+            });
+            residue.clone_from(&link.parent);
+        }
+        Ok(links)
+    }
+
+    /// The chain's links rasterised over one rectangle and intersected — `min`, per
+    /// pixel, which is the clause's intersection and this function's whole subject.
+    fn intersect_links(
+        &self,
+        links: &[FlatLink],
+        left: i32,
+        top: i32,
+        width: u32,
+        height: u32,
+    ) -> raster::CoverageMask {
+        let span = self.clock.start();
+        let mut combined: Option<raster::CoverageMask> = None;
+        for link in links {
+            let mask = raster::fill_mask(&link.polylines, link.rule, left, top, width, height);
             combined = Some(match combined {
-                None => link_mask,
+                None => mask,
                 Some(mut base) => {
-                    for (m, l) in base.coverage.iter_mut().zip(&link_mask.coverage) {
+                    for (m, l) in base.coverage.iter_mut().zip(&mask.coverage) {
                         *m = (*m).min(*l);
                     }
                     base
                 }
             });
-            residue =
-                Arc::try_unwrap(link).map_or_else(|link| link.parent.clone(), |link| link.parent);
         }
-        Ok(combined)
+        self.clock.geometry(span);
+        // A chain with no link never reaches here: `residue_intersection` returns before
+        // it, and `flatten_chain` is only called on a chain that has a leaf.
+        combined.unwrap_or_else(|| raster::CoverageMask::transparent(left, top, width, height))
     }
+}
+
+/// The bytes a coverage mask of these dimensions holds. Saturating because both extents
+/// are scene-derived: a product that could not fit is one the budget below refuses.
+fn area(width: u32, height: u32) -> u64 {
+    u64::from(width).saturating_mul(u64::from(height))
+}
+
+/// One residue link, flattened into device space.
+struct FlatLink {
+    polylines: Vec<raster::Polyline>,
+    rule: Rule,
+}
+
+/// A region's window over one tile, or a transparent tile when the chain's links leave
+/// no region at all.
+fn window(
+    region: Option<&raster::CoverageMask>,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+) -> raster::CoverageMask {
+    region.map_or_else(
+        || raster::CoverageMask::transparent(left, top, width, height),
+        |region| region.crop(left, top, width, height),
+    )
+}
+
+/// The device pixels a chain can mark: its links' bounds intersected, held to the
+/// target, rounded out to whole pixels. `None` when that leaves nothing — which is a
+/// region that admits nothing, not a missing one.
+///
+/// Intersected because the links intersect (ADR 0030), and outside any one link's own
+/// bounds a closed path winds nothing: the chain is transparent there whatever the
+/// others say.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
+fn chain_region(links: &[FlatLink], target: Rect) -> Option<(i32, i32, u32, u32)> {
+    let mut region = target;
+    for link in links {
+        let (x0, y0, x1, y1) = raster::polyline_bounds(&link.polylines)?;
+        region = region.intersection(Rect::new(Point::new(x0, y0), Point::new(x1, y1)));
+    }
+    if region.is_empty() {
+        return None;
+    }
+    let left = region.min.x.floor() as i32;
+    let top = region.min.y.floor() as i32;
+    let width = (region.max.x.ceil() as i32 - left).max(0) as u32;
+    let height = (region.max.y.ceil() as i32 - top).max(0) as u32;
+    (width > 0 && height > 0).then_some((left, top, width, height))
 }

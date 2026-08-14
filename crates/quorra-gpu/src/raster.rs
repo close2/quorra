@@ -77,6 +77,60 @@ pub(crate) struct CoverageMask {
     pub coverage: Vec<u8>,
 }
 
+impl CoverageMask {
+    /// A mask that admits nothing, over the given pixels.
+    ///
+    /// A legitimate mask rather than the absence of one: an empty clip region admits
+    /// nothing *inside* it too, which is a different statement from having no clip, and
+    /// both have tests (`doc/PLAN.md` §1.4).
+    pub(crate) fn transparent(left: i32, top: i32, width: u32, height: u32) -> Self {
+        Self {
+            left,
+            top,
+            width,
+            height,
+            coverage: vec![0; (width as usize).saturating_mul(height as usize)],
+        }
+    }
+
+    /// The window of this mask over another rectangle of device pixels, transparent
+    /// wherever the two do not meet.
+    ///
+    /// **This is only a lookup because [`fill_mask`] cuts at its region's border** — the
+    /// two share the pixel grid, and the same device pixel carries the same coverage
+    /// whichever region computed it, to within the 1-of-255 rounding
+    /// `a_tile_is_the_crop_of_the_region_that_contains_it` bounds. Outside this mask the
+    /// answer is transparent by construction: a region is the intersection of its
+    /// chain's bounds, and a closed path winds nothing beyond its own.
+    // The corners are computed in `i64`, where an `i32` origin plus a `u32` extent cannot
+    // wrap; every offset below is then a difference between two of those corners inside
+    // the overlap, so it is non-negative and no larger than the smaller mask's extent.
+    // Stated once here rather than at each of the six.
+    #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub(crate) fn crop(&self, left: i32, top: i32, width: u32, height: u32) -> Self {
+        let mut cut = Self::transparent(left, top, width, height);
+        let (ax0, ay0) = (i64::from(left), i64::from(top));
+        let (ax1, ay1) = (ax0 + i64::from(width), ay0 + i64::from(height));
+        let (bx0, by0) = (i64::from(self.left), i64::from(self.top));
+        let (bx1, by1) = (bx0 + i64::from(self.width), by0 + i64::from(self.height));
+        let (x0, y0) = (ax0.max(bx0), ay0.max(by0));
+        let (x1, y1) = (ax1.min(bx1), ay1.min(by1));
+        if x0 >= x1 || y0 >= y1 {
+            return cut;
+        }
+        let (span, rows) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let (from_x, from_y) = ((x0 - bx0) as usize, (y0 - by0) as usize);
+        let (into_x, into_y) = ((x0 - ax0) as usize, (y0 - ay0) as usize);
+        for row in 0..rows {
+            let from = (from_y + row) * self.width as usize + from_x;
+            let into = (into_y + row) * width as usize + into_x;
+            cut.coverage[into..into + span].copy_from_slice(&self.coverage[from..from + span]);
+        }
+        cut
+    }
+}
+
 /// Which of ISO 32000-2 §8.5.3.3's two rules decides insideness.
 ///
 /// `Hash` because it is part of the glyph cache's key: the same outline under the two
@@ -254,9 +308,14 @@ pub(crate) fn polyline_bounds(polylines: &[Polyline]) -> Option<(f32, f32, f32, 
 /// region (`left..left+width`, `top..top+height`), by the module's stated definition.
 ///
 /// Every subpath is treated as closed (fill semantics, ISO 32000-2 §8.5.3.1: filling
-/// implicitly closes open subpaths). Geometry outside the region contributes its
-/// winding by clamping to the region's edges, so a region tighter than the path's
-/// bounds still fills correctly.
+/// implicitly closes open subpaths).
+///
+/// **The region is a window on one answer, not an answer of its own.** Geometry outside
+/// it is cut at the border and deposits its winding there ([`deposit_slab`]), so asking
+/// for a tighter region returns what a wider one holds over the same pixels — to within
+/// the accumulator's own rounding, which ADR 0049 measures at **1 of 255 on 2 pixels in
+/// 2.9 million**. That is what lets one rasterisation of a clip's region serve every
+/// tile cut out of it (`encode::residue`).
 // The accumulation arithmetic below is bounded by construction: coordinates are
 // clamped into the region, whose dimensions were checked against the frame budget
 // before allocation. Stated once here rather than per line of a hot loop.
@@ -395,12 +454,73 @@ fn accumulate_edge(
     }
 }
 
-/// Deposit one row slab's areas, splitting at each vertical cell boundary the edge
-/// crosses. `xs`/`xe` are x at the slab's top and bottom; geometry left or right of
-/// the region clamps to its border (winding preserved, position clamped).
+/// Deposit one row slab's areas. `xs`/`xe` are x at the slab's top and bottom; the part
+/// of the slab spent left or right of the region is **cut off at the border** and
+/// deposited there, rather than compressed into the columns inside it.
+///
+/// # Why the cut, and what clamping the endpoints instead used to cost (ADR 0049)
+///
+/// A slab piece running from `x = −25` to `x = +2` covers the region's first column for
+/// most of its height and only reaches `x = 2` at the very end. Clamping the two
+/// endpoints to `[0, fw]` and interpolating between them — which is what this function
+/// did until ADR 0049 — spreads that height evenly from column 0 to column 2 instead.
+/// The row's *total* winding survives (every column past the crossing reads the same
+/// value, which is why nothing downstream ever saw it), but the columns at the border
+/// get somebody else's share: **up to 185 of 255 on a shallow edge**, measured by
+/// `a_tile_whose_geometry_enters_from_outside_is_exact`.
+///
+/// Cutting at the border is the same statement §10.7.4 makes about a clipping region —
+/// the pixels a fill would cover — applied to the region this mask is asked for: what
+/// lies outside contributes its winding, at the border, for exactly the height it spends
+/// there.
+///
+/// The cut runs only when an endpoint is outside; a piece wholly inside takes the same
+/// arithmetic it always did, to the bit, which is what keeps every tile that is not cut
+/// by a clip or by the page edge pixel-for-pixel where it was.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 #[allow(clippy::cast_sign_loss, clippy::cast_precision_loss)]
 fn deposit_slab(row: &mut [f32], fw: f32, dir: f32, xs: f32, ys: f32, xe: f32, ye: f32) {
+    if xs >= 0.0 && xs <= fw && xe >= 0.0 && xe <= fw {
+        deposit_inside(row, fw, dir, xs, ys, xe, ye);
+        return;
+    }
+    let (dx, dy) = (xe - xs, ye - ys);
+    // At most two borders can be crossed, and `dx == 0` crosses neither: a vertical
+    // piece is on one side for its whole height.
+    let mut cuts = [(0.0_f32, 0.0_f32); 2];
+    let mut count = 0;
+    if dx != 0.0 {
+        for border in [0.0_f32, fw] {
+            let t = (border - xs) / dx;
+            if t > 0.0 && t < 1.0 {
+                cuts[count] = (t, border);
+                count += 1;
+            }
+        }
+        if count == 2 && cuts[1].0 < cuts[0].0 {
+            cuts.swap(0, 1);
+        }
+    }
+    // Each part is interpolated from the piece's own ends, so a cut cannot move where
+    // the piece starts or finishes: the border's own x is used at the seam, and the
+    // outer ends stay the values the caller passed.
+    let (mut px, mut py) = (xs, ys);
+    for (t, border) in cuts.iter().take(count).copied() {
+        let (nx, ny) = (border, ys + dy * t);
+        deposit_inside(row, fw, dir, px, py, nx, ny);
+        (px, py) = (nx, ny);
+    }
+    deposit_inside(row, fw, dir, px, py, xe, ye);
+}
+
+/// One slab piece that does not cross the region's borders: split at each vertical cell
+/// boundary it does cross, and deposit the exact trapezoid areas.
+///
+/// A piece wholly outside arrives here with both ends on the same side; the clamp then
+/// collapses it onto the border column, which is where its winding belongs.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss, clippy::cast_precision_loss)]
+fn deposit_inside(row: &mut [f32], fw: f32, dir: f32, xs: f32, ys: f32, xe: f32, ye: f32) {
     let xs = xs.clamp(0.0, fw);
     let xe = xe.clamp(0.0, fw);
     let (mut px, mut py) = (xs, ys);
@@ -1125,5 +1245,156 @@ mod tests {
                 "a circle of diameter {diameter} flattens to 16 chords"
             );
         }
+    }
+
+    /// **A tile is the crop of any region that contains it** (ADR 0049) — the property
+    /// the residue cache rests on, stated where the arithmetic that has to hold it is.
+    ///
+    /// Forty closed curves of the artwork archetype's shape, each rasterised once over
+    /// its own bounds and then twenty times over tiles cut out of it at arbitrary
+    /// offsets, including tiles that hang off every side. Every pixel of every tile must
+    /// read what the region reads at the same *device* pixel — the region and the tile
+    /// share the pixel grid, so this compares like with like.
+    ///
+    /// **The bound is not zero, and the reason is arithmetic rather than geometry.** The
+    /// two are the same sum of the same trapezoids in a different order: the region's
+    /// prefix sum crosses the columns left of the tile one at a time where the tile
+    /// takes them as a single deposit at its border column. `f32` addition is not
+    /// associative, so a value within about 1e-7 of a rounding step can land either side
+    /// of it. What the assertions below fix is that this — and nothing structural — is
+    /// all that is left: **31 pixels of 2 863 228, every one of them by 1 of 255**.
+    /// Before ADR 0049's border cut the same probe read 2 684 pixels and **185 of 255**,
+    /// which is what a smeared border column looks like from here.
+    // A probe over generated geometry: the casts below are between pixel indices and
+    // device coordinates that the loops keep inside the region, and the arithmetic is
+    // the probe's own bookkeeping.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap,
+        clippy::arithmetic_side_effects
+    )]
+    #[test]
+    fn a_tile_is_the_crop_of_the_region_that_contains_it() {
+        let mut state: u32 = 0x1234_5678;
+        let mut next = |bound: f32| -> f32 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 8) as f32 / 16_777_216.0) * bound
+        };
+        let mut worst = 0i32;
+        let mut differing = 0u64;
+        let mut total = 0u64;
+        for shape in 0..40 {
+            // A closed curve like the archetype's clip: 24 cubics about a centre.
+            let cx = 60.0 + next(1000.0);
+            let cy = 60.0 + next(1500.0);
+            let r = 30.0 + next(120.0);
+            let mut path = vec![Segment::MoveTo(Point::new(cx - r, cy))];
+            let steps = 24;
+            for step in 0..steps {
+                let from = (step as f32) / (steps as f32) * std::f32::consts::TAU;
+                let to = ((step + 1) as f32) / (steps as f32) * std::f32::consts::TAU;
+                let point =
+                    |angle: f32| Point::new(cx + r * angle.cos(), cy + r * angle.sin() * 1.3);
+                let (a, b) = (point(from), point(to));
+                path.push(Segment::CubicTo {
+                    c1: Point::new(a.x + (b.x - a.x) * 0.35, a.y + (b.y - a.y) * 0.1),
+                    c2: Point::new(a.x + (b.x - a.x) * 0.65, a.y + (b.y - a.y) * 0.9),
+                    to: b,
+                });
+            }
+            path.push(Segment::Close);
+            let lines = flatten(&path, IDENTITY);
+            let (x0, y0, x1, y1) = super::polyline_bounds(&lines).unwrap();
+            let (rl, rt) = (x0.floor() as i32, y0.floor() as i32);
+            let (rw, rh) = (
+                (x1.ceil() as i32 - rl) as u32,
+                (y1.ceil() as i32 - rt) as u32,
+            );
+            let region = fill_mask(&lines, Rule::NonZero, rl, rt, rw, rh);
+            for _ in 0..20 {
+                let tl = rl + next(rw as f32) as i32 - 20;
+                let tt = rt + next(rh as f32) as i32 - 20;
+                let tw = 20 + next(80.0) as u32;
+                let th = 20 + next(80.0) as u32;
+                let direct = fill_mask(&lines, Rule::NonZero, tl, tt, tw, th);
+                for y in 0..th as i32 {
+                    for x in 0..tw as i32 {
+                        let d = direct.coverage[(y * tw as i32 + x) as usize];
+                        let (gx, gy) = (tl + x - rl, tt + y - rt);
+                        let c = if gx < 0 || gy < 0 || gx >= rw as i32 || gy >= rh as i32 {
+                            0
+                        } else {
+                            region.coverage[(gy * rw as i32 + gx) as usize]
+                        };
+                        total += 1;
+                        if c != d {
+                            differing += 1;
+                            worst = worst.max((i32::from(c) - i32::from(d)).abs());
+                        }
+                    }
+                }
+            }
+            let _ = shape;
+        }
+        assert!(
+            worst <= 1,
+            "a tile differs from its region by {worst} of 255, which is not rounding: \
+             {differing} of {total} pixels differ"
+        );
+        assert!(
+            differing * 50_000 <= total,
+            "{differing} of {total} pixels differ — 31 of 2 863 228 is what rounding \
+             costs here, and an order of magnitude more than that is a structural \
+             difference wearing rounding's clothes"
+        );
+    }
+
+    /// **A tile whose geometry enters from outside gets the area, not a smear of it**
+    /// (ADR 0049), against a value derived from the geometry rather than from any
+    /// rasteriser.
+    ///
+    /// The shape's left boundary is one straight edge from `(−2, 0)` to `(2, 1)`; the
+    /// interior is to its right, and the tile is the single pixel `[0, 1] × [0, 1]`. The
+    /// edge crosses `x = 0` at `y = 0.5` and `x = 1` at `y = 0.75`, so of that pixel:
+    ///
+    /// - `y ∈ [0, 0.5]` — the boundary is left of the pixel, which is covered: **0.5**
+    /// - `y ∈ [0.5, 0.75]` — the boundary crosses it; the area to its right is
+    ///   `∫(1 − 4(y − 0.5)) dy = 0.25 − 0.125` = **0.125**
+    /// - `y ∈ [0.75, 1]` — the boundary is right of the pixel, which is empty: **0**
+    ///
+    /// 0.625 of the pixel, and `round(0.625 × 255) = 159` by this module's stated
+    /// quantisation. Clamping the endpoints instead of cutting at the border spread the
+    /// slab evenly across `x ∈ [0, 1]` and read **128**.
+    #[test]
+    fn a_tile_whose_geometry_enters_from_outside_is_exact() {
+        let path = vec![
+            Segment::MoveTo(Point::new(-2.0, 0.0)),
+            Segment::LineTo(Point::new(2.0, 1.0)),
+            Segment::LineTo(Point::new(9.0, 1.0)),
+            Segment::LineTo(Point::new(9.0, 0.0)),
+            Segment::Close,
+        ];
+        let lines = flatten(&path, IDENTITY);
+        let tile = fill_mask(&lines, Rule::NonZero, 0, 0, 1, 1);
+        assert_eq!(cov(&tile, 0, 0), 159, "0.625 of a pixel is 159 of 255");
+    }
+
+    /// The same shape's pixel, asked for as part of a wider region: the two agree, which
+    /// is [`a_tile_is_the_crop_of_the_region_that_contains_it`] on a case whose answer is
+    /// known independently of either.
+    #[test]
+    fn the_region_and_the_tile_agree_on_a_pixel_whose_area_is_known() {
+        let path = vec![
+            Segment::MoveTo(Point::new(-2.0, 0.0)),
+            Segment::LineTo(Point::new(2.0, 1.0)),
+            Segment::LineTo(Point::new(9.0, 1.0)),
+            Segment::LineTo(Point::new(9.0, 0.0)),
+            Segment::Close,
+        ];
+        let lines = flatten(&path, IDENTITY);
+        let region = fill_mask(&lines, Rule::NonZero, -4, 0, 16, 1);
+        assert_eq!(cov(&region, 4, 0), 159, "the pixel at device x = 0");
     }
 }

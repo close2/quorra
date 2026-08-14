@@ -928,6 +928,8 @@ impl Device {
             counters: Counters {
                 commands: encoded.commands,
                 clip_distinct_regions: encoded.clip_distinct_regions,
+                clip_residue_regions: encoded.clip_residue_regions,
+                clip_residue_tiles: encoded.clip_residue_tiles,
                 distinct_outlines: encoded.distinct_outlines,
                 atlas_entries: u32::try_from(self.atlas.entry_count()).unwrap_or(u32::MAX),
                 atlas_distinct_keys: encoded.atlas_distinct_keys,
