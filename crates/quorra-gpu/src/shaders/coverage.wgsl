@@ -44,14 +44,22 @@ struct MaskPlace {
 @group(1) @binding(2) var soft_mask_tex: texture_2d<f32>;
 @group(1) @binding(3) var<uniform> mask_place: MaskPlace;
 
-// The soft mask at a device pixel (ADR 0037). Identical in all five shaders that
-// sample a mask; WGSL has no include, so the copies are kept textually the same.
-fn soft_mask_at(p: vec2f) -> f32 {
-    let local = p - mask_place.rect.xy;
-    if any(local < vec2f(0.0)) || any(local >= mask_place.rect.zw) {
-        return mask_place.outside.x;
+// The soft mask at a device pixel, given where the mask sits (ADR 0037). Identical in
+// all five shaders that sample a mask; WGSL has no include, so the copies are kept
+// textually the same, and tests/shader_copies.rs fails the build when they drift. The
+// placement is an argument rather than a global because it reaches each lane in a
+// different uniform; `soft_mask_tex` is the one name all five bind it under.
+fn soft_mask_value(rect: vec4f, outside: f32, p: vec2f) -> f32 {
+    let local = p - rect.xy;
+    if any(local < vec2f(0.0)) || any(local >= rect.zw) {
+        return outside;
     }
     return textureLoad(soft_mask_tex, vec2i(local), 0).r;
+}
+
+// This lane draws batches under different masks, so the placement is its own uniform.
+fn soft_mask_at(p: vec2f) -> f32 {
+    return soft_mask_value(mask_place.rect, mask_place.outside.x, p);
 }
 
 struct Instance {

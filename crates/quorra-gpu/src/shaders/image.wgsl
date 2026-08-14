@@ -61,14 +61,22 @@ struct Params {
 // The frame's scratch, holding a rasterised residue clip when one applies.
 @group(0) @binding(4) var scratch_tex: texture_2d<f32>;
 
-// The soft mask at a device pixel (ADR 0037). Identical in all five shaders that
-// sample a mask; WGSL has no include, so the copies are kept textually the same.
-fn soft_mask_at(p: vec2f) -> f32 {
-    let local = p - params.mask_rect.xy;
-    if any(local < vec2f(0.0)) || any(local >= params.mask_rect.zw) {
-        return params.mask_outside.x;
+// The soft mask at a device pixel, given where the mask sits (ADR 0037). Identical in
+// all five shaders that sample a mask; WGSL has no include, so the copies are kept
+// textually the same, and tests/shader_copies.rs fails the build when they drift. The
+// placement is an argument rather than a global because it reaches each lane in a
+// different uniform; `soft_mask_tex` is the one name all five bind it under.
+fn soft_mask_value(rect: vec4f, outside: f32, p: vec2f) -> f32 {
+    let local = p - rect.xy;
+    if any(local < vec2f(0.0)) || any(local >= rect.zw) {
+        return outside;
     }
     return textureLoad(soft_mask_tex, vec2i(local), 0).r;
+}
+
+// This pass draws one image under one mask, so the placement is in its uniform.
+fn soft_mask_at(p: vec2f) -> f32 {
+    return soft_mask_value(params.mask_rect, params.mask_outside.x, p);
 }
 
 struct VsOut {

@@ -164,18 +164,10 @@ re-auditing. Each is one sitting:
   `error.rs` is the in-tree example of the fix.
 - **`pipeline/spec.rs:112`** carries a bare `#[allow(clippy::too_many_lines)]` on a
   138-line `fn of` — split into named phases or write the reason.
-- **`composite.wgsl:142` and `:174`** (`hard_light_channel`, `soft_light_channel`) are
-  missing the `§11.3.5.2` citations their siblings carry.
-- **`soft_mask_at` and `fs_shape` are copied across five shaders** with a comment
-  promising textual sameness and nothing enforcing it — a test that reads the shader
-  sources and compares the extracted bodies makes the promise checkable.
 - **`resources.rs:32`'s `#[allow(dead_code)]` reason** ("consumed by the lanes from
   M4/M5") describes a state that shipped; refresh or remove.
 - **`criterion` is pinned in the workspace with no bench anywhere** — add the benchmark
   the pin promises or drop the pin.
-- **The fuzz generator's vocabulary stopped at M5** (`fuzz_scene.rs`: `rect`, `fill`,
-  `stroke`, `clip`, `group`) — images, shadings, masks and the compose vocabulary are
-  where the surface area grew since, and extending `random_ops` is cheap.
 - **`device.rs` hosts ramp sampling** (`sample_ramp`, `ramp_color_at`,
   `RAMP_RESOLUTION`) outside its stated responsibility — a candidate seam whenever that
   file is next open.

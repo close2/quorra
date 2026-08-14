@@ -64,14 +64,22 @@ struct Params {
 // The frame's scratch image, holding the clip-residue mask when present.
 @group(0) @binding(4) var scratch_tex: texture_2d<f32>;
 
-// The soft mask at a device pixel (ADR 0037). Identical in all five shaders that
-// sample a mask; WGSL has no include, so the copies are kept textually the same.
-fn soft_mask_at(p: vec2f) -> f32 {
-    let local = p - params.mask_rect.xy;
-    if any(local < vec2f(0.0)) || any(local >= params.mask_rect.zw) {
-        return params.mask_outside.x;
+// The soft mask at a device pixel, given where the mask sits (ADR 0037). Identical in
+// all five shaders that sample a mask; WGSL has no include, so the copies are kept
+// textually the same, and tests/shader_copies.rs fails the build when they drift. The
+// placement is an argument rather than a global because it reaches each lane in a
+// different uniform; `soft_mask_tex` is the one name all five bind it under.
+fn soft_mask_value(rect: vec4f, outside: f32, p: vec2f) -> f32 {
+    let local = p - rect.xy;
+    if any(local < vec2f(0.0)) || any(local >= rect.zw) {
+        return outside;
     }
     return textureLoad(soft_mask_tex, vec2i(local), 0).r;
+}
+
+// This pass composites one group under one mask, so the placement is in its uniform.
+fn soft_mask_at(p: vec2f) -> f32 {
+    return soft_mask_value(params.mask_rect, params.mask_outside.x, p);
 }
 
 struct VsOut {
@@ -140,6 +148,9 @@ fn soft_light_d(b: f32) -> f32 {
 }
 
 fn hard_light_channel(b: f32, s: f32) -> f32 {
+    // §11.3.5.2 HardLight: Multiply(b, 2s) where the *source* is at or below 0.5,
+    // Screen(b, 2s − 1) above it. The switch is on s, which is what distinguishes it
+    // from Overlay — the same function with its two arguments exchanged.
     if s <= 0.5 {
         return b * (2.0 * s); // Multiply(b, 2s)
     }
@@ -172,6 +183,9 @@ fn color_burn_channel(b: f32, s: f32) -> f32 {
 }
 
 fn soft_light_channel(b: f32, s: f32) -> f32 {
+    // §11.3.5.2 SoftLight: below s = 0.5 the backdrop is darkened toward b², above it
+    // lightened toward D(b) — the clause's auxiliary, `soft_light_d` above. The two
+    // halves meet at b when s = 0.5, so the function is continuous across the switch.
     if s <= 0.5 {
         return b - (1.0 - 2.0 * s) * b * (1.0 - b);
     }

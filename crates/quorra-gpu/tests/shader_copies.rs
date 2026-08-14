@@ -1,0 +1,217 @@
+//! The WGSL helpers that promise to be copies are held to it.
+//!
+//! WGSL has no `#include`. A helper needed by five shaders is therefore written five
+//! times, and each copy carries a comment saying the copies are kept textually the
+//! same — a promise that nothing enforced, so the copies could drift apart silently
+//! and the divergence would show up as one lane masking differently from the other
+//! four on some page nobody has yet. This file is the enforcement: it reads the same
+//! sources `pipeline.rs` compiles, cuts each promised function out of every shader
+//! that defines it, and requires the texts to be equal byte for byte.
+//!
+//! Two failure modes, both deliberate:
+//!
+//! - **Drift.** Two copies differ; the message names the two shaders and prints both
+//!   texts, because "a helper drifted" without saying where is a bug report, not a
+//!   test failure.
+//! - **Disappearance.** Fewer copies than expected. A count is asserted so that
+//!   deleting or renaming one copy fails here rather than leaving the remaining
+//!   copies to agree with each other vacuously.
+//!
+//! And one guard on the guard: every comment in every shader that makes the sameness
+//! promise must sit above a function this file knows about. A new copied helper that
+//! promises sameness without being listed below fails the same test that would have
+//! caught it drifting.
+//!
+//! What is *not* here: `fs_shape`, which four shaders define, and `coverage_at`, which
+//! two do. Those bodies are genuinely different — a rectangle's shape is its coverage,
+//! an image's is its sampled alpha, a shading's depends on whether the paint marks the
+//! pixel at all (ADR 0011), and the coverage lane's `coverage_at` samples an atlas the
+//! rectangle lane has no need of. Neither claims to be a copy: `coverage_at`'s comment
+//! says "same formula as rect.wgsl", which is a claim about ADR 0005's arithmetic and
+//! not about the text. Only a stated promise is guarded, because only a stated promise
+//! is a thing a reader is entitled to rely on.
+
+// Integration-test files sit outside `#[cfg(test)]`, so `clippy.toml`'s
+// allow-panic-in-tests does not reach them; this is the same policy, stated here.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+/// Every shader source, under the name `pipeline.rs` gives its module.
+///
+/// Included with `include_str!` from the same paths that module uses, so a shader
+/// that has moved fails to compile here rather than being skipped.
+const SHADERS: &[(&str, &str)] = &[
+    ("rect", include_str!("../src/shaders/rect.wgsl")),
+    ("coverage", include_str!("../src/shaders/coverage.wgsl")),
+    ("image", include_str!("../src/shaders/image.wgsl")),
+    ("shading", include_str!("../src/shaders/shading.wgsl")),
+    ("composite", include_str!("../src/shaders/composite.wgsl")),
+    ("reduce", include_str!("../src/shaders/reduce.wgsl")),
+    ("blit", include_str!("../src/shaders/blit.wgsl")),
+    ("winding", include_str!("../src/shaders/winding.wgsl")),
+];
+
+/// The functions that promise to be copies, and how many copies must exist.
+///
+/// `soft_mask_value` is ADR 0037's mask lookup: the five shaders that sample a soft
+/// mask are the rectangle and coverage lanes, the image and shading passes, and the
+/// compositor. Its per-shader wrapper `soft_mask_at` is *not* listed, and must not be:
+/// each lane reads the placement from a different uniform, and pushing that difference
+/// into the wrapper is what leaves this function copyable at all.
+const PROMISED_COPIES: &[(&str, usize)] = &[("soft_mask_value", 5)];
+
+/// The sentence a copied helper's comment carries.
+const PROMISE: &str = "the copies are kept textually the same";
+
+/// The text of the module-scope function `name` in `source`, from its `fn` keyword
+/// through the closing brace of its body.
+///
+/// Returns `None` when the shader does not define it. Panics if it is defined twice,
+/// which would make "the copies agree" ambiguous about which copy was compared.
+fn function_text<'a>(shader: &str, source: &'a str, name: &str) -> Option<&'a str> {
+    let opening = format!("fn {name}(");
+    let starts: Vec<usize> = source
+        .match_indices(&opening)
+        .map(|(at, _)| at)
+        // Module scope only: a call `soft_mask_value(...)` inside another function is
+        // not a definition, and neither is a substring of a longer name.
+        .filter(|at| *at == 0 || source.get(..*at).is_some_and(|head| head.ends_with('\n')))
+        .collect();
+    assert!(
+        starts.len() <= 1,
+        "{shader}.wgsl defines `{name}` {} times",
+        starts.len()
+    );
+    let start = *starts.first()?;
+    let end = body_end(source, start).unwrap_or_else(|| {
+        panic!("{shader}.wgsl: `{name}` has no balanced body — unclosed brace?");
+    });
+    source.get(start..end)
+}
+
+/// The byte just past the closing brace of the first `{`-delimited block at or after
+/// `start`, counting nested braces and ignoring those inside comments.
+///
+/// The helpers guarded here contain neither comments nor string literals with braces
+/// in them, and WGSL has no string literal at all in the sense C does; the comment
+/// skipping is here so that the extractor stays correct if one of them grows a comment
+/// rather than quietly cutting the function short.
+fn body_end(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < bytes.len() {
+        match (bytes[i], bytes.get(i.saturating_add(1))) {
+            (b'/', Some(b'/')) => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i = i.saturating_add(1);
+                }
+            }
+            (b'/', Some(b'*')) => {
+                i = i.saturating_add(2);
+                while i.saturating_add(1) < bytes.len()
+                    && !(bytes[i] == b'*' && bytes[i.saturating_add(1)] == b'/')
+                {
+                    i = i.saturating_add(1);
+                }
+                i = i.saturating_add(2);
+            }
+            (b'{', _) => {
+                depth = depth.saturating_add(1);
+                i = i.saturating_add(1);
+            }
+            (b'}', _) => {
+                depth = depth.checked_sub(1)?;
+                i = i.saturating_add(1);
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i = i.saturating_add(1),
+        }
+    }
+    None
+}
+
+/// Every copy of every promised helper is byte-identical to every other copy.
+#[test]
+fn promised_helpers_are_textually_identical() {
+    for (name, expected) in PROMISED_COPIES {
+        let copies: Vec<(&str, &str)> = SHADERS
+            .iter()
+            .filter_map(|(shader, source)| {
+                function_text(shader, source, name).map(|text| (*shader, text))
+            })
+            .collect();
+
+        assert_eq!(
+            copies.len(),
+            *expected,
+            "`{name}` is defined in {} shaders ({}), not the {expected} that are \
+             supposed to carry it — a copy was deleted, renamed, or added without \
+             updating PROMISED_COPIES",
+            copies.len(),
+            copies
+                .iter()
+                .map(|(shader, _)| *shader)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+
+        let (first_shader, first_text) = copies[0];
+        for (shader, text) in &copies[1..] {
+            assert_eq!(
+                first_text, *text,
+                "`{name}` has drifted between {first_shader}.wgsl and {shader}.wgsl.\n\
+                 --- {first_shader}.wgsl\n{first_text}\n--- {shader}.wgsl\n{text}",
+            );
+        }
+    }
+}
+
+/// A shader's text with its comment fences and line breaks taken out, so that a
+/// sentence spanning three comment lines is one sentence to search for.
+fn prose_flow(source: &str) -> String {
+    source
+        .split_whitespace()
+        .filter(|token| *token != "//")
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Nothing promises sameness without being guarded above.
+#[test]
+fn every_sameness_promise_is_guarded() {
+    let guarded: Vec<&str> = PROMISED_COPIES.iter().map(|(name, _)| *name).collect();
+    let mut promises = 0usize;
+
+    for (shader, source) in SHADERS {
+        let flow = prose_flow(source);
+        for (at, _) in flow.match_indices(PROMISE) {
+            promises = promises.saturating_add(1);
+            // The promise is made in the comment block directly above the function it
+            // is about, so the next `fn` names it.
+            let rest = flow.get(at..).unwrap_or_default();
+            let declared = rest.find("fn ").map(|from| rest.split_at(from).1);
+            let name = declared
+                .unwrap_or_else(|| {
+                    panic!("{shader}.wgsl promises sameness with no function below it");
+                })
+                .trim_start_matches("fn ")
+                .split('(')
+                .next()
+                .unwrap_or_default();
+            assert!(
+                guarded.contains(&name),
+                "{shader}.wgsl promises that `{name}` is kept textually the same as its \
+                 copies, but nothing checks it — add it to PROMISED_COPIES",
+            );
+        }
+    }
+
+    let expected: usize = PROMISED_COPIES.iter().map(|(_, count)| *count).sum();
+    assert_eq!(
+        promises, expected,
+        "{promises} shaders make the sameness promise, {expected} functions' worth of \
+         copies are guarded — a copy lost its comment or gained one",
+    );
+}
