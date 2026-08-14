@@ -13,35 +13,29 @@ The name is Tron: Legacy's Quorra, the last ISO. This library implements one.
 
 ## Status
 
-**M8 — every scene command draws, and damage is honoured.** A device (headless and
-surface-attached,
-presenting real frames — proven under Xvfb), three target kinds, and the full
-drawing vocabulary: analytic rectangles with rectangular clips at zero device cost
-(ADR 0007); a glyph atlas with the settable 1/16-pixel quantum (5 933 fills → 107
-cached tiles → 1.0 ms/frame at window scale on RADV; ADR 0009); a general path lane —
-fills under both rules, strokes with caps/joins/miters, non-rectangular clip
-residues — over one deterministic CPU coverage rasteriser (ADR 0008); clause 11
-natively — isolated and non-isolated groups (ADR 0019), all sixteen §11.3.5 blend
-modes in-shader, per-element knockout, soft masks byte-agreed with the caller's CPU
-reduction on all 256 inputs (ADR 0010); and the rare-case lanes — images with resolved per-placement filtering,
-axial/radial ramp sweeps with clause-derived bytes, pre-rasterised meshes — as
-uniform-driven quads (ADR 0011; the dense page plus a figure load: 0.63 ms/frame on
-RADV). The scene vocabulary validates loudly per §4.7; resources are
-upload-once/reference-many under stated budgets; frames report timestamped phase
-timings and refuse rather than approximate. Two of the brief's open questions are
-answered by measurement: the readback is ~90% of an offscreen frame's cost on the
-real GPU, and cross-adapter byte identity is not achievable through the
-fixed-function raster path — but is achievable wherever the arithmetic is ours,
-which is how the compositor and the paint lanes are built (ADR 0006). Damage
-against a retained texture target is honoured exactly — scissored rendering,
-rectangle patching, nothing outside the list touched (ADR 0012; a caret blink's
-execute drops 3× on RADV) — and the pipeline-cache `unsafe` exception was weighed
-and declined with the benchmark in hand (ADR 0013). `doc/PLAN.md` carries the
-design, the records, and what happens next. **The swap is done** (M9):
-`render-quorra` in the viewer's workspace implements their `Rasterizer` over this
-library, passes their cross-backend and real-page suites at their Vello backend's
-own thresholds, and the viewer's window now presents through quorra's surface tier
-— verified under Xvfb with real key presses on ISO 32000-2 itself.
+**All nine milestones are done, and the viewer renders through this library.**
+`render-quorra` in the PDF viewer's workspace implements their `Rasterizer` over quorra,
+and their window presents through the surface tier with no readback anywhere.
+
+Every scene command draws. Analytic rectangles with rectangular clips at zero device cost
+(ADR 0007); a glyph atlas with the settable 1/16-pixel quantum (ADR 0009); a general path
+lane — both fill rules, strokes with caps/joins/miters, non-rectangular clip residues —
+over one deterministic CPU coverage rasteriser, with a GPU winding lane where it pays
+(ADRs 0008, 0016, 0026); clause 11 natively — isolated and non-isolated groups, all
+sixteen §11.3.5 blend modes in-shader, per-element knockout, soft masks byte-agreed with
+the caller's CPU reduction on all 256 inputs (ADRs 0010, 0019, 0032, 0033); images,
+ramp shadings and pre-rasterised meshes as uniform-driven quads (ADR 0011); damage
+honoured exactly against a retained texture target (ADR 0012); and a `RetainedScene`
+whose unchanged frame replays instead of re-encoding (ADR 0048). A frame is drawn or
+refused by name, never approximated.
+
+**Against the brief's own success criterion** (§6.2: a third of a multi-threaded
+`tiny-skia`'s 5.9 ms on a dense text page at 1191×1684, presenting to a surface): 1.816 ms
+on RADV, of which the GPU is about 4 %. The caller's 974-document corpus agrees with their
+CPU oracle on 934 of 956 comparable pages at scale 1.
+
+`doc/PLAN.md` carries the design and what is true today, `doc/history/` how it got there,
+`doc/adr/` why each decision was taken.
 
 ## Layout
 
