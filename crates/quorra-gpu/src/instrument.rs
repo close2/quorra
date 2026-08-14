@@ -95,4 +95,27 @@ impl EncodeClock {
             ("encode: recording", recording),
         ]
     }
+
+    /// The same three rows at zero: what a frame that **replayed** a retained encode
+    /// spent on each part (ADR 0048).
+    ///
+    /// Deliberately not `phases(Duration::ZERO)`. The geometry and staging totals in
+    /// this clock are real durations — spent by the frame that encoded, possibly
+    /// hundreds of frames ago — and a `Frame` reporting them as its own would be saying
+    /// something untrue about itself, which is the one thing a `Frame` may never do. A
+    /// replay flattened nothing, rasterised nothing and packed nothing, and three zeros
+    /// are that measurement rather than an absence of one.
+    ///
+    /// The rows are kept rather than dropped so that a caller summing a trace's phases
+    /// across frames does not have to special-case a frame that omitted them.
+    pub(crate) fn replayed(&self) -> Vec<(&'static str, Duration)> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        vec![
+            ("encode: geometry", Duration::ZERO),
+            ("encode: staging", Duration::ZERO),
+            ("encode: recording", Duration::ZERO),
+        ]
+    }
 }

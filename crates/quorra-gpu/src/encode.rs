@@ -325,6 +325,54 @@ pub(crate) struct Encoded {
     pub encode_phases: EncodeClock,
 }
 
+impl Encoded {
+    /// Heap bytes this encode holds — what a [`RetainedScene`] costs to keep alive
+    /// (ADR 0048).
+    ///
+    /// Every buffer, so the number can be budgeted against rather than sampled: the two
+    /// instance streams, the coverage sheet, the GPU lane's vertices and tiles, the plan
+    /// tree's op lists (with the boxed image and shading operands ADR 0011's rare lanes
+    /// allocate), the mask plans and the three resource-id lists. Vector *capacity* is
+    /// not read — a `Vec`'s spare capacity is not something this frame decided — so the
+    /// number is what the encode filled, which is also what a second one would fill.
+    ///
+    /// Called once per stored encode, never per frame.
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        let bytes_of =
+            |count: usize, each: usize| -> u64 { (count as u64).saturating_mul(each as u64) };
+        let plan_bytes = |plan: &LayerPlan| -> u64 {
+            plan.ops.iter().fold(
+                bytes_of(plan.ops.len(), size_of::<Op>()),
+                |total, op| match op {
+                    Op::Image(_) => total.saturating_add(size_of::<ImageOp>() as u64),
+                    Op::Shaded(_) => total.saturating_add(size_of::<ShadedOp>() as u64),
+                    Op::Draw(_) | Op::Child(_) => total,
+                },
+            )
+        };
+        let scratch = self
+            .scratch
+            .as_ref()
+            .map_or(0, |scratch| scratch.data.len() as u64);
+        [
+            self.rect_instances.len() as u64,
+            self.quad_instances.len() as u64,
+            scratch,
+            bytes_of(self.winding.vertices.len(), size_of::<f32>()),
+            bytes_of(self.winding.tiles.len(), size_of::<crate::pane::Tile>()),
+            plan_bytes(&self.root),
+            self.layers.iter().map(plan_bytes).sum::<u64>(),
+            bytes_of(self.layers.len(), size_of::<LayerPlan>()),
+            bytes_of(self.mask_plans.len(), size_of::<Option<MaskPlan>>()),
+            bytes_of(self.used_images.len(), size_of::<u32>()),
+            bytes_of(self.used_ramps.len(), size_of::<u32>()),
+            bytes_of(self.used_meshes.len(), size_of::<u32>()),
+        ]
+        .into_iter()
+        .fold(0_u64, u64::saturating_add)
+    }
+}
+
 fn compose(transform: Affine, viewport: &Viewport<'_>) -> DeviceTransform {
     let t = transform.then(viewport.transform);
     DeviceTransform {

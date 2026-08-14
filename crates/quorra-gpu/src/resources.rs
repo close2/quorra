@@ -76,6 +76,14 @@ pub(crate) struct ResourceStore {
     next_id: u32,
     in_use_bytes: u64,
     budget_bytes: u64,
+    /// Bumped by every [`ResourceStore::release`], so that anything holding an encode
+    /// that names resource ids can tell whether those ids still mean what they meant
+    /// (`retained.rs`, ADR 0048).
+    ///
+    /// **Release only.** An upload mints an id from a monotonic counter and never
+    /// revives a released one, so a stored encode's ids cannot come to name different
+    /// bytes; a release is the one operation that can take a referenced resource away.
+    generation: u64,
 }
 
 impl ResourceStore {
@@ -88,7 +96,13 @@ impl ResourceStore {
             next_id: 0,
             in_use_bytes: 0,
             budget_bytes,
+            generation: 0,
         }
+    }
+
+    /// How many times a resource has been released from this store.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Bytes currently resident, for `Limits` and diagnostics.
@@ -307,6 +321,7 @@ impl ResourceStore {
         match freed {
             Some(bytes) => {
                 self.in_use_bytes = self.in_use_bytes.saturating_sub(bytes);
+                self.generation = self.generation.wrapping_add(1);
                 Ok(())
             }
             None => Err(DeviceError::UnknownResource { id }),

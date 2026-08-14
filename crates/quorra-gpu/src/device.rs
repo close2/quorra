@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -35,13 +36,14 @@ use crate::atlas::AtlasStore;
 use crate::compose::{self, Executor, PassLoad, Region};
 use crate::encode::{self, ChildOp, Encoded, ImageOp, MaskPlan, PaintSource, ShadedOp};
 use crate::error::{DeviceError, RenderError};
-use crate::frame::{Counters, Frame, Payload, Raster, TimingProvenance, Timings};
+use crate::frame::{Counters, EncodeSource, Frame, Payload, Raster, TimingProvenance, Timings};
 use crate::layers::{self, LayerPool};
 use crate::mask::MaskPlacement;
 use crate::pipeline::{PipelineStore, WARM_FORMAT};
 use crate::readback;
 use crate::report::{Report, ReportKind};
 use crate::resources::ResourceStore;
+use crate::retained::{EncodeKey, RetainedScene};
 use crate::startup::{self, Coverage, Options, PreSteps, StartupTimings, WarmUp};
 use crate::surface::SurfaceState;
 use crate::target::Target;
@@ -61,12 +63,21 @@ pub struct Limits {
     pub max_resource_bytes: u64,
 }
 
+/// Hands out device numbers. Monotonic for the process, which is all a
+/// [`RetainedScene`] needs of it: a handle carried to a device other than the one that
+/// encoded it must not replay, and two live devices never share a number (ADR 0048).
+static NEXT_DEVICE_ID: AtomicU64 = AtomicU64::new(0);
+
 /// The rendering device: an adapter, a queue, and the pipelines a scene needs.
 ///
 /// Constructible on a background thread and not requiring one (§2.1). Headless is the
 /// first-class form — it is what the caller's test suite and correctness oracle use.
 #[derive(Debug)]
 pub struct Device {
+    /// This device's number among the devices this process has made, so that a retained
+    /// encode — which names atlas positions and resource ids belonging to one device —
+    /// cannot be replayed through another.
+    id: u64,
     gpu: wgpu::Device,
     queue: wgpu::Queue,
     description: String,
@@ -377,6 +388,7 @@ impl Device {
         };
 
         Ok(Self {
+            id: NEXT_DEVICE_ID.fetch_add(1, Ordering::Relaxed),
             gpu,
             queue,
             description,
@@ -692,7 +704,98 @@ impl Device {
         // any allocation and regardless of target size, so refusals are identical
         // across targets.
         let encode_started = Instant::now();
-        let encoded = encode::encode(
+        let encoded = self.encode_scene(scene, viewport)?;
+        let encode_time = encode_started.elapsed();
+
+        let frame = self.draw_encoded(
+            &encoded,
+            viewport,
+            &into,
+            &damage,
+            reports,
+            encode_time,
+            EncodeSource::Encoded,
+        )?;
+        self.settle_atlas(&encoded);
+        Ok(frame)
+    }
+
+    /// Render one frame of a scene the caller retains, replaying the encode of its last
+    /// frame when nothing an encode depends on has changed (ADR 0048).
+    ///
+    /// **The same pixels as [`Device::render`] over the same scene and viewport**, and
+    /// the same refusals: a replayed frame skips only phase 1, and every check phase 1
+    /// is not — the frame budget for internal textures, the target's own contract, the
+    /// passes themselves — runs on every call. A frame that would be refused is refused
+    /// identically, whether it encoded or replayed, because an encode is retained only
+    /// after it succeeded and is discarded the moment any input it read has moved.
+    ///
+    /// [`Frame::encode_source`] says which of the two this frame was. What survives
+    /// which change, and what no design can make survive, is
+    /// [`RetainedScene`]'s own table.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Device::render`]'s, over the scene the handle holds.
+    ///
+    /// [`Frame::encode_source`]: crate::frame::Frame::encode_source
+    // As `render`: a target is a discriminant plus a borrow.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn render_retained(
+        &mut self,
+        retained: &mut RetainedScene,
+        viewport: &Viewport<'_>,
+        into: Target<'_>,
+    ) -> Result<Frame, RenderError> {
+        self.validate_viewport(viewport)?;
+
+        let mut reports = Vec::new();
+        let damage = Self::plan_damage(viewport, &into, &mut reports)?;
+
+        // The key is taken before the encode, and that is the safe order: encoding
+        // inserts atlas tiles, which never move an existing entry, so the generation it
+        // reads is the one the encode is valid under — while a *reset* triggered by this
+        // frame bumps it afterwards and invalidates what this frame stored, which is
+        // exactly right, since a repack moves every tile the instances name.
+        let key = EncodeKey::new(
+            self.id,
+            viewport,
+            self.coverage,
+            self.atlas.generation,
+            self.resources.generation(),
+        );
+        let encode_started = Instant::now();
+        // Borrowed from `retained`, which is not `self`: the encode and the device it
+        // draws through are two objects, so nothing here needs a clone.
+        let (source, encoded) =
+            retained.prepare(key, |scene| self.encode_scene(scene, viewport))?;
+        let encode_time = encode_started.elapsed();
+
+        let frame = self.draw_encoded(
+            encoded,
+            viewport,
+            &into,
+            &damage,
+            reports,
+            encode_time,
+            source,
+        );
+        // A replay inserted nothing, so there is nothing for a repack to settle — and
+        // resetting after one would bump the generation the replayed encode is keyed
+        // under and cost the next frame an encode for no reason.
+        if source == EncodeSource::Encoded && frame.is_ok() {
+            self.settle_atlas(encoded);
+        }
+        frame
+    }
+
+    /// Phase 1: classify, rasterise coverage, and count (`encode.rs`).
+    fn encode_scene(
+        &mut self,
+        scene: &Scene,
+        viewport: &Viewport<'_>,
+    ) -> Result<Encoded, RenderError> {
+        encode::encode(
             scene,
             viewport,
             self.limits.max_frame_bytes,
@@ -702,11 +805,27 @@ impl Device {
             self.glyph_quantum,
             self.coverage,
             self.instrument_encode,
-        )?;
-        let encode_time = encode_started.elapsed();
+        )
+    }
 
+    /// Phases 2 to 4 of a frame: price, allocate, upload, draw, resolve.
+    ///
+    /// Everything that is not phase 1, which is the seam a retained encode is replayed
+    /// across (ADR 0048): the two callers differ only in where the [`Encoded`] came
+    /// from, and every refusal below this line is taken by both.
+    #[allow(clippy::too_many_arguments)] // one frame's inputs, named once at two call sites
+    fn draw_encoded(
+        &mut self,
+        encoded: &Encoded,
+        viewport: &Viewport<'_>,
+        into: &Target<'_>,
+        damage: &DamagePlan,
+        reports: Vec<Report>,
+        encode_time: Duration,
+        source: EncodeSource,
+    ) -> Result<Frame, RenderError> {
         if viewport.width == 0 || viewport.height == 0 {
-            return Self::zero_size_frame(viewport, &into, &encoded, encode_time, reports);
+            return Self::zero_size_frame(viewport, into, encoded, encode_time, reports, source);
         }
 
         // Price the compositor's internal textures while nothing of the frame
@@ -716,9 +835,9 @@ impl Device {
         // leaves the swapchain a semaphore no submission will ever wait on — the
         // viewer measured that as every later acquire timing out, permanently.
         // A patched frame renders through the root pair even when flat.
-        let patches = matches!(&damage, DamagePlan::Patch { rects, .. } if !rects.is_empty());
+        let patches = matches!(damage, DamagePlan::Patch { rects, .. } if !rects.is_empty());
         let internal_bytes =
-            layers::internal_texture_bytes(&encoded, viewport.width, viewport.height, patches);
+            layers::internal_texture_bytes(encoded, viewport.width, viewport.height, patches);
         if internal_bytes > self.limits.max_frame_bytes {
             return Err(RenderError::FrameBudgetExceeded {
                 needed: internal_bytes,
@@ -729,11 +848,10 @@ impl Device {
         // Phase 2: allocate (sized by phase 1) and schedule uploads — including
         // the device-resident form of any image, ramp or mesh drawn for the first
         // time this frame.
-        let mut encoded = encoded;
         let paint_started = Instant::now();
-        let paint_bytes = self.ensure_paint_textures(&encoded)?;
+        let paint_bytes = self.ensure_paint_textures(encoded)?;
         let paint_time = paint_started.elapsed();
-        let upload = self.upload(&mut encoded)?;
+        let upload = self.upload(encoded)?;
         let upload_time = upload.time.saturating_add(paint_time);
         let upload_bytes = upload.bytes.saturating_add(paint_bytes);
 
@@ -745,13 +863,19 @@ impl Device {
         // believes that subtraction is a duration of anything (§11.1's clocks do not
         // mix). Two clock reads a frame is nothing next to being able to name them.
         let acquire_started = Instant::now();
-        let bound = self.bind_target(&into, viewport)?;
+        let bound = self.bind_target(into, viewport)?;
         let acquire = acquire_started.elapsed();
 
         let query = self.take_pass_query();
-        let encode_phases = encoded.encode_phases.phases(encode_time);
+        // A replayed frame spent nothing on geometry or staging, and the clock inside a
+        // retained encode still holds what the frame that *made* it spent — so the
+        // subdivision has to come from the source, not from the clock (ADR 0048).
+        let encode_phases = match source {
+            EncodeSource::Encoded => encoded.encode_phases.phases(encode_time),
+            EncodeSource::Replayed => encoded.encode_phases.replayed(),
+        };
         let (execute_wall, mut phases, layer_textures) =
-            match self.run_frame(&encoded, &bound, upload, query.as_ref(), &damage) {
+            match self.run_frame(encoded, &bound, upload, query.as_ref(), damage) {
                 Ok(ran) => ran,
                 Err(error) => return Err(self.abandon_frame(bound, error)),
             };
@@ -784,7 +908,7 @@ impl Device {
 
         let (payload, readback) = self.resolve_payload(readback_source, viewport)?;
 
-        let result = Ok(Frame {
+        Ok(Frame {
             timings: Timings {
                 encode: encode_time,
                 upload: upload_time,
@@ -808,20 +932,25 @@ impl Device {
             },
             reports,
             payload,
-        });
-        // A tile fell through to scratch this frame. Repack from empty on the next one
-        // *only if this frame's working set would then fit* (ADR 0024): a repack settles
-        // an atlas holding a previous page's tiles, but when the frame's own distinct
-        // keys are simply larger than the cache it throws away the part that fits and
-        // hits, and every frame pays the packing again. Measured at 100× on the zoom
-        // ladder, where resetting each frame cost 6.0 ms of encode against 0.6 ms for
-        // keeping what fits.
+            encode_source: source,
+        })
+    }
+
+    /// After a drawn frame that encoded: repack the atlas when this frame's tiles no
+    /// longer fit it and the frame's own working set would (ADR 0024).
+    ///
+    /// A tile fell through to scratch this frame. Repack from empty on the next one
+    /// *only if this frame's working set would then fit*: a repack settles an atlas
+    /// holding a previous page's tiles, but when the frame's own distinct keys are
+    /// simply larger than the cache it throws away the part that fits and hits, and
+    /// every frame pays the packing again. Measured at 100× on the zoom ladder, where
+    /// resetting each frame cost 6.0 ms of encode against 0.6 ms for keeping what fits.
+    fn settle_atlas(&mut self, encoded: &Encoded) {
         let (atlas_width, atlas_height) = self.atlas.dimensions();
         let atlas_bytes = u64::from(atlas_width).saturating_mul(u64::from(atlas_height));
         if encoded.atlas_pressure && encoded.atlas_requested_bytes <= atlas_bytes {
             self.atlas.reset();
         }
-        result
     }
 
     /// Phase 3: the whole device side of one frame — mask realisation, layers,
@@ -1046,6 +1175,7 @@ impl Device {
         encoded: &Encoded,
         encode_time: Duration,
         reports: Vec<Report>,
+        source: EncodeSource,
     ) -> Result<Frame, RenderError> {
         match into {
             Target::Readback => Ok(Frame {
@@ -1064,6 +1194,7 @@ impl Device {
                 },
                 reports,
                 payload: Payload::Raster(Raster::new(viewport.width, viewport.height, Vec::new())),
+                encode_source: source,
             }),
             Target::Surface => Err(RenderError::ZeroSizeTarget { target: "Surface" }),
             Target::Texture(_) => Err(RenderError::ZeroSizeTarget { target: "Texture" }),
@@ -1077,7 +1208,7 @@ impl Device {
     ///
     /// Whatever the GPU coverage lane refuses: its sheet is a texture like any other
     /// and is bounded by the adapter's dimension.
-    fn upload(&mut self, encoded: &mut Encoded) -> Result<Upload, RenderError> {
+    fn upload(&mut self, encoded: &Encoded) -> Result<Upload, RenderError> {
         let started = Instant::now();
         // The globals are per plan now (ADR 0036) and made where the pass is recorded,
         // so nothing is charged here for them.
@@ -1132,15 +1263,21 @@ impl Device {
     /// no idea which lane put the bytes there. The upload goes first because the draw
     /// loads what it finds — a tile the GPU draws covers only its own rectangle, so
     /// the CPU lane's bytes elsewhere on the sheet survive it.
+    ///
+    /// **Borrowed, not taken.** Both of these used to be moved out of the `Encoded`,
+    /// which is what a frame that owns its encode can afford; a retained encode is
+    /// replayed by later frames, so the sheet it names has to survive its first upload
+    /// (ADR 0048, and ADR 0045's invalidation list named this as the one plumbing
+    /// change the design needs).
     fn upload_scratch(
         &mut self,
-        encoded: &mut Encoded,
+        encoded: &Encoded,
         bytes: &mut u64,
     ) -> Result<Option<(wgpu::Texture, wgpu::TextureView)>, RenderError> {
-        let Some(scratch) = encoded.scratch.take() else {
+        let Some(scratch) = encoded.scratch.as_ref() else {
             return Ok(None);
         };
-        let winding = std::mem::take(&mut encoded.winding);
+        let winding = &encoded.winding;
         let mut usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
         if !winding.is_empty() {
             // COPY_SRC with it, so a test can read the sheet back and hold the two
@@ -1192,7 +1329,7 @@ impl Device {
                 &self.pipelines,
                 &mut self.winding_texture,
                 &view,
-                &winding,
+                winding,
                 self.coverage_samples,
                 if scratch.data.is_empty() {
                     crate::winding::SheetUse::LaneAlone

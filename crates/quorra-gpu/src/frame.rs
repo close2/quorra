@@ -229,6 +229,25 @@ pub struct Counters {
     pub layer_textures: u32,
 }
 
+/// Where a frame's device commands came from: this call's encode, or one retained
+/// from an earlier frame of the same scene at the same viewport (ADR 0048).
+///
+/// **An observable rather than an inference from [`Timings::encode`].** A replayed
+/// frame's `encode` is a few microseconds of key comparison, and "small" is not a
+/// state a test or a gate can assert on: the two variants of that state are named
+/// here so that a caller — and this tree's own suite — can tell which happened
+/// without believing a clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeSource {
+    /// The scene was walked and encoded by this call, as every
+    /// [`Device::render`](crate::device::Device::render) frame is.
+    Encoded,
+    /// An encode retained by a [`RetainedScene`](crate::retained::RetainedScene) was
+    /// replayed: the walk, the coverage rasterisation and the instance layout of this
+    /// frame were all paid for by an earlier one.
+    Replayed,
+}
+
 /// A drawn frame: what it cost, what it counted, and what it could not do as asked.
 ///
 /// Everything a `Frame` says about itself is true. It exists only if the render
@@ -240,6 +259,7 @@ pub struct Frame {
     pub(crate) counters: Counters,
     pub(crate) reports: Vec<Report>,
     pub(crate) payload: Payload,
+    pub(crate) encode_source: EncodeSource,
 }
 
 /// What the render call produced besides accounting. Private: which payload a frame
@@ -269,6 +289,15 @@ impl Frame {
     #[must_use]
     pub fn counters(&self) -> Counters {
         self.counters
+    }
+
+    /// Whether this frame encoded its scene or replayed a retained encode (ADR 0048).
+    ///
+    /// Always [`EncodeSource::Encoded`] for a frame from
+    /// [`Device::render`](crate::device::Device::render), which retains nothing.
+    #[must_use]
+    pub fn encode_source(&self) -> EncodeSource {
+        self.encode_source
     }
 
     /// Take the pixels of a `Readback` frame.

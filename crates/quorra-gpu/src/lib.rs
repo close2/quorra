@@ -49,6 +49,7 @@ mod raster;
 mod readback;
 pub mod report;
 mod resources;
+pub mod retained;
 pub mod startup;
 mod surface;
 pub mod target;
@@ -58,8 +59,9 @@ mod winding;
 
 pub use device::{Device, Limits};
 pub use error::{DeviceError, PipelineProblem, RenderError, ResourceProblem, SurfaceProblem};
-pub use frame::{Counters, Frame, Raster, TimingProvenance, Timings};
+pub use frame::{Counters, EncodeSource, Frame, Raster, TimingProvenance, Timings};
 pub use report::{Report, ReportKind};
+pub use retained::RetainedScene;
 pub use startup::{
     Coverage, DEFAULT_ATLAS_BUDGET, DEFAULT_COVERAGE_SAMPLES, DEFAULT_GLYPH_QUANTUM,
     DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_RESOURCE_BYTES, Options, StartupTimings, WarmUp,
