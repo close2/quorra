@@ -317,6 +317,19 @@ Each of these has an ADR that states the measurement and why it was left:
 
 ## Traps
 
+**A fresh `CARGO_TARGET_DIR` is a cold cache, and a per-checkout remap flag is a
+colder one.** The `AI` user's builds run through `sccache`, and its key includes the
+paths cargo derives from the target directory — so inventing a new target dir per
+purpose reads as 0 % hits and a 27 s build where the same build against a stable dir
+is 100 % and 4 s (measured 2026-08-14, `quorra-gpu` dev lib, five controlled runs).
+Across git worktrees the cache already shares at ~97 % — only the workspace's own
+crates miss, since their source paths differ — and `--remap-path-prefix` with a
+per-checkout value makes it *worse*, not better: the flag lands in every unit's key,
+so differing values took the same cross-worktree build from 2 misses to 121. Use one
+stable target dir per user (the untracked `.cargo/config.toml` here pins
+`/home/AI/cargo-target/quorra`), share it across worktrees when builds are
+sequential, and leave path remapping alone until `sccache` learns to normalise it.
+
 **Wall clocks lie under load, and this machine is somebody's desktop.** A first-frame
 improvement measured at 24.7 ms → 10.3 on a quiet machine re-measured as 19.9 → 20.0 an
 hour later with Firefox and a slicer running; the load average was 12. Check `uptime`
