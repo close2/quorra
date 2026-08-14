@@ -21,11 +21,19 @@
 //!   varied rules, underlines and table cells actually are, and what the census calls
 //!   placed-once.
 //!
-//! **The recogniser lives on the fill path already, but only on the shaded arm**
-//! (`encode.rs:1473`, `StoredOutline::rect_hint`): a *solid* fill of a rectangular
-//! outline takes the GPU triangle lane, the glyph lane or the scratch coverage path like
-//! any other shape. So the difference these three columns show is a real difference, not
-//! two names for one lane.
+//! **Since ADR 0047 all three take the same lane.** `StoredOutline::rect_hint` is read
+//! on the solid arm of `encode_fill` as well as the shaded one, so what the columns now
+//! measure is not lane against lane but *what a `Fill` still pays for saying the same
+//! thing in more words*: a resource lookup, a control-hull box, a distinct-outline
+//! probe and a clip resolution the `Rect` command's four numbers do not need. The
+//! counters say which lane answered — `tiles` and `atlas keys` are zero on every row
+//! when the rectangle lane took it — and the byte comparison says the mark is the same
+//! mark. Both are printed rather than assumed, because a lane that changed silently is
+//! how this example's own first version came to compare a computation with itself.
+//!
+//! The numbers before that change are in `doc/PLAN.md`'s 2026-08-14 entry and are the
+//! reason it was made: 0.13–0.49 µs a rectangle, on the population that is most of what
+//! a document's `re` operator produces.
 //!
 //! The three are timed **round-robin**, one frame of each per round, and reported as
 //! minima: `encode` is a host span, this machine is somebody's desktop, and ADR 0040 is
@@ -163,6 +171,10 @@ struct Lane {
     encode: Duration,
     tiles: u32,
     atlas_keys: u32,
+    /// Instance and coverage bytes the frame scheduled: the rectangle lane's whole
+    /// output is 32 bytes an instance, so this separates "took the rectangle lane" from
+    /// "drew nothing at all", which the two counters above cannot do on their own.
+    uploaded: u64,
 }
 
 /// Time every scene once per round rather than each scene to exhaustion, so a load
@@ -184,6 +196,7 @@ fn round_robin(
             encode: Duration::MAX,
             tiles: 0,
             atlas_keys: 0,
+            uploaded: 0,
         })
         .collect();
     // Round zero is the cold one — where each lane rasterises whatever it rasterises —
@@ -198,6 +211,7 @@ fn round_robin(
             }
             lane.tiles = frame.counters().tiles;
             lane.atlas_keys = frame.counters().atlas_distinct_keys;
+            lane.uploaded = frame.counters().bytes_uploaded;
         }
     }
     lanes
@@ -244,12 +258,13 @@ fn measure_size(device: &mut Device, target: &wgpu::Texture, n: u32, rounds: u32
         let (differing, worst) = difference(&reference, &readback(device, scene));
         println!(
             "{n:>5} cmds  {label:<16} encode {:>8.4} ms  ({:>6.2}× rect)  \
-             tiles {:>5}  atlas keys {:>5}  \
+             tiles {:>5}  atlas keys {:>5}  uploaded {:>9}  \
              bytes differing from rect: {differing:>8}, worst {worst:>3}",
             milliseconds(lane.encode),
             milliseconds(lane.encode) / baseline,
             lane.tiles,
             lane.atlas_keys,
+            lane.uploaded,
         );
     }
 }

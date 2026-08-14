@@ -4,8 +4,9 @@
 //!
 //! Until it, every performance fixture in this tree was invented: `perf_gate.rs` draws
 //! 5 933 **rectangles** because the brief's dense page has 5 933 glyphs. Measured over
-//! the caller's 995-page corpus, **not one page emits a single `Command::Rect`** — that
-//! lane is real and reachable and no document takes it — and glyph reuse is **1.33
+//! the caller's 995-page corpus, **not one page emits a single `Command::Rect`** — the
+//! command that fixture uses is one no document sends, and since ADR 0047 a document's
+//! rectangles reach the same lane as fills instead — and glyph reuse is **1.33
 //! placements per distinct outline at the median**, not the 55 that fixture assumes. A
 //! gate built on those assumptions cannot see a regression on the shapes documents
 //! actually have, which is how a twentyfold zoom cliff and a sixteenfold sheet lived

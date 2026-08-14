@@ -28,13 +28,15 @@ use quorra_scene::{Affine, Color, Point, Rect, Scene, SceneBuilder};
 /// glyph count in the brief; rectangles stood in for glyphs until M4 and were never
 /// replaced.)
 ///
-/// **What this fixture is, and is not.** It exercises the analytic rectangle lane, and
-/// measured over the caller's 995-page corpus **not one page emits a single
-/// `Command::Rect`** — every rectangle a real document draws arrives as a `Fill` whose
-/// outline happens to be one (`doc/corpus-profile.md`). So the gates below are about a
-/// lane that is real, reachable and unused by documents, which makes them a floor
-/// measurement rather than a page measurement. The page shapes documents actually have
-/// are in `tests/archetypes.rs`, priced by counters instead of clocks.
+/// **What this fixture is, and is not.** It exercises the analytic rectangle lane through
+/// the command nothing sends: measured over the caller's 995-page corpus **not one page
+/// emits a single `Command::Rect`** — every rectangle a real document draws arrives as a
+/// `Fill` whose outline happens to be one (`doc/corpus-profile.md`). Since ADR 0047 such
+/// a fill takes this same lane, so the lane below is no longer unused by documents; what
+/// stays true is that they enter it by the other door, and that a page of nothing but
+/// rectangles is a floor measurement rather than a page measurement. The page shapes
+/// documents actually have are in `tests/archetypes.rs`, priced by counters instead of
+/// clocks.
 fn dense_scene() -> Scene {
     let mut builder = SceneBuilder::new();
     for i in 0..5_933_u32 {

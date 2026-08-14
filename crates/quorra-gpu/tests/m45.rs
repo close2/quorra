@@ -47,6 +47,27 @@ fn rect_outline(rect: Rect) -> Vec<Segment> {
     ]
 }
 
+/// The same four edges as [`rect_outline`], with one redundant vertex halfway along the
+/// top: the identical region, and **not** what `quorra_scene::axis_aligned_rect`
+/// recognises, so a solid fill of it still rasterises its own coverage.
+///
+/// Since ADR 0047 a solid fill of a *recognised* rectangle takes the analytic lane, and
+/// this is what is left to put a rectangle through the atlas and the scratch sheet —
+/// which is what the three tests below are about. Written here rather than reached for
+/// per test, because the alternative is three tests that pass while comparing one lane
+/// with itself.
+fn rasterised_rect_outline(rect: Rect) -> Vec<Segment> {
+    vec![
+        Segment::MoveTo(rect.min),
+        // On the top edge by construction: same y, an x strictly between the corners.
+        Segment::LineTo(Point::new((rect.min.x + rect.max.x) * 0.5, rect.min.y)),
+        Segment::LineTo(Point::new(rect.max.x, rect.min.y)),
+        Segment::LineTo(rect.max),
+        Segment::LineTo(Point::new(rect.min.x, rect.max.y)),
+        Segment::Close,
+    ]
+}
+
 fn render(device: &mut Device, scene: &Scene, width: u32, height: u32) -> Vec<u8> {
     device
         .render(
@@ -98,6 +119,10 @@ fn max_diff_premultiplied(a: &[u8], b: &[u8]) -> i32 {
 /// within one unorm step (the coverage byte is quantised once in the cached tile —
 /// the stated difference of ADR 0008, and the whole difference).
 ///
+/// The fill's outline carries a redundant vertex so that it *stays* on the glyph lane
+/// (ADR 0047). Without it both sides would be the analytic lane and the comparison
+/// would be between a computation and itself.
+///
 /// The comparison happens in premultiplied space: the straight-alpha readback
 /// re-amplifies a one-step premultiplied difference by 255/α (the demultiply rule,
 /// ADR 0005), and edge pixels have partial α by construction — so the bound is
@@ -114,7 +139,9 @@ fn rect_lane_and_glyph_lane_agree_on_a_rectangle() {
         .expect("valid rect");
     let rect_pixels = render(&mut device, &via_rect.finish(), 16, 16);
 
-    let outline = device.upload_outline(&rect_outline(shape)).expect("upload");
+    let outline = device
+        .upload_outline(&rasterised_rect_outline(shape))
+        .expect("upload");
     let mut via_fill = SceneBuilder::new();
     via_fill
         .fill(
@@ -146,13 +173,18 @@ fn rect_lane_and_glyph_lane_agree_on_a_rectangle() {
 /// The atlas path and the scratch fallback produce byte-identical frames: one
 /// rasteriser feeds both, so starving the atlas (budget too small for any tile)
 /// changes the route and not one pixel.
+///
+/// The shape is a rectangle with a redundant vertex, which is what keeps it on the two
+/// lanes this compares rather than on the analytic one (ADR 0047).
 #[test]
 fn atlas_and_scratch_fallback_are_byte_identical() {
     let glyph = Rect::new(Point::new(0.25, 0.5), Point::new(6.75, 8.5));
     let color = Color::new(0.1, 0.1, 0.1, 1.0);
 
     let scene_for = |device: &mut Device| {
-        let outline = device.upload_outline(&rect_outline(glyph)).expect("upload");
+        let outline = device
+            .upload_outline(&rasterised_rect_outline(glyph))
+            .expect("upload");
         let mut builder = SceneBuilder::new();
         for i in 0..64_u32 {
             builder
@@ -188,12 +220,18 @@ fn atlas_and_scratch_fallback_are_byte_identical() {
 /// §4.5's fifth decision, observable: with the quantum off, every distinct sub-pixel
 /// phase is its own key; with a quantum of 1/4, the same hundred phases collapse to
 /// four keys. The counter is the count of distinct keys, per §6.3 — never a hit rate.
+///
+/// The shape has to be one the atlas is asked about at all, so it is a rectangle with a
+/// redundant vertex (ADR 0047): a recognised one would take the analytic lane and this
+/// test would read zero keys under both settings.
 #[test]
 fn the_quantum_is_settable_and_off_is_exact() {
     let glyph = Rect::new(Point::new(0.0, 0.0), Point::new(4.0, 4.0));
     let color = Color::new(0.0, 0.0, 0.0, 1.0);
     let scene_for = |device: &mut Device| {
-        let outline = device.upload_outline(&rect_outline(glyph)).expect("upload");
+        let outline = device
+            .upload_outline(&rasterised_rect_outline(glyph))
+            .expect("upload");
         let mut builder = SceneBuilder::new();
         for i in 0..100_u32 {
             builder

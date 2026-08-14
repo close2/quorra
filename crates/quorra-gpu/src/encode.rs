@@ -6,7 +6,9 @@
 //!
 //! - **rectangle** — axis-aligned rect, axis-preserving transform, fully rectangular
 //!   clip: analytic coverage in the shader, clip applied by intersection here
-//!   (ADR 0007), zero per-pixel clip cost;
+//!   (ADR 0007), zero per-pixel clip cost. A [`Command::Rect`] reaches it, and so does
+//!   a fill whose *outline* is four axis-aligned edges, which is the only form a
+//!   document rectangle actually arrives in (ADR 0047);
 //! - **glyph** — a fill whose device size fits an atlas tile: coverage rasterised
 //!   once per `(outline, linear part, quantised phase)` key (ADR 0008/0009) and drawn
 //!   as a quad over the persistent R8 atlas;
@@ -982,6 +984,38 @@ impl Encoder<'_> {
         ))
     }
 
+    /// The device rectangle an axis-aligned scene rectangle marks, held to its clip and
+    /// to the target — or `None` when that leaves no area, which is a command that
+    /// legitimately draws nothing.
+    ///
+    /// This is the whole of what the analytic lane does on the CPU (ADR 0007): a
+    /// rectangle intersected with a rectangle is a rectangle, so a rectangular clip
+    /// costs a pixel nothing and the shader still evaluates one box. Intersecting with
+    /// the target costs no pixel any coverage either — [`target_rect`] has integer
+    /// corners, so an edge it introduces falls exactly on a pixel boundary. Nothing here
+    /// rounds outwards, so no [`CULL_MARGIN`] is needed and none is taken.
+    ///
+    /// Shared by the two commands that reach the lane — [`Encoder::encode_rect`] and a
+    /// solid fill whose outline is a rectangle (ADR 0047) — because two arms that
+    /// computed this box separately would be two arms that could come to draw different
+    /// marks for the same rectangle.
+    fn clipped_device_rect(
+        &self,
+        rect: Rect,
+        to_device: &DeviceTransform,
+        resolved: &ResolvedClip,
+    ) -> Option<Rect> {
+        let p0 = apply(to_device, rect.min);
+        let p1 = apply(to_device, rect.max);
+        let device_rect = Rect::new(
+            Point::new(p0.x.min(p1.x), p0.y.min(p1.y)),
+            Point::new(p0.x.max(p1.x), p0.y.max(p1.y)),
+        )
+        .intersection(resolved.rect)
+        .intersection(self.visible);
+        (!device_rect.is_empty()).then_some(device_rect)
+    }
+
     /// The rectangle arm: the analytic lane when everything is axis-aligned and
     /// rectangular, the path lane otherwise (ADR 0007).
     fn encode_rect(
@@ -997,24 +1031,12 @@ impl Encoder<'_> {
         let to_device = compose(transform, self.viewport);
         if transform_preserves_axes(&to_device) && resolved.residues.is_none() {
             // The analytic lane: clip applied by intersection (ADR 0007).
-            let p0 = apply(&to_device, rect.min);
-            let p1 = apply(&to_device, rect.max);
-            let device_rect = Rect::new(
-                Point::new(p0.x.min(p1.x), p0.y.min(p1.y)),
-                Point::new(p0.x.max(p1.x), p0.y.max(p1.y)),
-            )
-            .intersection(resolved.rect)
-            // And with the target, which costs no pixel any coverage: `target_rect`
-            // has integer corners, so an edge it introduces falls exactly on a pixel
-            // boundary. This is the analytic lane's whole cull — the region it draws
-            // decides it, with no margin, because nothing here rounds outwards.
-            .intersection(self.visible);
-            if device_rect.is_empty() {
+            let Some(device_rect) = self.clipped_device_rect(rect, &to_device, &resolved) else {
                 // Clipped to nothing or off the target: draws nothing, legitimately.
                 self.note_culled();
                 return Ok(());
-            }
-            self.push_rect_instance(device_rect, color, mask);
+            };
+            self.push_rect_instance(device_rect, color, self.style, mask);
             return Ok(());
         }
         // Oblique transform or residue clip: the rectangle is a polygon and
@@ -1107,6 +1129,38 @@ impl Encoder<'_> {
             let Some(bounds) = bounds else {
                 return Ok(()); // no geometry: draws nothing
             };
+            // A rectangle is not a path (RENDER_LIBRARY.md §6.4) and a fill is the only
+            // way a document says one: the caller's 995-page corpus emits no
+            // `Command::Rect` at all, so this is the door real pages take to ADR 0007's
+            // lane (ADR 0047). The three conditions are the shaded arm's below, and each
+            // is the same requirement seen on a different paint:
+            //
+            // - a **residue** clip has to multiply into a coverage mask, and the
+            //   analytic lane has nowhere to put one;
+            // - an **oblique** transform makes the four edges a parallelogram, whose
+            //   coverage `rect.wgsl` cannot express;
+            // - `rect_hint` is what says the outline is four axis-aligned edges at all.
+            //
+            // The **fill rule** is deliberately not among them. `axis_aligned_rect`
+            // accepts exactly one closed subpath of four corners, and for a simple
+            // closed curve §8.5.3.3.3's even-odd rule and §8.5.3.3.2's non-zero rule
+            // bound the same region: a ray from an interior point crosses the boundary
+            // an odd number of times, and those crossings sum to a winding of ±1
+            // whichever direction the corners were given in. So `rule` cannot change
+            // the mark, which is why it is not asked about here.
+            if resolved.residues.is_none()
+                && transform_preserves_axes(&to_device)
+                && let Some(hint) = stored.rect_hint
+            {
+                match self.clipped_device_rect(hint, &to_device, &resolved) {
+                    Some(device_rect) => self.push_rect_instance(device_rect, color, style, mask),
+                    // The cull above tests bounds inflated by `CULL_MARGIN`; this one
+                    // is exact, so it can still fire, and a command that reaches no
+                    // pixel is counted wherever it is discovered.
+                    None => self.note_culled(),
+                }
+                return Ok(());
+            }
             let placement = SolidFill {
                 outline,
                 transform,
@@ -1720,7 +1774,20 @@ impl Encoder<'_> {
         Ok(())
     }
 
-    fn push_rect_instance(&mut self, rect: Rect, color: quorra_scene::Color, mask: Option<u32>) {
+    /// One instance of the analytic rectangle lane.
+    ///
+    /// `style` is a parameter rather than `self.style` because the lane now takes fills
+    /// as well as [`Command::Rect`]s (ADR 0047), and a fill names its own pass through
+    /// [`Compose`]: `Src` is §11.4.6's knockout, `DestOut` and `Plus` are its two stages
+    /// asked for by name (ADR 0025). A `Rect` carries no compose mode and so passes the
+    /// enclosing group's style, which is what this method used to read for itself.
+    fn push_rect_instance(
+        &mut self,
+        rect: Rect,
+        color: quorra_scene::Color,
+        style: DrawStyle,
+        mask: Option<u32>,
+    ) {
         self.plan_mut()
             .mark([rect.min.x, rect.min.y, rect.max.x, rect.max.y]);
         let premultiplied = [
@@ -1735,7 +1802,6 @@ impl Encoder<'_> {
         for value in premultiplied {
             self.rect_instances.extend_from_slice(&value.to_le_bytes());
         }
-        let style = self.style;
         self.note_batch(BatchKind::Rect, style, mask);
     }
 
@@ -1960,7 +2026,9 @@ pub(crate) fn blend_word(mode: BlendMode) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use quorra_scene::{Affine, Color, Point, Rect, SceneBuilder};
+    use quorra_scene::{
+        Affine, BlendMode, Color, Compose, FillRule, Paint, Point, Rect, SceneBuilder, Segment,
+    };
 
     use super::{BatchKind, encode};
     use crate::atlas::AtlasStore;
@@ -2076,6 +2144,154 @@ mod tests {
             })
         ));
         assert!(encoded.scratch.is_some());
+    }
+
+    /// A store holding one outline: the four axis-aligned edges of `1,2 → 3,5`, which
+    /// is what `quorra_scene::axis_aligned_rect` recognises and what the analytic lane
+    /// exists for.
+    fn store_with_a_rectangle() -> (ResourceStore, quorra_scene::OutlineId) {
+        let mut resources = ResourceStore::new(4_096);
+        let outline = resources
+            .upload_outline(&[
+                Segment::MoveTo(Point::new(1.0, 2.0)),
+                Segment::LineTo(Point::new(3.0, 2.0)),
+                Segment::LineTo(Point::new(3.0, 5.0)),
+                Segment::LineTo(Point::new(1.0, 5.0)),
+                Segment::Close,
+            ])
+            .expect("a rectangle within the store's budget");
+        (resources, outline)
+    }
+
+    /// One solid fill of `outline` under `transform`, and nothing else.
+    fn scene_filling(
+        outline: quorra_scene::OutlineId,
+        transform: Affine,
+        rule: FillRule,
+    ) -> quorra_scene::Scene {
+        let mut builder = SceneBuilder::new();
+        builder
+            .fill(
+                outline,
+                transform,
+                rule,
+                Paint::Solid(Color::new(1.0, 0.5, 0.0, 0.5)),
+                None,
+                BlendMode::Normal,
+                Compose::SrcOver,
+                None,
+            )
+            .expect("valid input");
+        builder.finish()
+    }
+
+    /// A solid fill whose outline is four axis-aligned edges takes the rectangle lane
+    /// (ADR 0047) — the same instance bytes `Command::Rect` produces for the same mark,
+    /// with no atlas key and no coverage tile behind it.
+    #[test]
+    fn a_solid_fill_of_a_rectangle_takes_the_rectangle_lane() {
+        let (resources, outline) = store_with_a_rectangle();
+        let scene = scene_filling(outline, Affine::IDENTITY, FillRule::NonZero);
+        let viewport = Viewport::full(10, 10, Affine::IDENTITY);
+        let encoded = encode(
+            &scene,
+            &viewport,
+            u64::MAX,
+            4096,
+            &resources,
+            &mut empty_atlas(),
+            Some(16),
+            Coverage::Cpu,
+            false,
+        )
+        .expect("within budget");
+        assert!(matches!(
+            encoded.root.ops.as_slice(),
+            [super::Op::Draw(super::Batch {
+                kind: BatchKind::Rect,
+                count: 1,
+                ..
+            })]
+        ));
+        assert!(encoded.quad_instances.is_empty());
+        assert!(encoded.scratch.is_none());
+        assert_eq!(encoded.atlas_distinct_keys, 0);
+        assert_eq!(encoded.tiles, 0);
+
+        // The bytes are `Command::Rect`'s for the same rectangle and colour: this is
+        // one lane reached through two doors, not two lanes that agree.
+        let same_mark = {
+            let mut builder = SceneBuilder::new();
+            builder
+                .rect(
+                    Rect::new(Point::new(1.0, 2.0), Point::new(3.0, 5.0)),
+                    Affine::IDENTITY,
+                    Color::new(1.0, 0.5, 0.0, 0.5),
+                    None,
+                    None,
+                )
+                .expect("valid input");
+            builder.finish()
+        };
+        let reference = encode(
+            &same_mark,
+            &viewport,
+            u64::MAX,
+            4096,
+            &no_resources(),
+            &mut empty_atlas(),
+            Some(16),
+            Coverage::Cpu,
+            false,
+        )
+        .expect("within budget");
+        assert_eq!(encoded.rect_instances, reference.rect_instances);
+
+        // And the fill rule cannot change it: one closed subpath of four corners bounds
+        // the same region under §8.5.3.3.2 and §8.5.3.3.3, which is why the lane does
+        // not ask.
+        let even_odd = encode(
+            &scene_filling(outline, Affine::IDENTITY, FillRule::EvenOdd),
+            &viewport,
+            u64::MAX,
+            4096,
+            &resources,
+            &mut empty_atlas(),
+            Some(16),
+            Coverage::Cpu,
+            false,
+        )
+        .expect("within budget");
+        assert_eq!(even_odd.rect_instances, encoded.rect_instances);
+    }
+
+    /// The lane's conditions bite: an oblique transform makes the same outline a
+    /// parallelogram, which `rect.wgsl` cannot express, so it keeps the path lane.
+    #[test]
+    fn an_oblique_fill_of_a_rectangle_keeps_the_path_lane() {
+        let (resources, outline) = store_with_a_rectangle();
+        let shear = Affine {
+            a: 1.0,
+            b: 0.3,
+            c: 0.0,
+            d: 1.0,
+            e: 2.0,
+            f: 2.0,
+        };
+        let encoded = encode(
+            &scene_filling(outline, shear, FillRule::NonZero),
+            &Viewport::full(16, 16, Affine::IDENTITY),
+            u64::MAX,
+            4096,
+            &resources,
+            &mut empty_atlas(),
+            Some(16),
+            Coverage::Cpu,
+            false,
+        )
+        .expect("drawable");
+        assert!(encoded.rect_instances.is_empty());
+        assert!(!encoded.quad_instances.is_empty());
     }
 
     /// The budget is checked before allocation, and the error names both numbers.

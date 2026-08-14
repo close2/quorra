@@ -224,40 +224,52 @@ fn a_stroke_reaching_in_from_outside_still_draws() {
 }
 
 /// A fill straddling the target's edge keeps its partial coverage. The expected byte
-/// is derivable rather than observed: the shape covers half of column 0, coverage
-/// quantises once as `round(0.5 × 255)` (ADR 0005/0008), and a black fill on
-/// transparency reads back with that as its alpha.
+/// is derivable rather than observed: the shape covers half of column 0, and a black
+/// fill on transparency reads back with that half as its alpha, `round(0.5 × 255)`.
+///
+/// **Both fill lanes are asked**, because they arrive at the byte by different
+/// arithmetic and the edge is where a cull would show. The recognised rectangle takes
+/// the analytic lane (ADR 0047), where the half is computed in `rect.wgsl` and rounded
+/// once by the render target's unorm store; the same rectangle with a redundant vertex
+/// on its top edge is not recognised, so it rasterises a coverage byte on the CPU
+/// (ADR 0005/0008) that is then rounded again. Half a pixel survives both.
 #[test]
 fn a_fill_straddling_the_edge_keeps_its_coverage() {
     let mut device = device();
-    let outline = device
-        .upload_outline(&rect_outline(Rect::new(
-            Point::new(-5.0, 6.0),
-            Point::new(0.5, 26.0),
-        )))
-        .unwrap();
-    let mut builder = SceneBuilder::new();
-    builder
-        .fill(
-            outline,
-            Affine::IDENTITY,
-            FillRule::NonZero,
-            black(),
-            None,
-            BlendMode::Normal,
-            Compose::SrcOver,
-            None,
-        )
-        .unwrap();
-    let (pixels, counters) = render(&mut device, &builder.finish());
-
-    assert_eq!(counters.commands_culled, 0, "the fill reaches column 0");
-    assert_eq!(
-        alpha_at(&pixels, 0, 16),
-        128,
-        "half of column 0 is covered: round(0.5 × 255)"
+    let straddling = Rect::new(Point::new(-5.0, 6.0), Point::new(0.5, 26.0));
+    let mut with_redundant_vertex = rect_outline(straddling);
+    with_redundant_vertex.insert(
+        1,
+        Segment::LineTo(Point::new(
+            (straddling.min.x + straddling.max.x) * 0.5,
+            straddling.min.y,
+        )),
     );
-    assert_eq!(alpha_at(&pixels, 1, 16), 0, "the fill ends inside column 0");
+    for path in [rect_outline(straddling), with_redundant_vertex] {
+        let outline = device.upload_outline(&path).unwrap();
+        let mut builder = SceneBuilder::new();
+        builder
+            .fill(
+                outline,
+                Affine::IDENTITY,
+                FillRule::NonZero,
+                black(),
+                None,
+                BlendMode::Normal,
+                Compose::SrcOver,
+                None,
+            )
+            .unwrap();
+        let (pixels, counters) = render(&mut device, &builder.finish());
+
+        assert_eq!(counters.commands_culled, 0, "the fill reaches column 0");
+        assert_eq!(
+            alpha_at(&pixels, 0, 16),
+            128,
+            "half of column 0 is covered: round(0.5 × 255)"
+        );
+        assert_eq!(alpha_at(&pixels, 1, 16), 0, "the fill ends inside column 0");
+    }
 }
 
 /// Inside the target but outside its clip is just as invisible, and counted the same
