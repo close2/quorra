@@ -58,12 +58,6 @@ impl ScratchPacker {
         }
     }
 
-    /// Reserve a tile's place on the sheet, without writing anything into it.
-    ///
-    /// The shelf arithmetic, alone. Both producers go through it — the CPU lane then
-    /// copies its bytes in, the GPU lane hands the position to a pass that draws there
-    /// — which is what lets one sheet hold both kinds of tile without either knowing
-    /// the other exists (ADR 0016).
     /// How wide the packer lets a shelf grow *this* tile, which is not the same as the
     /// width it may commit (ADR 0034).
     ///
@@ -85,6 +79,12 @@ impl ScratchPacker {
         square.max(self.widest).clamp(1, self.width)
     }
 
+    /// Reserve a tile's place on the sheet, without writing anything into it.
+    ///
+    /// The shelf arithmetic, alone. Both producers go through it — the CPU lane then
+    /// copies its bytes in, the GPU lane hands the position to a pass that draws there
+    /// — which is what lets one sheet hold both kinds of tile without either knowing
+    /// the other exists (ADR 0016).
     #[allow(clippy::arithmetic_side_effects)] // bounded by width/max_height checks
     pub(super) fn reserve(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
         if width == 0 || height == 0 || width > self.width {
