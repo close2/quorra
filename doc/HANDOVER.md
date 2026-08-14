@@ -12,11 +12,14 @@ happened, here if it changes how you *work*.
 Nine milestones are done; the swap landed on 2026-08-03 and the caller consumes this
 library as a git dependency, pinned by their `Cargo.lock`.
 
-**Everything local is pushed** — `origin/main` and `HEAD` agree. The caller pins
-`87898c6`, **eight commits back**, and what those eight carry is ADR 0047 (a document's
-rectangles reach the rectangle lane), ADR 0048 (`RetainedScene`, an API they must adopt
-rather than merely receive) and one clause defect fixed: a blended stroke inside a
-knockout group was blended where §11.4.6 replaces.
+**Local is ahead of `origin/main` and has not been pushed** — the 2026-08-15 round is
+merged here and nowhere else. The caller pins `87898c6`, **twenty commits back**, and what
+those twenty carry is ADR 0047 (a document's rectangles reach the rectangle lane), ADR 0048
+(`RetainedScene`, an API they must adopt rather than merely receive), ADR 0050 (a page too
+large for its atlas stops re-encoding itself every frame, plus two additive `Counters`
+fields and a `DeviceError` variant), ADR 0051 (three files split along their seams; no
+public API moved), ADR 0052 (the readback gate counts instead of timing) and one clause
+defect fixed: a blended stroke inside a knockout group was blended where §11.4.6 replaces.
 
 **What the caller must do to take it** is written for them in
 `/home/cl/projects/pdf-viewer/doc/QUORRA_UPGRADE.md` and, for the retained encode,
@@ -82,14 +85,24 @@ full-page tile. The work is on the *tiling* side — ADR 0028's panes are the ne
 mechanism. Its steady-state cost is the artwork row in `PLAN.md`: **35 ms of a 43 ms frame
 re-rasterising the same residue coverage every frame.**
 
-One more shape belongs to this seam since ADR 0048: a page whose glyph tiles overflow the
-atlas re-encodes on every frame, because the repack that follows bumps the atlas generation
-and invalidates its own retained encode. Magnified text is that shape.
+*(A paragraph filed here since ADR 0048 — a page whose glyph tiles overflow the atlas
+re-encodes on every frame — has been **removed rather than moved**. ADR 0050 did it, and
+it was never this seam: the glyph atlas has nothing to do with residue-clip tiling. The
+claim was also too broad, which is its own lesson and is now a trap below.)*
 
 ### Small debts, none blocking
 
 - **`device.rs` hosts ramp sampling** (`sample_ramp`, `ramp_color_at`, `RAMP_RESOLUTION`)
   outside its stated responsibility — a candidate seam whenever that file is next open.
+  `device.rs` is 2 183 lines and `encode.rs` 2 342, which since ADR 0051's round are the
+  only two source files left far past the ~500-line smell; they were held out of that
+  round because other work had them open, not because they are irreducible.
+- **`tests/retained_frame.rs` is about 1 100 lines** after ADR 0050. It is one
+  responsibility and says so, but splitting it wants a `tests/common/mod.rs` for the
+  half-dozen fixtures three test files now build separately.
+- **`SceneBuilder::image` refuses a bad image alpha with `SceneError::InvalidGroupAlpha`**
+  — a shared variant, visible since ADR 0051's round factored the check. Public API, so it
+  is a bump's business rather than a refactor's.
 
 ## Instruments — how to measure without re-deriving it
 
@@ -112,6 +125,18 @@ and invalidates its own retained encode. Magnified text is that shape.
   `tests/archetypes.rs` before believing any of it** — that is what says the harness encoded
   §6.2's page. Delete the harness with the round; `Cargo.toml`'s note on `criterion` is the
   standing decision that a benchmark harness does not live in this tree.
+- **Whether the atlas settles**: `examples/retained.rs`'s second section — twelve retained
+  frames of a page whose tiles overflow a stated atlas budget, printed as a string of `E`
+  (encoded) and `.` (replayed). A **property, not a clock**, so it reads the same at load
+  average 90 as on an idle machine. `E...........` is a settled atlas; `EEEEEEEEEEEE` was
+  the pathology ADR 0050 removed. The section asserts its page is still inside the band —
+  a fixture that drifts out of it would go on passing, because a page that never overflows
+  replays trivially.
+- **What a code path allocates, exactly**: `tests/counting_allocator/` — a
+  `#[global_allocator]` for one test binary that counts allocations of a megabyte or more
+  on the calling thread. Deterministic where a wall clock here is not, and it is how
+  ADR 0052 gates the readback. Thread-local on purpose: llvmpipe's worker threads allocate
+  too, and a global counter would make the number a property of the adapter's core count.
 - **Memory inside a frame**: six lines in `Device::render` — a `Region::of(root.bounds)` and
   an `eprintln!` — in a `git worktree`. That is what turned ADR 0039 from a paragraph saying
   "not worth it" into a 41 % reduction. The path is finished for now: every layered frame of
@@ -186,6 +211,23 @@ machine-independent and can be reasoned about; which lane is faster is a propert
 processor *and* the adapter together, so never publish a crossover as a constant — the two
 ADRs that tried (0027, then 0028) both had to delete one.
 
+**A cache's "would this help?" test must be asked in the units the cache allocates in.**
+ADR 0024 gated the atlas repack on `bytes requested <= bytes available`, and the packer
+allocates *shelves*: a page at 63 % of the atlas by area did not fit it by packing, so the
+repack fired, changed nothing, and fired again on the next frame — for ever, invalidating
+its own retained encode each time (ADR 0050). Sixteen of seventeen swept configurations
+settled after one encode and looked like proof the design was fine. **Sweep the parameter,
+and read the sequence rather than the first two frames.**
+
+**Read a gate's threshold against the number it names before trusting it.** The readback
+gate asserted `< 6 ms` against a regression measured at 3.84 — so the shape it existed to
+catch would have passed it, and the only thing it ever failed for was this desktop's load
+(two runs in five). It had been that way for three ADRs. ADR 0052 replaced it with an
+allocation count and recorded the general form: **a claim about "how many" is a count and
+is exact; a claim about "how fast" is a duration and this machine cannot measure one.**
+Split a gate along that seam rather than picking a threshold between them, and verify a
+new gate *in both directions* — a test that passes proves only that a test exists.
+
 **A fixture that names a lane should say which lane it means.** ADR 0047 found three tests in
 `m45.rs` using a rectangle as a stand-in glyph: one failed, and two would have gone on
 passing while comparing one lane with itself.
@@ -240,7 +282,15 @@ reading it:
   clipped away renders through a root accumulator instead of straight into the target (0041).
   The same question is open for a culled group's soft mask, which still realises;
 - the hand-off gained a branch per pixel of the target; nothing surfaced above the run-to-run
-  spread on the corpus, and that is the honest statement rather than a claim either way (0039).
+  spread on the corpus, and that is the honest statement rather than a claim either way (0039);
+- the atlas has no recency, so two pages that alternate and do not fit beside each other
+  still repack once per frame — the same cost that shape had before ADR 0050, now *visible*
+  as `Counters::atlas_repacked` true on every frame rather than inferred. A single page too
+  large for its atlas is stable (0050); genuine thrash is what recency answers, and ADR 0024
+  has been waiting for its measurement since;
+- the *divide* half of ADR 0022 is no longer gated at all: it is a throughput claim, no wall
+  clock on this machine can hold one, and its instrument is the callgrind round above rather
+  than anything in CI (0052).
 
 ## This machine
 

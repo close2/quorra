@@ -37,6 +37,7 @@ row, since a number without one is not evidence.
 | — geometry | 0.161 ms | same; ADR 0044's chord floor costs nothing visible here |
 | — execute: the GPU is about 4 % of the frame | 0.071 ms | same |
 | the same frame, unchanged, replayed rather than encoded | **0.174 ms** against 1.107 | `examples/retained.rs`, headless RADV, ADR 0048 |
+| — and now also when the page's glyph tiles overflow the atlas | 1 encode per page, not 1 per frame | `examples/retained.rs`'s overflow section, ADR 0050 |
 | artwork — the corpus's p99 clip shape — steady | 43.3 ms, geometry 35.4 of it | `surface_measure`, same run |
 | first frames, presenting | pipeline compiles: **none**, eight of eight | same; ADR 0043 |
 | the caller's corpus at scale 1 | **934** agree / 20 differ / 2 refused / 18 not comparable | their tree, one copy, 2026-08-14 |
@@ -61,9 +62,12 @@ on the GPU.
   same clip coverage every frame, and the only reason any corpus frame is refused (three
   pages at 4×, `ScratchExhausted`). Multi-sheet passes are measured and refused as the
   answer; the work is on the tiling side. `HANDOVER.md` item 2 has the numbers.
-- **The caller's adoption round** — they pin eight commits back, three sections of their
+- **The caller's adoption round** — they pin twenty commits back, three sections of their
   `QUORRA_FEEDBACK.md` have drafted answers waiting, and `RetainedScene` is an API they
-  must take up rather than merely receive. `HANDOVER.md` item 1.
+  must take up rather than merely receive. `HANDOVER.md` item 1. Two `Counters` fields
+  land with ADR 0050 — `atlas_working_set_bytes` and `atlas_repacked` — and one
+  `DeviceError` variant, `ResourceIdsExhausted`; all three are additive, and
+  `doc/api-change-retained-atlas.md` is what the bump owes them.
 - **§11.2's census** still has not run against a real corpus in the form M5 asked for; the
   path lane's design stands on the shapes `doc/corpus-profile.md` measured instead, and
   ADR 0008 names the lever if the census ever overturns it.
@@ -323,8 +327,12 @@ assertion, cheap to clone, buildable on the caller's interpreter thread while th
 is still initialising. Outlines, images, ramps and meshes live on the device, uploaded
 once and referenced by `u32` handles (§2.2) — the caller keys uploads by `Arc::as_ptr`
 identity, so one dense page's 107 outlines are uploaded once and referenced 5 933
-times, and a zoom re-uploads nothing. `Scene::cost()` is computed at `finish` time, so
-asking it costs nothing per frame. §11's question 5 — what a scene costs to hold,
+times, and a zoom re-uploads nothing. **Those handles are never reused**, and the space is
+a `u32`: the upload that would exhaust it is refused with `DeviceError::ResourceIdsExhausted`
+rather than wrapping. The counter wrapped until ADR 0050 audited ADR 0048's key — a
+reissued id would have made a retained encode draw a resource it never named, with every
+generation counter agreeing that nothing had moved. `Scene::cost()` is computed at `finish`
+time, so asking it costs nothing per frame. §11's question 5 — what a scene costs to hold,
 against a target of a dozen resident pages — gets its number in M2 and its verdict in
 M8.
 
@@ -488,6 +496,13 @@ of a pixel: 1/16 reused 5.0× on a dense page and left the oracle's verdicts unm
    text and nobody could attribute it.
 2. The packer, eviction, and the budget check; `atlas_entries` and
    `atlas_distinct_keys` in `Counters` — the distinct-key count, not the hit rate.
+   Two more joined them at ADR 0050. `atlas_working_set_bytes` is what holding **all**
+   of a frame's distinct glyph keys would cost, which is the number `Options::atlas_budget`
+   is compared against and the only one that tells "the atlas is too small for this page"
+   apart from "the atlas is holding another page". `atlas_repacked` is whether the atlas
+   was thrown away and re-packed after this frame — the one event that makes a retained
+   encode stale. A page that settles reports it true on at most one frame; true on frame
+   after frame is thrash, and the counter exists so that state has a name.
 3. The rasteriser decision, as an ADR with a measurement: coverage rasterised on the
    GPU, or on the CPU by `tiny-skia` — the latter makes the glyphs come from the same
    code that is the caller's correctness oracle, a correctness argument no other
