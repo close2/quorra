@@ -1,9 +1,9 @@
 //! The content pass: the marks themselves, drawn onto one attachment.
 //!
 //! A run of consecutive drawable ops becomes exactly one render pass, which is why the
-//! preparation is a phase of its own — every bind group and every pipeline the run
-//! needs has to exist *before* the pass borrows the recorder, and a first-use pipeline
-//! compile inside that borrow would be a compile nobody could time.
+//! preparation is a phase of its own: every bind group and every pipeline the run needs
+//! has to exist *before* the pass borrows the recorder, and none of them can be built
+//! while it does.
 //!
 //! Knockout batches run their erase/add pair strictly per element (ADR 0010):
 //! interleaving is what makes overlapping knockout elements compose per ISO 32000-2
