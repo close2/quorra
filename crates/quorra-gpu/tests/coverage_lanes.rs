@@ -195,6 +195,12 @@ fn a_straight_edge_differs_by_the_sample_grid_and_no_more() {
 /// difference on this fixture is 62 and 33 pixels differ by more than 20; tightening
 /// that constant to 0.004 takes it to *zero* pixels over 20, which is what identifies
 /// the flattening as the whole of the difference rather than something in this lane.
+///
+/// (Corrected 2026-08-14, ADR 0044: the CPU lane's bound is the *tighter* of that quarter
+/// pixel and 1/32 of a cubic's own device extent. This fixture's cubics span 40 pixels, so
+/// the second term is inert on it and the numbers above stand — but on a curve under eight
+/// pixels across the two lanes now agree far better than this test's bound suggests, and
+/// the gap that used to be here was the CPU lane being *wrong* rather than coarse.)
 #[test]
 fn a_curved_edge_differs_by_the_cpu_lane_s_flattening_too() {
     let cpu = render(Coverage::Cpu, blob);

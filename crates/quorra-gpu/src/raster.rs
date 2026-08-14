@@ -22,16 +22,48 @@
 //!   agrees with the parity of the winding number wherever a pixel is crossed by a
 //!   single edge and is our stated behaviour where several cross one pixel.
 //!
-//! Curves flatten by recursive midpoint subdivision to a stated tolerance
-//! ([`FLATTEN_TOLERANCE`]); strokes expand to closed polygons (§8.4.3's caps and
-//! joins) and fill non-zero. Quantisation to a byte is `round(cov × 255)`.
+//! Curves flatten by recursive midpoint subdivision to a stated tolerance — the tighter
+//! of [`FLATTEN_TOLERANCE`] and [`RELATIVE_FLATTEN_TOLERANCE`] of the curve's own size
+//! (ADR 0044); strokes expand to closed polygons (§8.4.3's caps and joins) and fill
+//! non-zero. Quantisation to a byte is `round(cov × 255)`.
 
 use quorra_scene::{LineCap, LineJoin, Point, Segment, Stroke};
 
 /// Maximum distance, in device pixels, between a cubic and its flattening. 0.25 px
 /// keeps the flattening error below half of one coverage step at the edge of a
 /// pixel; the choice is recorded in ADR 0008 with its cost.
+///
+/// This is the bound ISO 32000-2 §10.7.2 states:
+///
+/// > The flatness tolerance controls the maximum permitted distance in device pixels
+/// > between the mathematically correct path and an approximation constructed from
+/// > straight line segments
+///
+/// — measured in device pixels, which is why it is applied after the transform. The
+/// same clause's "PDF processors may choose to ignore any flatness tolerance specified
+/// within a PDF file" is why the number is ours and not the document's.
 pub(crate) const FLATTEN_TOLERANCE: f32 = 0.25;
+
+/// The same distance as a fraction of the cubic's own device extent — the bound that
+/// binds once a whole curve is no bigger than a few [`FLATTEN_TOLERANCE`]s.
+///
+/// A distance in device pixels says nothing about a shape smaller than itself: at a
+/// quarter pixel a circle of diameter 1 flattens to four chords and deposits its
+/// **inscribed square**, 36.3 % short of its own area. §10.7.2's NOTE 2 is explicit
+/// that this is not what the tolerance is for:
+///
+/// > the purpose of the flatness tolerance is to control the precision of curve
+/// > rendering, not to draw inscribed polygons. If the parameter's value is large
+/// > enough to cause visible straight line segments to appear, the result is
+/// > unpredictable.
+///
+/// 1/32 of the curve's own control-polygon diagonal holds any closed curve to at least
+/// 16 chords per full turn, whose area is `(16/2π)·sin(2π/16) = 0.9745` of the circle's
+/// — 2.55 % short at worst, against the 1–4 % that rounding coverage to a byte already
+/// costs a mark of that size. It never loosens the absolute bound and therefore never
+/// removes a segment: no circle of radius 2.4 device pixels or more changes at all.
+/// ADR 0044 has the arithmetic and the rejected alternative.
+pub(crate) const RELATIVE_FLATTEN_TOLERANCE: f32 = 0.031_25;
 
 /// A rasterised coverage tile: `width × height` bytes anchored at integer device
 /// pixel `(left, top)`.
@@ -87,7 +119,7 @@ pub(crate) struct Polyline {
 /// Flatten an outline under a transform into polylines, one per subpath.
 ///
 /// Curves subdivide at their midpoint until the control points sit within
-/// [`FLATTEN_TOLERANCE`] of the chord — the standard flatness bound: for a cubic,
+/// [`cubic_tolerance`] of the chord — the standard flatness bound: for a cubic,
 /// the curve deviates from the chord by at most 3/4 of the larger control-point
 /// distance, so testing the controls bounds the curve. Subdivision at t = 1/2 is
 /// exact f32 arithmetic (halving), keeping flattening deterministic everywhere.
@@ -117,14 +149,20 @@ pub(crate) fn flatten(segments: &[Segment], transform: DeviceTransform) -> Vec<P
             }
             Segment::CubicTo { c1, c2, to } => {
                 if let Some(&from) = current.last() {
-                    flatten_cubic(
-                        from,
+                    let (c1, c2, to) = (
                         transform.apply(c1),
                         transform.apply(c2),
                         transform.apply(to),
-                        0,
-                        &mut current,
                     );
+                    // Measured once for the whole cubic and carried down the
+                    // subdivision, not recomputed per half: the bound is "within a
+                    // fraction of *this curve*", and a bound that shrank with every
+                    // split would be a fixed chord angle applied to shapes of every
+                    // size. Per cubic rather than per outline for the opposite reason —
+                    // one path can hold a page border and a one-pixel dot, and the dot
+                    // must not inherit the border's extent.
+                    let tolerance = cubic_tolerance(from, c1, c2, to);
+                    flatten_cubic(from, c1, c2, to, tolerance, 0, &mut current);
                 }
             }
             Segment::Close => {
@@ -136,7 +174,30 @@ pub(crate) fn flatten(segments: &[Segment], transform: DeviceTransform) -> Vec<P
     subpaths
 }
 
-fn flatten_cubic(p0: Point, p1: Point, p2: Point, p3: Point, depth: u8, out: &mut Vec<Point>) {
+/// The flatness bound for one cubic: the tighter of the device tolerance and
+/// [`RELATIVE_FLATTEN_TOLERANCE`] of the curve's own control-polygon diagonal
+/// (ADR 0044).
+///
+/// The diagonal rather than the chord, because a cubic's chord can be zero while the
+/// curve is not (a closed loop), and the control polygon contains the curve. Non-finite
+/// coordinates cannot reach here — `Resources::upload_outline` refuses them and
+/// `SceneBuilder` refuses a non-finite transform — but `min` would fall back to the
+/// absolute bound if one ever did, which is the behaviour this had before.
+fn cubic_tolerance(p0: Point, p1: Point, p2: Point, p3: Point) -> f32 {
+    let width = p0.x.max(p1.x).max(p2.x).max(p3.x) - p0.x.min(p1.x).min(p2.x).min(p3.x);
+    let height = p0.y.max(p1.y).max(p2.y).max(p3.y) - p0.y.min(p1.y).min(p2.y).min(p3.y);
+    FLATTEN_TOLERANCE.min(RELATIVE_FLATTEN_TOLERANCE * width.hypot(height))
+}
+
+fn flatten_cubic(
+    p0: Point,
+    p1: Point,
+    p2: Point,
+    p3: Point,
+    tolerance: f32,
+    depth: u8,
+    out: &mut Vec<Point>,
+) {
     // Flat when both controls are within tolerance of the chord: the curve is
     // bounded by the control polygon's deviation.
     let flat = {
@@ -149,13 +210,17 @@ fn flatten_cubic(p0: Point, p1: Point, p2: Point, p3: Point, depth: u8, out: &mu
         if len_sq <= f32::EPSILON {
             let c1 = (p1.x - p0.x).abs().max((p1.y - p0.y).abs());
             let c2 = (p2.x - p0.x).abs().max((p2.y - p0.y).abs());
-            c1.max(c2) <= FLATTEN_TOLERANCE
+            c1.max(c2) <= tolerance
         } else {
-            (d1.max(d2)) * (d1.max(d2)) <= FLATTEN_TOLERANCE * FLATTEN_TOLERANCE * len_sq
+            (d1.max(d2)) * (d1.max(d2)) <= tolerance * tolerance * len_sq
         }
     };
     // The depth cap bounds work on hostile geometry; at 16 the segments are 2^-16 of
-    // the curve and far below any tolerance a finite target can observe.
+    // the curve and far below any tolerance a finite target can observe. The relative
+    // bound cannot approach it from below: a control point is never further from the
+    // chord than the control polygon's diagonal, and each split divides that distance
+    // by about four, so 1/32 of the diagonal is reached in three levels whatever the
+    // curve's size.
     if flat || depth >= 16 {
         out.push(p3);
         return;
@@ -167,8 +232,8 @@ fn flatten_cubic(p0: Point, p1: Point, p2: Point, p3: Point, depth: u8, out: &mu
     let r0 = mid(q0, q1);
     let r1 = mid(q1, q2);
     let split = mid(r0, r1);
-    flatten_cubic(p0, q0, r0, split, depth.saturating_add(1), out);
-    flatten_cubic(split, r1, q2, p3, depth.saturating_add(1), out);
+    flatten_cubic(p0, q0, r0, split, tolerance, depth.saturating_add(1), out);
+    flatten_cubic(split, r1, q2, p3, tolerance, depth.saturating_add(1), out);
 }
 
 /// The integer-pixel bounding box of a set of polylines, or `None` when empty.
@@ -629,7 +694,8 @@ mod tests {
     use quorra_scene::{LineCap, LineJoin, Point, Segment, Stroke};
 
     use super::{
-        CoverageMask, DeviceTransform, Polyline, Rule, fill_mask, flatten, stroke_polylines,
+        CoverageMask, DeviceTransform, FLATTEN_TOLERANCE, Polyline, Rule, cubic_tolerance,
+        fill_mask, flatten, stroke_polylines,
     };
 
     const IDENTITY: DeviceTransform = DeviceTransform {
@@ -915,5 +981,149 @@ mod tests {
         close(ink(LineCap::Butt, 60, 20), 0.0, "butt, far end");
         close(ink(LineCap::Round, 0, 20), half, "round, near end");
         close(ink(LineCap::Round, 60, 20), half, "round, far end");
+    }
+
+    /// `4(√2 − 1)/3`: the control offset, in units of the radius, of the four-cubic
+    /// circle — the construction the caller's shared crate uses for §8.5.3.2's dot, and
+    /// the one the tolerance below is stated against.
+    const CIRCLE_K: f32 = 0.552_284_8;
+
+    /// A circle of radius `r` about `(cx, cy)`, as the four cubics a document draws it
+    /// with.
+    fn circle_path(cx: f32, cy: f32, r: f32) -> Vec<Segment> {
+        let k = CIRCLE_K * r;
+        let p = |x: f32, y: f32| Point::new(cx + x, cy + y);
+        vec![
+            Segment::MoveTo(p(r, 0.0)),
+            Segment::CubicTo {
+                c1: p(r, k),
+                c2: p(k, r),
+                to: p(0.0, r),
+            },
+            Segment::CubicTo {
+                c1: p(-k, r),
+                c2: p(-r, k),
+                to: p(-r, 0.0),
+            },
+            Segment::CubicTo {
+                c1: p(-r, -k),
+                c2: p(-k, -r),
+                to: p(0.0, -r),
+            },
+            Segment::CubicTo {
+                c1: p(k, -r),
+                c2: p(r, -k),
+                to: p(r, 0.0),
+            },
+            Segment::Close,
+        ]
+    }
+
+    /// The most a flattened closed curve may fall short of its own area, as a fraction
+    /// of it (ADR 0044).
+    ///
+    /// `RELATIVE_FLATTEN_TOLERANCE` holds any full turn to at least 16 chords, and a
+    /// regular 16-gon inscribed in a circle covers `(16/2π)·sin(2π/16) = 0.974495` of
+    /// it. Derived, not observed: the flattener is free to place *more* chords than the
+    /// bound requires, and a 16-gon is the most area 16 points on a circle can enclose,
+    /// so no flattening of a circle may be further short than this.
+    const MAX_AREA_DEFICIT: f32 = 1.0 - 0.974_495;
+
+    /// **A circle deposits its own area at every size, including the sub-pixel ones.**
+    ///
+    /// The caller's `QUORRA_FEEDBACK.md` §21.2: at diameters 0.5, 1.0 and 2.0 device
+    /// pixels this rasteriser deposited 36.1 %, 36.1 % and 10.1 % less ink than
+    /// `π·r²` — the inscribed square, the inscribed square, and the inscribed octagon,
+    /// which is what a quarter-pixel flatness bound admits when a whole curve is a
+    /// pixel across. ISO 32000-2 §10.7.2's NOTE 2 says what the bound is for: "the
+    /// purpose of the flatness tolerance is to control the precision of curve
+    /// rendering, not to draw inscribed polygons".
+    ///
+    /// The bound compared against is two terms, both arithmetic:
+    ///
+    /// - [`MAX_AREA_DEFICIT`], the 16-chord polygon's shortfall, one-sided because a
+    ///   chord never leaves the curve's convex hull;
+    /// - one half of a coverage step for each pixel the circle can touch, either way,
+    ///   because coverage is quantised by `round(cov × 255)` at every one of them.
+    #[test]
+    fn a_circle_deposits_its_own_area_at_every_size() {
+        // A pixel centre, so a mark of any diameter is centred in the grid rather than
+        // straddling it: the touched-pixel count below is then the honest one.
+        const C: f32 = 4.5;
+        for diameter in [0.5_f32, 1.0, 2.0] {
+            let r = diameter / 2.0;
+            let mask = fill_mask(
+                &flatten(&circle_path(C, C, r), IDENTITY),
+                Rule::NonZero,
+                0,
+                0,
+                9,
+                9,
+            );
+            let ink: f32 = mask.coverage.iter().map(|b| f32::from(*b) / 255.0).sum();
+            let area = std::f32::consts::PI * r * r;
+
+            // Only pixels the circle reaches carry a rounding error; the rest are an
+            // exact zero. `[floor(c − r), ceil(c + r))` is §10.7.4's half-open pixel
+            // rule applied to the mark's own bounds.
+            let touched = (C + r).ceil() - (C - r).floor();
+            let quantum = touched * touched * 0.5 / 255.0;
+
+            assert!(
+                ink <= area + quantum,
+                "a circle of diameter {diameter} drew {ink:.4}, more than its area \
+                 {area:.4} plus {quantum:.4} of rounding — a chord left the curve"
+            );
+            assert!(
+                ink >= area * (1.0 - MAX_AREA_DEFICIT) - quantum,
+                "a circle of diameter {diameter} drew {ink:.4} against its area \
+                 {area:.4}: {:.2}% short, past the {:.2}% a 16-chord flattening and \
+                 {quantum:.4} of rounding allow",
+                100.0 * (area - ink) / area,
+                100.0 * MAX_AREA_DEFICIT,
+            );
+        }
+    }
+
+    /// **The relative bound is inert on anything big, and that is a perf statement.**
+    ///
+    /// `RELATIVE_FLATTEN_TOLERANCE` enters through a `min`, so it can only ever add
+    /// segments, and it adds none once `extent/32 ≥ 0.25` — a control polygon 8 device
+    /// pixels across, which for a circle's quarter-arc cubic (diagonal `r√2`) is a
+    /// radius of 5.66. The population that pays for ADR 0044 is therefore bounded by
+    /// arithmetic rather than by hope, and the counts below pin it.
+    ///
+    /// A quarter-arc of half-angle `α` puts its controls `(4/3)·r·tan(α/2)·sin(α)` from
+    /// its chord, so at `r = 20` the successive depths are 7.81, 2.03, 0.51 and 0.128
+    /// device pixels: three splits, eight chords a quarter, **32 a turn**. The polyline
+    /// carries one point more than that because it opens on the `MoveTo` and closes by
+    /// returning to it.
+    #[test]
+    fn a_large_curve_keeps_the_segment_count_it_had() {
+        let big = flatten(&circle_path(40.0, 40.0, 20.0), IDENTITY);
+        assert_eq!(big.len(), 1, "one subpath");
+        assert_eq!(big[0].points.len(), 33, "32 chords a turn at r = 20");
+
+        // The `min` is not binding anywhere on that curve: every one of its four cubics
+        // spans `r√2 = 28.3` device pixels, and 28.3/32 is past a quarter pixel.
+        for segment in circle_path(40.0, 40.0, 20.0) {
+            if let Segment::CubicTo { c1, c2, to } = segment {
+                let from = Point::new(40.0 + 20.0, 40.0);
+                assert!(
+                    cubic_tolerance(from, c1, c2, to) >= FLATTEN_TOLERANCE,
+                    "the relative bound must not tighten a 28-pixel cubic"
+                );
+            }
+        }
+
+        // And the small ones are where it does bind: 16 chords a turn, at every size.
+        for diameter in [0.5_f32, 1.0, 2.0, 4.0] {
+            let small = flatten(&circle_path(8.0, 8.0, diameter / 2.0), IDENTITY);
+            assert_eq!(
+                small[0].points.len(),
+                17,
+                "a circle of diameter {diameter} flattens to 16 chords"
+            );
+        }
     }
 }

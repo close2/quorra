@@ -16,6 +16,61 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A tolerance in device pixels says nothing about a shape smaller than itself, and fifteen
+pages of prose were waiting on that sentence** (2026-08-14, ADR 0044, the caller's
+`QUORRA_FEEDBACK.md` §21.2). Their report: a filled circle of diameter 0.5 or 1.0 device
+pixels deposits 36 % less ink than `π·r²`, because `FLATTEN_TOLERANCE` is a quarter of a
+device pixel and a curve whose whole extent is a pixel meets that bound with four chords —
+the inscribed square, exactly. `raster.rs`'s own test module reproduces their table to the
+digit through `fill_mask` alone (0.1255, 0.5020, 2.8196 against 0.1963, 0.7854, 3.1416),
+which is what identifies the mechanism as flattening rather than anything in the compositor.
+
+**The clause they cited is not the clause that governs**, and the correction is worth
+carrying back: "each output device may have internal limits on the maximum and minimum
+tolerances attainable" is §10.7.3, which is *smoothness* — a shading's colour error.
+Flatness is §10.7.2, and it licenses a device tolerance more strongly ("PDF processors may
+choose to ignore any flatness tolerance specified within a PDF file") while saying in its
+own NOTE 2 exactly where the licence stops: "the purpose of the flatness tolerance is to
+control the precision of curve rendering, **not to draw inscribed polygons**". Nothing had
+to be invented to say that 36 % is not a tolerance.
+
+The fix is one `min`: a cubic's bound is the tighter of `FLATTEN_TOLERANCE` and 1/32 of the
+cubic's own device extent, measured once per cubic and carried down the subdivision. The two
+remedies the caller offered turn out to be one mechanism — a relative bound held fixed
+through the subdivision terminates at a chord *angle* with no radius in it, so "relative to
+the shape" **is** "a floor of *n* chords a turn", and choosing the fraction chooses the
+floor. 1/32 puts it at 16 chords, whose inscribed polygon covers `(16/2π)·sin(2π/16)` =
+0.9745 of its circle. The arithmetic, and why not 32 chords (it would reach every curve
+under 20 device pixels across — where body text lives — to buy an accuracy below the byte
+the coverage is rounded to, and would have to move `ARC_STEP`'s 18-a-turn round caps with
+it), are in the ADR.
+
+What it did, on the caller's corpus, one copy, each pair the same hour, flipping only the
+`[patch]` between a worktree at `d53c1c8` and the change:
+
+| scale | | agree | differ | refused | not comparable |
+|---|---|---:|---:|---:|---:|
+| 1 | `d53c1c8` | 919 | 35 | 2 | 18 |
+| 1 | ADR 0044 | **934** | **20** | 2 | 18 |
+| 4 | `d53c1c8` | 935 | 11 | 5 | 23 |
+| 4 | ADR 0044 | **936** | **10** | 5 | 23 |
+
+**Sixteen pages moved onto the oracle and none moved off**, at either scale, and the five
+scale-4 refusals are the same five documents by name. The fifteen at scale 1 are prose —
+`tracemonkey.pdf` and six variants of it among them — differing by a mean of about 1.52 of
+255 before and by nothing after, which says the population a chord floor reaches is *glyph
+outlines*: a bowl at body size is a cubic two to five device pixels across, inside the
+8-pixel crossover where the relative bound binds. Of the twenty that still differ at scale
+1, nine did not move by a digit and the rest improved on both mean and SSIM. Two numbers
+moved the other way and are in the ADR with their mechanism (`issue12295.pdf`'s worst tile,
+and `inks.pdf` at scale 4, whose 822 curves under 24 wide strokes make the flattening the
+polygon the *stroker* expands rather than the fill boundary).
+
+What is not measured, and is the ADR's revisit condition: the extra chords' cost on a dense
+text page. It is bounded — at most one more split below 8 device pixels — on a `geometry`
+phase measured at 0.16–0.18 ms of a 2.84–3.38 ms frame, and the instrument for it needs the
+real GPU.
+
 **A rectangle costs a fifth of a microsecond more as a `Fill` than as a `Rect`, and the
 lane that would close the gap is already written on the wrong half of the fill path**
 (2026-08-14, `examples/rect_lane.rs`, the caller's `QUORRA_FEEDBACK.md` §19). Their corpus
@@ -734,7 +789,11 @@ and the GPU lane does not flatten at all**, so a pixel the CPU lane calls wholly
 can still be clipped by the quadratic the device draws. (Corrected 2026-08-12: the
 exact-agreement claim was stated of every shape, and its test used a curved fixture that
 had been taking the CPU lane in *both* devices — ADR 0028's criterion is what put the
-GPU lane under it and the claim was wrong within a frame.)
+GPU lane under it and the claim was wrong within a frame. Corrected again 2026-08-14: the
+CPU lane's bound is now the tighter of a quarter pixel and 1/32 of the curve's own extent
+— ADR 0044 — so the two lanes agree on a *small* curve where they used not to, and this
+entry never asked whether the flattening it measured was wrong rather than merely coarser.
+On a sub-pixel mark it was, by 36 %.)
 Tightening `FLATTEN_TOLERANCE` to 0.004 takes the worst difference to zero pixels over
 20, which identifies the flattening as the whole of it. The GPU lane is the more
 accurate about the shape and the less accurate about the pixel. Still on the CPU lane:

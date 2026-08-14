@@ -102,14 +102,25 @@ owner to carry across, since we never edit their tree. What each one says:
 Push (or hand the owner the push), deliver the answers, and let their corpus re-baseline
 absorb ADRs 0036–0043 in one round instead of six.
 
-### 3. §21.2 — a tiny outline flattens to its inscribed polygon
+### 3. §21.2 — a tiny outline flattens to its inscribed polygon — **done** (2026-08-14)
 
-The caller's other live defect report: at d ≤ 1 device pixel a circle loses 36 % of its
-area to a quarter-pixel flattening tolerance, filed as a report (§10.7.3 licenses a
-device tolerance) with a suggestion — a tolerance relative to the shape, or a floor of a
-few segments per turn. Small, self-contained in `raster.rs`, and its evidence already
-exists: the caller's `sub_pixel_marks` example rows, plus a corpus run that must not
-move except where it should. A good first item for a fresh session.
+ADR 0044: a cubic's flatness bound is now the tighter of `FLATTEN_TOLERANCE` and 1/32 of
+the cubic's own device extent, which is a floor of 16 chords a full turn. Two things it
+left behind for whoever answers the caller next:
+
+- **Their citation is to the wrong clause, and the right one is stronger.** §10.7.3 is
+  *smoothness* (a shading's colour error); flatness is §10.7.2, which both licenses a
+  device tolerance outright ("PDF processors may choose to ignore any flatness tolerance
+  specified within a PDF file") and says where it stops — NOTE 2's "not to draw inscribed
+  polygons". Worth carrying across in the sync round: their §21.3 defers a gate on the
+  strength of that reading.
+- **The corpus moved 16 pages onto the oracle** and none off, at both scales, which was
+  not the expectation — the population a chord floor reaches is glyph outlines, not just
+  the sub-pixel dots the report is about. `doc/PLAN.md`'s entry has the tables.
+
+What is still open is the cost: the extra chords have never been priced on a dense text
+page, because `geometry` is only visible through `examples/surface_measure.rs` on the real
+GPU. It is the ADR's revisit condition and the gate on ever raising the floor to 32.
 
 ### 4. Split `encode.rs` along its stated seams — **done** (2026-08-14)
 
