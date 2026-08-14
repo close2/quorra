@@ -229,8 +229,10 @@ here, which is why this went before it.
 ADR 0045 then added a fifth file — `encode/hull.rs` (365, the `(outline, linear)` bound
 memo and its proof) — and its call site, so `encode.rs` reads 2 077 today rather than
 2 060. **The comparison this split made possible also found a clause question, and it is
-the first bullet of the small debts below** — it is recorded there rather than here,
-because this item is done and a done item is a thing a future session deletes.
+now fixed** (2026-08-14, `A blended stroke inside a knockout group is replaced, not
+blended`, no ADR — a defect): `encode_stroke` wrapped a non-Normal blend in §11.3.5's
+implicit group on the blend mode alone, where inside a knockout group §11.4.6 governs.
+`tests/knockout_blend.rs` measures it at 112.95 of 255 before and 0.87 after.
 
 ### 5. A page-sized coverage tile per clipped shape — **not** multi-sheet passes
 
@@ -263,15 +265,6 @@ three pages the coverage sheet refuses outright.
 The 2026-08-13 review's code-health pass, plus what the `encode.rs` split turned up, so a
 fresh session can pick one without re-auditing. Each is one sitting:
 
-- **A blended stroke inside a knockout group takes the wrong clause**, found by the
-  field-by-field comparison item 4's split required and left unfixed because it wants the
-  CPU oracle on a page that draws it rather than a one-line edit. `encode_stroke` wraps a
-  non-Normal blend in §11.3.5's implicit one-element group **on the blend mode alone**,
-  where `encode_fill` and `encode_image` also require `self.style == DrawStyle::Over` — on
-  the stated argument that inside a knockout group every mode degenerates to Normal
-  (§11.4.6 with §11.3.6's αb = 0). So a blended stroke inside a knockout group composites
-  today as an ordinary blend of a child layer instead of as §11.4.6's replacement. It is
-  the only one of these that is a correctness question rather than a symmetry one.
 - **A solid fill of a rectangular outline does not take the rectangle lane**, and a
   shaded one does. `StoredOutline::rect_hint` is computed for every outline at upload
   (`resources.rs:160`) and read at `encode.rs:1086` — but only on the shading arm; a solid
@@ -418,8 +411,13 @@ its `[patch]` and lock are often their work in progress. Copy it instead —
 
 ```
 rsync -a --exclude=target --exclude=corpus-cache --exclude=fuzz --exclude=tmp \
-      --exclude=.git --exclude='doc/pdf.js/.git' /home/cl/projects/pdf-viewer/ <scratch>/viewer/
+      --exclude=.git --exclude='doc/pdf.js/.git' --exclude=.claude \
+      /home/cl/projects/pdf-viewer/ <dir>/viewer/
 ```
+
+— `--exclude=.claude` because that tree's `.claude/worktrees/` holds other agents' build
+dirs (15 GB and growing when it was learned), and `<dir>` under `/home/AI` rather than
+the `/tmp` scratchpad tmpfs: the copy is about 537 MB and the tmpfs has run out mid-copy.
 
 — the excludes are not optional (that tree is 100 GB), then append a
 `[patch."https://github.com/close2/quorra"]` block pointing `quorra`, `quorra-gpu` and

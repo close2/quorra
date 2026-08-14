@@ -16,6 +16,38 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A blended stroke inside a knockout group is replaced, not blended** (2026-08-14, no
+ADR — a defect). `encode_stroke` wrapped a non-Normal blend in §11.3.5's implicit
+one-element group on the blend mode alone, where `encode_fill` and `encode_image` also
+require the enclosing style to be `Over`. The extra condition is not a symmetry, it is
+the clause: §11.4.6 composites every element of a knockout group with the group's
+*initial* backdrop, an isolated group leaves that transparent (§11.4.5), and §11.3.6's
+formula against `ab = 0` collapses to `co = as·Cs` — every mode is Normal there. So a
+blended stroke composited as an ordinary blend of a child layer over the accumulated
+group content instead of as the clause's replacement. Found by the field-by-field
+comparison the `encode.rs` split required, left unfixed then because it wanted a fixture
+rather than a one-line edit.
+
+`tests/knockout_blend.rs` is that fixture, on ADR 0032's construction — a knockout group
+covered opaquely, then a half-opaque element under `Multiply`, so shape and opacity are
+different numbers and the immediate backdrop is not the initial one. Worst premultiplied
+deviation from `P' = (1 − f) × P + S`:
+
+| | before | after |
+|---|---:|---:|
+| the stroke arm | **112.95 of 255** | **0.87** (unorm rounding) |
+| the fill arm | 0.77 | 0.77 |
+
+112.95 is not a near miss: it is exactly what the same stroke in an *ordinary* group
+deviates by, which is what taking the other clause looks like once it is a number. The
+file also holds the premise on its own — all sixteen modes of `BlendMode::ALL`, on both
+arms, draw the same bytes onto transparency.
+
+**The corpus does not move**, at scale 1 or 4: 934 / 20 / 2 and 936 / 10 / 5, per-page
+lines identical to the digit, base and fix run the same hour in one copy with only the
+`[patch]` flipped. That says the corpus does not reach this shape, not that the arm was
+right.
+
 **An unchanged frame no longer encodes itself: 0.174 ms against 1.107** (2026-08-14,
 ADR 0048, the caller's `doc/todo/44` §3). ADR 0045 priced this on a throwaway prototype
 and left it *proposed*, because it was the caller's to agree to; the owner's
