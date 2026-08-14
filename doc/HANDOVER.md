@@ -26,7 +26,9 @@ compile failure turned from a silent test-suite hang into a refusal that names i
 (0042). Then the ten rounds of 2026-08-14, whose three ADRs are the warm set keyed by the
 surface's negotiated format (0043), a flatness bound that is relative to the shape when the
 shape is smaller than the tolerance — the caller's §21.2 (0044) — and what an unchanged
-frame need not pay again, priced whole and landed by half (0045). The rest of those rounds
+frame need not pay again, priced whole and landed by half (0045); the other half is now
+built as the retained `RetainedScene`/`render_retained` API (0048), under the owner's
+same-day authorisation to change the API. The rest of those rounds
 carry no ADR because none decided anything: `examples/rect_lane.rs` and the §19 numbers,
 the fuzz vocabulary, the shader-sameness guard, `SceneError`'s own module, and
 `encode.rs` split along the seams its own comments named.
@@ -55,11 +57,13 @@ metric the brief judges us by has never been measured in its own terms, and the 
 conversation is going stale while local work stacks up — both cost less to fix than one
 more optimisation round, so they go first.**
 
-**As of the close of 2026-08-14, items 1, 3 and 4 are done and only 2 and 5 are open.** The
-numbers are kept rather than deleted because three later items lean on them; the two that
-remain are **the sync round** — now the largest thing either side is holding, and what
-item 1's second half is blocked on — and **the residue-clip tiling seam**, which is the
-only work left with milliseconds in it.
+**As of the close of 2026-08-14, items 1, 3 and 4 are done — item 1's second half
+included, as ADR 0048 — and only 2 and 5 are open.** The numbers are kept rather than
+deleted because three later items lean on them; the two that remain are **the sync
+round** — now the largest thing either side is holding, and since ADR 0048 carrying a
+fourth document (`QUORRA_RETAINED_FRAME.md`, an API the caller must *adopt* rather than
+merely take) — and **the residue-clip tiling seam**, which is the only work left with
+milliseconds in it.
 
 ### 1. The two surface-tier numbers — **done** (2026-08-14), and what they left behind
 
@@ -116,6 +120,20 @@ What the numbers re-rank, recorded here rather than jumped on:
   calls into one target?** If yes, nothing new is needed in `quorra_scene`; if no, the
   reason why is the specification for scene-fragment composition. **This item is now
   blocked on the sync round below, not on more measurement.**
+
+  **And the second half is built** (2026-08-14, ADR 0048): the owner authorised API
+  changes the same day — "document the necessary change in `pdf-viewer/doc` and I will
+  inform the pdf-viewer team" — which unblocked it without the sync round. The retained
+  `Encoded` lives behind a caller-held `RetainedScene` that owns its `Scene`, and
+  `Device::render_retained` replays when nothing an encode reads has moved. An
+  unchanged dense-text frame is **0.174 ms against 1.107**, measured through the real
+  API with both variants in one binary (`examples/retained.rs`); 0 of 8 022 576 bytes
+  differ on either adapter. `Device::render` is untouched. The two-render-calls
+  question above is answered in the process — **no**, both compose paths
+  `LoadOp::Clear` the target — and the fallback if their overlays change on frames the
+  page does not is ADR 0045's candidate (B). What the sync round carries for this is
+  `pdf-viewer/doc/QUORRA_RETAINED_FRAME.md`: an API the caller must *adopt*, and it
+  names three things their `present` does every frame that would defeat it.
 
   **How to measure it, so the next round does not re-derive this.** `perf` is not
   installed for this user, and wall clocks on this machine are worthless at the load
@@ -234,7 +252,11 @@ coverage upload each. That is a page "drawn" at a cost §6.2 would call a failur
 So the ceiling that bites is not the sheet's dimension. It is that a clipped shape becomes
 one coverage tile of its own device bounds, and at 4× a full-page clipped shape is a
 full-page tile. The work is on the *tiling* side — ADR 0028's panes are the nearest
-existing mechanism — and it is worth its own measurement before its own design.
+existing mechanism — and it is worth its own measurement before its own design. One more
+shape belongs to this seam since ADR 0048: a page whose glyph tiles overflow the atlas
+re-encodes on every frame, because the repack that follows bumps the atlas generation and
+invalidates its own retained encode — magnified text is that shape, separately from the
+three pages the coverage sheet refuses outright.
 
 ### Small debts, none blocking — fill-in work between the numbered items
 
@@ -316,6 +338,16 @@ Each of these has an ADR that states the measurement and why it was left:
   either way (0039).
 
 ## Traps
+
+**The corpus copy recipe now pulls in other agents' worktrees.** `rsync` with the
+excludes below reached **15 GB and was still growing** on 2026-08-14, because
+`/home/cl/projects/pdf-viewer/.claude/worktrees/*/tmp-target` is inside it. Add
+`--exclude=.claude`, and copy to `/home/AI` rather than the `/tmp` scratchpad — that
+tmpfs had 4.9 GB free and the corpus copy alone is about 6.
+
+**`pgrep -f "<your own command>"` in an `until` loop never exits**, because the loop's
+own shell matches its own pattern. Two rounds were lost to a `cargo test` that never
+started.
 
 **A fresh `CARGO_TARGET_DIR` is a cold cache, and a per-checkout remap flag is a
 colder one.** The `AI` user's builds run through `sccache`, and its key includes the

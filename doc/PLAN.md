@@ -16,6 +16,44 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**An unchanged frame no longer encodes itself: 0.174 ms against 1.107** (2026-08-14,
+ADR 0048, the caller's `doc/todo/44` §3). ADR 0045 priced this on a throwaway prototype
+and left it *proposed*, because it was the caller's to agree to; the owner's
+authorisation to change the API arrived the same day, and this is the half that was
+missing. `RetainedScene` is a handle the caller holds — it owns the `Scene` and the
+encode of its last frame — and `Device::render_retained` replays that encode when
+nothing an encode reads has moved. `Device::render` is untouched.
+
+The instrument is better than the prototype's in the one way that matters: **both
+variants are in one binary on one device**, so the round-robin is two calls rather than
+two builds. Dense text at 1191×1684, counters checked against `tests/archetypes.rs`'s
+row first, headless RADV into a retained `Target::Texture`, 40 rounds, **minima**:
+
+| `Device::render*` | wall | encode | upload | execute |
+|---|---:|---:|---:|---:|
+| re-encoded every frame | 1.107 ms | 0.897–1.049 | 0.012 | 0.067–0.069 |
+| replayed | **0.174 ms** | **0.000** | 0.011–0.012 | 0.064–0.067 |
+
+Three runs at load 18–24 read 1.107 / 1.260 / 1.225 against 0.174 / 0.175 / 0.187.
+**0.154 ms reproduced at 0.174**, and the ratio is 6.4× rather than tenfold because the
+*numerator* shrank: 0045's prototype predated its own candidate (D). The control is
+llvmpipe, where the rasteriser dominates — 5.072 → 3.295 ms with `execute` unmoved and
+`encode` 1.324 → 0.000, so exactly the host term disappears and nothing else does.
+**0 of 8 022 576 bytes differ** between an encoded frame and a replayed one on either
+adapter, and the handle holds 287 688 bytes for that page.
+
+What it does **not** do is unchanged from the survival table: an identical viewport
+(and a changed damage list, and a different target) replays everything; a whole-pixel
+scroll, a fractional scroll and a zoom step re-encode, and no design reuses a zoom. The
+caller now has work to do rather than a question to answer — their frame scene must
+stop being rebuilt when nothing changed — and it is written for them in
+`pdf-viewer/doc/QUORRA_RETAINED_FRAME.md`.
+
+One thing the review caught that no test would have: ADR 0023's encode subdivision is a
+clock *inside* the `Encoded`, so a replay would have reported the geometry and staging
+of the frame that made it — a `Frame` claiming time it did not spend. It reports three
+zeros, and a test holds it.
+
 **§6.2's success bar is met on the instrument that judges it: 1.816 ms against 2.0**
 (2026-08-14, closing re-run of `examples/surface_measure.rs` by the owner on RADV at the
 real display). Ten rounds ago the same instrument read 2.84–3.38 ms for the same page,
