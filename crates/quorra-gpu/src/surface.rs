@@ -71,6 +71,13 @@ impl SurfaceState {
         })
     }
 
+    /// The format negotiated at construction — what every frame presented here is
+    /// rendered in, and therefore what the warm-up thread compiles the presenting
+    /// lanes for (ADR 0043).
+    pub(crate) fn format(&self) -> wgpu::TextureFormat {
+        self.format
+    }
+
     /// Force a reconfigure before the next acquire, replacing the swapchain.
     ///
     /// Called when the presentation stack may hold state a retry cannot clear: a

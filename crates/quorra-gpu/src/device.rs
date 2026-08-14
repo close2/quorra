@@ -348,7 +348,9 @@ impl Device {
             });
 
         let pipelines = PipelineStore::new(gpu.clone());
-        let warm_up = pipelines.spawn_warm_up();
+        // A surface device warms the presenting lanes in the surface's own format too,
+        // so its first frame does not compile them inside itself (ADR 0043).
+        let warm_up = pipelines.spawn_warm_up(surface_state.as_ref().map(SurfaceState::format));
 
         // A sampler is a descriptor, not a compilation: creating it here costs
         // startup nothing measurable and spares every frame an Option.

@@ -14,11 +14,13 @@
 //! - **Compiled lazily.** A render that needs a pipeline the warm thread has not
 //!   already produced compiles it on the spot — correct frames, sooner, at a one-off
 //!   cost the frame's `Timings::phases` names — and every later frame finds it cached.
-//! - **Few.** The warm set is two lanes: the analytic rectangle (`Kind::RectOver`)
-//!   and the coverage quad (`Kind::CoverOver`) — exactly the "glyph quads,
-//!   rectangle fills" the brief's §7 says a page of text needs. Everything else —
-//!   knockout variants, the image and shading quads (ADR 0011), the compositor's
-//!   passes — compiles on first use. Each kind is instantiated per target format.
+//! - **Few.** The warm set is the two lanes a page of text needs — the analytic
+//!   rectangle (`Kind::RectOver`) and the coverage quad (`Kind::CoverOver`) — plus
+//!   the compositor's `Kind::Composite` and `Kind::Blit`, which a first frame with a
+//!   group otherwise compiles inside itself (ADR 0040). Everything else — knockout
+//!   variants, the image and shading quads (ADR 0011) — compiles on first use. Each
+//!   kind is instantiated per target format, and a device constructed for a surface
+//!   warms the presenting lanes in the surface's negotiated format too (ADR 0043).
 //!
 //! The pipeline cache blob §7 also asks for is deliberately absent: `wgpu` 30 exposes
 //! it only through an `unsafe` constructor, this crate is `#![forbid(unsafe_code)]`,
@@ -227,21 +229,35 @@ impl PipelineStore {
     /// inside the driver must not outlive the device it is compiling for (ADR 0018).
     ///
     /// [`Device`]: crate::device::Device
-    pub(crate) fn spawn_warm_up(self: &Arc<Self>) -> Option<thread::JoinHandle<()>> {
+    pub(crate) fn spawn_warm_up(
+        self: &Arc<Self>,
+        present_format: Option<wgpu::TextureFormat>,
+    ) -> Option<thread::JoinHandle<()>> {
         let store = Arc::clone(self);
         let spawned = thread::Builder::new()
             .name("quorra-warm-up".into())
-            .spawn(move || store.warm_up_now());
+            .spawn(move || store.warm_up_now(present_format));
         let Ok(handle) = spawned else {
-            self.warm_up_now();
+            self.warm_up_now(present_format);
             return None;
         };
         Some(handle)
     }
 
-    /// The warm-up itself: the two over-lanes a page of text needs, and the two passes
+    /// The warm-up itself: the two over-lanes a page of text needs, the two passes
     /// a page with a group needs (§7 — the knockout variants, the reduction and the
-    /// winding lane still compile on first use).
+    /// winding lane still compile on first use), and — for a device constructed for a
+    /// surface — the presenting lanes again in the surface's own format.
+    ///
+    /// **Why the surface's format is a second set** (ADR 0043): every pipeline is
+    /// keyed by `(kind, target format)`, the warm set compiles [`WARM_FORMAT`], and a
+    /// surface negotiates `Bgra8Unorm` where the adapter offers it — so a presenting
+    /// host's first frame compiled the lane it drew with *inside that frame*,
+    /// measured on RADV at 0.3–1.0 ms per fresh device, one entry every time, flat or
+    /// layered (`examples/surface_measure.rs`). [`Kind::Composite`] is deliberately
+    /// not in the second set: a composite's target is always an internal accumulator
+    /// (ADR 0038's hand-off means the surface only ever receives the lanes or the
+    /// blit), so a `Bgra8` composite would warm a pipeline no frame can reach.
     ///
     /// **Why the compositor's two are here** (ADR 0040): a first frame with a group
     /// compiles [`Kind::Composite`] and [`Kind::Blit`] inside itself, and
@@ -257,16 +273,24 @@ impl PipelineStore {
     /// on every exit path including an unwind — a warm-up that ends without saying so
     /// leaves every waiter on a `Condvar` nobody will notify, which is how an invalid
     /// shader used to hang the process instead of failing it.
-    fn warm_up_now(&self) {
+    fn warm_up_now(&self, present_format: Option<wgpu::TextureFormat>) {
         let guard = WarmUpGuard::new(self);
         let started = Instant::now();
         let compiled = self
             .get(Kind::RectOver, WARM_FORMAT)
             .and_then(|_| self.get(Kind::CoverOver, WARM_FORMAT))
             .and_then(|_| self.get(Kind::Composite, WARM_FORMAT))
-            .and_then(|_| self.get(Kind::Blit, WARM_FORMAT));
+            .and_then(|_| self.get(Kind::Blit, WARM_FORMAT))
+            .and_then(|_| match present_format {
+                Some(format) if format != WARM_FORMAT => self
+                    .get(Kind::RectOver, format)
+                    .and_then(|_| self.get(Kind::CoverOver, format))
+                    .and_then(|_| self.get(Kind::Blit, format))
+                    .map(|_| ()),
+                _ => Ok(()),
+            });
         guard.finish(match compiled {
-            Ok(_) => WarmUp::Warm(started.elapsed()),
+            Ok(()) => WarmUp::Warm(started.elapsed()),
             Err(reason) => WarmUp::Refused(reason),
         });
     }
@@ -590,6 +614,54 @@ mod tests {
         store
             .get(Kind::Blit, WARM_FORMAT)
             .expect("the blit pipeline builds for the format the frame actually uses");
+    }
+
+    /// A device made for a surface warms the presenting lanes in the surface's own
+    /// format (ADR 0043), so its first frame does not compile them inside itself —
+    /// asserted at the store, because this account has no window to present to.
+    /// `Composite` deliberately stays out of the second set: a composite's target is
+    /// always an internal accumulator (ADR 0038's hand-off), so warming it for the
+    /// surface's format would compile a pipeline no frame can reach.
+    #[test]
+    fn the_warm_set_includes_the_present_format_when_given_one() {
+        let device = device();
+        let (gpu, _) = device.wgpu();
+        let store = PipelineStore::new(gpu.clone());
+        let present = wgpu::TextureFormat::Bgra8Unorm;
+        store.warm_up_now(Some(present));
+        assert!(matches!(store.warm_up(), WarmUp::Warm(_)));
+        let state = store.lock();
+        for kind in [Kind::RectOver, Kind::CoverOver, Kind::Blit] {
+            assert!(
+                state.pipelines.contains_key(&(kind, present)),
+                "{kind:?} missing for the present format"
+            );
+        }
+        assert!(
+            !state.pipelines.contains_key(&(Kind::Composite, present)),
+            "a composite never targets the surface, so warming it there is waste"
+        );
+    }
+
+    /// The other half: a headless device (no present format) and a surface whose
+    /// format is already [`WARM_FORMAT`] compile no second set at all.
+    #[test]
+    fn the_warm_set_compiles_one_format_when_no_second_is_needed() {
+        let device = device();
+        let (gpu, _) = device.wgpu();
+        for present in [None, Some(WARM_FORMAT)] {
+            let store = PipelineStore::new(gpu.clone());
+            store.warm_up_now(present);
+            assert!(matches!(store.warm_up(), WarmUp::Warm(_)));
+            let state = store.lock();
+            assert!(
+                state
+                    .pipelines
+                    .keys()
+                    .all(|(_, format)| *format == WARM_FORMAT),
+                "no pipeline outside {WARM_FORMAT:?} belongs in this warm set"
+            );
+        }
     }
 
     /// The refusal above must reach a caller in the words of the error, not only as a
