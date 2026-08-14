@@ -16,6 +16,59 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**An unchanged frame costs 0.154 ms instead of 1.538, and a fifth of that is already
+taken** (2026-08-14, ADR 0045, the caller's `doc/todo/44` §3). The round before this one
+left encode reuse sized rather than priced; this one prices it and takes the half that
+needed no conversation.
+
+**What reuse is worth, measured on the crudest possible prototype.** A `git worktree` in
+which `Device::render` holds the previous frame's `Encoded` and replays it when the scene
+pointer and all eight viewport numbers match, on the dense-text archetype at 1191×1684,
+headless on RADV into a retained `Texture`, eight runs round-robin between the two
+variants, load average 3.1–3.8. **Minima**, because the medians carry 8 ms outliers on
+*both* variants and are not evidence of anything:
+
+| `Device::render` | wall | encode | upload | execute |
+|---|---:|---:|---:|---:|
+| re-encoded every frame | 1.538 ms | 1.32–1.67 | 0.011–0.019 | 0.065–0.076 |
+| `Encoded` replayed | **0.154 ms** | 0.000 | 0.010–0.016 | 0.062–0.074 |
+
+Tenfold, and what is left is the instance upload, the pass and the submit. Applied to the
+owner's presenting figures — 2.84–3.38 ms of which recording is 1.90–2.32 — that is
+**0.9–1.2 ms against §6.2's 2.0 ms bar**, which is arithmetic on measured parts and not
+itself a measurement; the presenting run is the owner's to take. The design, the four
+candidates and the full invalidation list are ADR 0045; the API half of it is **proposed**,
+because it is the caller's to agree to.
+
+**And what does *not* survive a viewport change, which corrects the caller's hope.** Their
+§3 expects reuse "that survives a transform change" to make a zoom step cost the same
+~60 ms. It cannot: the device transform's linear part is inside every atlas key, the
+flattening and the lane choice, and the sub-pixel phase is the fractional part of the
+device translation. So an identical viewport reuses everything (and so does a changed
+*damage list*, and so does a different target); a whole-pixel scroll reuses the atlas keys
+and the tiles but not one absolute device position; a fractional scroll and a zoom step
+reuse nothing per command. What building the page scene in page space *does* buy them is
+their own `scene` phase — 50.2 ms median, 2.4 s of their 17.1 — and that needs nothing from
+us, because §2.3 is already that contract.
+
+**The cheaper experiment was the one to take, and it is landed: −21.2 % of a dense-text
+encode.** `outline_device_bounds` was 28.1 % of the encode transforming 37 control points
+per placement, on a page whose 4 320 fills are 818 outlines under one linear part. The box
+under the *linear* part is now memoised per `(outline, linear)` and each placement adds its
+own translation — which is bit-for-bit the same box, by the monotonicity of correctly
+rounded addition, with the proof and its test beside the code in `encode/hull.rs`:
+
+| dense text, Ir a steady encode | |
+|---|---:|
+| before | 18 434 963 |
+| after | **14 524 976** |
+
+**−3 909 987: 21.2 % of the encode, 27.6 % of recording**, counter row identical to the
+digit. On the **artwork** archetype it is 621 599 548 → 620 321 847, **−0.21 %** — that
+page's encode is 34× more instructions a command and is essentially all residue-tile
+rasterisation, so bounding is a fifth of a per cent of it either way. Two page shapes, one
+direction, neither losing.
+
 **A third of `recording` is one function measuring a bound the previous frame already
 measured** (2026-08-14, callgrind on the dense-text archetype). §6.2 left recording at
 1.90–2.32 ms of a 2.84–3.38 ms presenting frame with nothing said about what it *is*;

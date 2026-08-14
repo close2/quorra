@@ -80,6 +80,20 @@ What the numbers re-rank, recorded here rather than jumped on:
   linear)` bound cache (a placement's device box is its neighbour's translated), and
   whether the reuse can be a whole retained `Encoded` rather than a set of caches.
 
+  **Both were priced, and the verdict is ADR 0045** (2026-08-14; the numbers and the
+  survival table are in `PLAN.md`'s entry for the date). The bound cache is **landed** —
+  `encode/hull.rs`, **−21.2 % of a dense-text encode** by instruction count and −0.21 %
+  on artwork, counters identical, no public surface touched. The whole retained
+  `Encoded` is **priced and proposed, not built**: a throwaway prototype puts an
+  unchanged dense-text frame at **0.154 ms against 1.538**, and the reason it is not
+  built is that it is an API question the caller has to answer — their `doc/todo/44` §3
+  asks for it, their frame's scene is rebuilt with fresh `Arc`s every frame so a cache
+  keyed on scene identity would miss every time, and the answer we want from them first
+  is in `doc/feedback-answers-draft.md`: **can the page and the overlays be two `render`
+  calls into one target?** If yes, nothing new is needed in `quorra_scene`; if no, the
+  reason why is the specification for scene-fragment composition. **This item is now
+  blocked on the sync round below, not on more measurement.**
+
   **How to measure it, so the next round does not re-derive this.** `perf` is not
   installed for this user, and wall clocks on this machine are worthless at the load
   averages it actually runs at — 4.49 ms for an encode the owner clocked at 1.96–2.35.

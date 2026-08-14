@@ -4,10 +4,12 @@
 so that it can be carried, section by section, into the conversation in
 `/home/cl/projects/pdf-viewer/doc/QUORRA_FEEDBACK.md` — a tree this side never edits. The
 three sections it answers are the three that document lists as waiting on us: **§15**,
-**§19** and **§22.5**. It ends with what the pending push delivers, so it doubles as the
-release note for the sync round.
+**§19** and **§22.5**. A fourth answer follows them, to the upstream ask their
+`doc/todo/44` §3 raises — **the encode cache** — which is not in `QUORRA_FEEDBACK.md` yet
+and is the largest thing either side is holding. It ends with what the pending push
+delivers, so it doubles as the release note for the sync round.
 
-Everything below was produced on 2026-08-14 at `f1873da` plus this round's commit.
+Everything below was produced on 2026-08-14 at `f1873da` plus this round's commits.
 
 ---
 
@@ -242,6 +244,83 @@ The rule we will hold ourselves to, so this is a policy rather than one correcti
 **And if you would rather have the rename anyway, say so and we will take it** — it is one
 line here and one line there. This is a judgement about which instrument reaches a reader,
 not a principle, and you are the reader.
+
+---
+
+## `doc/todo/44` §3 — the encode cache: priced from this side, and one of your two obstacles is already answered
+
+**Yes, and here is what it is worth measured rather than fitted.** Our own profiling had
+arrived at your sentence from the other end a day earlier (`doc/PLAN.md`, 2026-08-14):
+recording is **78 %** of a steady dense-text encode by instruction count, and **over 40 %
+of recording is a pure function of `(scene, viewport)`**. Your trace says the same thing
+about a document 13× larger. The whole design, its pricing, its invalidation list and what
+it costs in memory are `doc/adr/0045`; this is the part you need to decide something.
+
+### What a reused frame costs, measured
+
+A `git worktree` in which `Device::render` holds the previous frame's `Encoded` and
+replays it when the scene pointer and all eight viewport numbers match. Our dense-text
+archetype at 1191×1684 — 4 320 commands, 818 outlines — headless on RADV into a retained
+`Texture`, eight runs round-robin between the variants, **minima** (the medians on this
+machine carry 8 ms outliers on both variants and are not evidence of anything):
+
+| `Device::render` | wall | encode | upload | execute |
+|---|---:|---:|---:|---:|
+| re-encoded every frame | 1.538 ms | 1.32–1.67 | 0.011–0.019 | 0.065–0.076 |
+| `Encoded` replayed | **0.154 ms** | 0.000 | 0.010–0.016 | 0.062–0.074 |
+
+**Tenfold, and 0.15 ms is what is left**: the instance upload, the pass, the submit. On
+your document, at your own fit of 3.86 µs a command, that is the 233.8 ms median `encode`
+going to approximately nothing, and your fully-culled frames' 112–190 ms with it.
+
+### Your obstacle (b) is already the contract, and it does not buy what you hope
+
+**Build the page scene in page space and put the scale in `Viewport::transform`** — you
+need nothing from us to do that, and it is what §2.3 of the brief asks for in the first
+place: *"a `Scene` must contain no reference to a viewport, a resolution, a device
+transform, or a target size."* A `Viewport` already takes a full affine, not a scale.
+
+What it buys is your **`scene` phase** — median 50.2 ms, 2.4 s of your trace's 17.1 —
+across zoom steps and window resizes. What it does **not** buy is the `encode` phase, and
+this is the part of your §3 we have to correct rather than confirm:
+
+| your viewport changes by | what of our encode survives |
+|---|---|
+| nothing | **all of it** |
+| the damage list only | **all of it** — `encode` never reads it; damage is planned target-side |
+| the target it draws into | **all of it** — phase 1 runs before any allocation and knows no target |
+| a whole number of device pixels of scroll | the atlas keys and the rasterised tiles; **not** the bounds, the culls, the clip rectangles or the instance bytes, all of which are absolute device positions |
+| a *fraction* of a pixel of scroll | **nothing in the glyph lane** — the quantised sub-pixel phase changes, so every key changes |
+| a scale, i.e. a zoom step | **nothing per command** — the linear part is inside every atlas key, the flattening and the lane choice |
+
+So "under reuse that survives a transform change it is the same ~60 ms" is not available
+at any price: a zoom step is a genuinely different rasterisation of every glyph on the
+page. Scroll by whole pixels and re-encode; zoom and re-encode. What reuse takes is the
+case your trace is actually full of — **28 frames of one document at one view**.
+
+### Your obstacle (a) is the real one, and it decides what we build
+
+Under a device-side cache keyed on scene identity, a host that rebuilds the frame's scene
+every frame with fresh `Arc`s for its background and overlays **misses every time and gets
+nothing**. So before either side builds scene-fragment composition — new vocabulary in
+`quorra_scene`, a walk that descends into fragments, batches rebased per fragment — the
+cheaper question, and the one we would like answered in this round:
+
+**Can the host draw the page and the overlays as two `render` calls into the same target?**
+The page's `Scene` would then be stable across frames and hit the cache; the overlays are a
+handful of commands and would cost their own encode, which is microseconds at that size.
+Nothing new is needed on either side. If there is a reason that does not work — a blend
+that must see the page beneath it inside one transparency group, an overlay that must be
+clipped by page geometry — that reason is the specification for fragment composition, and
+we would rather design it from that than from the general shape.
+
+### What is already landed, and needs nothing from you
+
+The half of this that is behind our API is taken: the device box of a glyph placement is
+now its neighbour's box translated, memoised per `(outline, linear part)` within one
+encode. **−21.2 % of a dense-text encode by instruction count** (callgrind: 18 434 963 →
+14 524 976), the counter row identical to the digit, and a proof beside the code that the
+memoised box is the direct box bit for bit. It is in the push below.
 
 ---
 

@@ -34,14 +34,17 @@
 //! [`ShadedOp`]) rather than a fourth instance stream — the brief's §0 premise is
 //! that most of a page is glyphs and rectangles, and the encoding matches it.
 //!
-//! Three of the walk's subsystems are their own concerns and their own modules:
+//! Four of the walk's subsystems are their own concerns and their own modules:
 //! [`clips`] turns a chain of [`ClipId`]s into a rectangle and a residue (ADR 0007,
 //! ADR 0030), [`scratch`] is the frame's coverage sheet with the shelf packing that
-//! fills it (ADR 0021, ADR 0034), and [`rare`] is the image and shading lanes — the
-//! quads the brief's §0 calls the rare case (ADR 0011). What is left here is the walk
-//! itself and the two lanes it exists for.
+//! fills it (ADR 0021, ADR 0034), [`rare`] is the image and shading lanes — the quads
+//! the brief's §0 calls the rare case (ADR 0011) — and [`hull`] is the memo that bounds
+//! a placement by translating its neighbour's box rather than transforming the outline
+//! again (ADR 0045). What is left here is the walk itself and the two lanes it exists
+//! for.
 
 mod clips;
+mod hull;
 mod rare;
 mod scratch;
 
@@ -354,37 +357,8 @@ fn apply(t: &DeviceTransform, p: Point) -> Point {
 /// ([`Encoder::push_glyph`]); and every coverage tile expands to whole pixels by
 /// `floor`/`ceil`, which reaches under one pixel further again. Flattening adds
 /// nothing to this — a flattened point lies on the curve, which lies inside the
-/// control hull [`outline_device_bounds`] measures.
+/// control hull [`hull::HullMemo::bounds`] measures.
 const CULL_MARGIN: f32 = 2.0;
-
-/// The composed-transform bounding box of an outline's control points — a bound on
-/// the curve itself, by the convex-hull property of Béziers.
-fn outline_device_bounds(
-    segments: &[quorra_scene::Segment],
-    t: &DeviceTransform,
-) -> Option<(f32, f32, f32, f32)> {
-    use quorra_scene::Segment;
-    let mut bounds: Option<(f32, f32, f32, f32)> = None;
-    let mut extend = |p: Point| {
-        let q = apply(t, p);
-        bounds = Some(match bounds {
-            None => (q.x, q.y, q.x, q.y),
-            Some((x0, y0, x1, y1)) => (x0.min(q.x), y0.min(q.y), x1.max(q.x), y1.max(q.y)),
-        });
-    };
-    for segment in segments {
-        match *segment {
-            Segment::MoveTo(p) | Segment::LineTo(p) => extend(p),
-            Segment::CubicTo { c1, c2, to } => {
-                extend(c1);
-                extend(c2);
-                extend(to);
-            }
-            Segment::Close => {}
-        }
-    }
-    bounds
-}
 
 /// The target's own pixel rectangle — what a command has to reach to draw anything.
 ///
@@ -461,6 +435,11 @@ struct Encoder<'a> {
     scratch_charged: u64,
     /// What encode spent its time on, when the caller asked (ADR 0023).
     clock: EncodeClock,
+    /// One control-hull box per `(outline, linear part)`, so the 3 502 repeats of a
+    /// dense page's 818 letterforms add a translation instead of transforming 37 control
+    /// points again — 21 % of the encode, and [`hull`] carries the benchmark and the
+    /// argument that it changes no bit of any box.
+    hulls: hull::HullMemo,
 }
 
 /// Bytes to reserve for one instance stream, from the command count the frame budget
@@ -508,8 +487,6 @@ pub(crate) fn encode(
         visible: target_rect(viewport),
         coverage,
         winding: crate::winding::Sheet::default(),
-        // One pass over the commands before the walk: the lane a fill takes depends on
-        // how many *other* fills share its tile, which is not knowable from the fill.
         // One pass over the commands before the walk: the lane a fill takes depends on
         // how many *other* fills share its tile, which is not knowable from the fill
         // (ADR 0029).
@@ -564,6 +541,7 @@ pub(crate) fn encode(
         atlas_requested_bytes: 0,
         scratch_charged: 0,
         clock: EncodeClock::new(instrument),
+        hulls: hull::HullMemo::default(),
     };
 
     for (index, command) in commands.iter().enumerate() {
@@ -814,7 +792,7 @@ impl Encoder<'_> {
         // width times the limit away from it (§8.4.3.5), and a cap extends half the
         // width — which a limit of at least 1 already covers.
         let reach = stroke.width * 0.5 * stroke.miter_limit;
-        if let Some((x0, y0, x1, y1)) = outline_device_bounds(&stored.segments, &to_device)
+        if let Some((x0, y0, x1, y1)) = self.hulls.bounds(outline, &stored.segments, &to_device)
             && self.culled((x0 - reach, y0 - reach, x1 + reach, y1 + reach), &resolved)
         {
             return Ok(());
@@ -1039,7 +1017,7 @@ impl Encoder<'_> {
             .ok_or(RenderError::UnknownOutline { outline })?;
         let to_device = compose(transform, self.viewport);
         let resolved = self.resolve_clip(clip)?;
-        let bounds = outline_device_bounds(&stored.segments, &to_device);
+        let bounds = self.hulls.bounds(outline, &stored.segments, &to_device);
         // A *solid* fill's visibility follows from its outline alone, so it is decided
         // here — before the implicit group a non-Normal blend would otherwise wrap it
         // in, which is the expensive half of an off-screen blended fill. A shaded fill
