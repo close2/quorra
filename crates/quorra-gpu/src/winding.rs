@@ -14,11 +14,25 @@
 //! adding each round's quarter into the sheet — so **sample count costs time, never
 //! memory**, which is the trade a document renderer wants: the GPU is idle here
 //! (`execute` is tens of microseconds) and memory is what a zoomed page runs out of.
+//!
+//! # This file, and the three modules under it
+//!
+//! What is left here is the lane as the frame meets it: where the samples sit, whether
+//! the sheet is this lane's to clear, and [`render_into`]'s loop over panes and rounds.
+//! The rest is one module each — `sheet` for what the encoder built and what it costs,
+//! `buffers` for what the passes read, `passes` for the winding target and the two
+//! passes that write and read it.
 
 use crate::error::RenderError;
-use crate::outline::WindingVertex;
-use crate::pane::{Pane, Plan, TILE_STRIDE, Tile, vertex_floats};
 use crate::pipeline::{Kind, PipelineStore};
+
+mod buffers;
+mod passes;
+mod sheet;
+
+use buffers::{Buffers, PaneGlobals};
+pub(crate) use passes::WindingTexture;
+pub(crate) use sheet::Sheet;
 
 /// The winding texture's format. `f16` is exact on integers to 2048, which bounds the
 /// winding number this lane can represent — four hundred times any winding a real page
@@ -50,86 +64,6 @@ impl SheetUse {
     /// Whether the first pass of this frame may clear the sheet.
     fn clears_the_sheet(self) -> bool {
         matches!(self, Self::LaneAlone)
-    }
-}
-
-/// What the encoder built for the GPU lane this frame.
-#[derive(Debug, Default)]
-pub(crate) struct Sheet {
-    /// Every triangle of every tile, in sheet space, as the vertex buffer's floats.
-    pub vertices: Vec<f32>,
-    /// One entry per packed tile, each owning a run of `vertices`.
-    pub tiles: Vec<Tile>,
-    /// The scratch sheet's size in pixels.
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Sheet {
-    /// Adds a tile and the triangles that fill it.
-    ///
-    /// The tile records where its vertices went, which is what lets a pane draw its own
-    /// tiles' triangles and nobody else's (`crate::pane`).
-    pub(crate) fn push_tile(&mut self, rect: [f32; 4], even_odd: bool, vertices: &[WindingVertex]) {
-        // A tile with no triangles is not a tile: it would resolve to transparent,
-        // which the sheet already is there.
-        if vertices.is_empty() {
-            return;
-        }
-        // A frame with 2^32 vertices was refused by the byte budget long before it
-        // reached this cast, and saturating keeps the ranges monotonic if one ever does.
-        let first_vertex =
-            u32::try_from(self.vertices.len() / WindingVertex::FLOATS).unwrap_or(u32::MAX);
-        vertex_floats(vertices, &mut self.vertices);
-        self.tiles.push(Tile {
-            rect,
-            even_odd,
-            first_vertex,
-            vertex_count: u32::try_from(vertices.len()).unwrap_or(u32::MAX),
-        });
-    }
-
-    /// How this frame's tiles are cut into what the winding target holds at once.
-    pub(crate) fn plan(&self) -> Plan {
-        Plan::new(&self.tiles, [self.width, self.height])
-    }
-
-    /// Whether this frame drew anything through the GPU lane.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.tiles.is_empty() || self.vertices.is_empty()
-    }
-
-    /// Bytes this sheet costs on the device, for the frame budget: the winding texture
-    /// plus the vertex and instance buffers. Counted before anything is allocated,
-    /// because a buffer sized from document-derived arithmetic is exactly what
-    /// principle 3 says to check first.
-    ///
-    /// **A sheet with no tiles costs nothing, whatever extent it carries**, and that
-    /// condition lives here rather than at either caller. The extent is the *scratch*
-    /// sheet's, which both lanes share: `width` and `height` are filled in from it on
-    /// every frame that packs a tile, including one the GPU lane never ran. Pricing
-    /// the winding texture from that extent charges a CPU-lane frame for a texture
-    /// [`render_into`] is never asked to make — the frame is refused for bytes nobody
-    /// would have allocated, which is principle 6's failure with the sign flipped:
-    /// a page that draws, refused. Five real corpus pages were, at up to 1.2 GB
-    /// claimed against a 256 MiB budget for an empty sheet 16 384 texels wide.
-    #[allow(clippy::cast_possible_truncation)] // lengths of Vecs this frame just built
-    pub(crate) fn device_bytes(&self) -> u64 {
-        // Not merely an optimisation of the arithmetic below: `is_empty` is exactly the
-        // condition `Device::upload_scratch` allocates under, and saying it once is what
-        // stops the pre-flight and the allocation from disagreeing again.
-        if self.is_empty() {
-            return 0;
-        }
-        // Saturating throughout: the number this returns is *checked against* a budget,
-        // so a sheet too large to size must come back too large rather than wrap to
-        // something affordable. That is principle 3's rule about allocations derived
-        // from scene content, applied to the arithmetic that describes them.
-        // The winding target holds one *pane*, not the sheet (ADR 0028).
-        let winding = self.plan().target_bytes();
-        let vertices = (self.vertices.len() as u64).saturating_mul(4);
-        let tiles = (self.tiles.len() as u64).saturating_mul(TILE_STRIDE);
-        winding.saturating_add(vertices).saturating_add(tiles)
     }
 }
 
@@ -219,7 +153,7 @@ pub(crate) fn render_into(
     for (index, pane) in plan.panes.iter().enumerate() {
         for (round, group) in buffers.groups.iter().enumerate() {
             let globals = group.for_pane(gpu, queue, pipelines, sheet, pane);
-            accumulate(
+            passes::accumulate(
                 &mut encoder,
                 &winding_view,
                 &winding_pipeline,
@@ -227,7 +161,7 @@ pub(crate) fn render_into(
                 &globals,
                 pane,
             );
-            resolve(
+            passes::resolve(
                 &mut encoder,
                 coverage_view,
                 &resolve_pipeline,
@@ -246,361 +180,6 @@ pub(crate) fn render_into(
     Ok(())
 }
 
-/// The winding target, kept across frames.
-///
-/// Not a pool: one texture, because a frame has one sheet. It grows to the largest
-/// extent any frame has needed — a viewer that zooms in and out repeatedly should not
-/// pay an allocation each time it crosses a size it has already seen — and the bytes
-/// are still charged to every frame that uses them, because what the frame *needs* is
-/// what a budget is about, not what happens to be resident.
-///
-/// **The pane being drawn is the top-left of it**, whatever the rest of it is. Growing
-/// and never shrinking is what makes that a thing to state rather than a tautology: a
-/// smaller frame after a larger one gets a texture with room to spare, and `fs_resolve`
-/// reads the pane's texels out of this texture's top-left corner. [`accumulate`]'s
-/// viewport is what puts them there; `tests/frame_independence.rs` is what keeps them
-/// there.
-#[derive(Debug, Default)]
-pub(crate) struct WindingTexture {
-    held: Option<(wgpu::Extent3d, wgpu::Texture, wgpu::TextureView)>,
-}
-
-impl WindingTexture {
-    /// A view of a texture at least `extent` in both dimensions.
-    fn view_for(&mut self, gpu: &wgpu::Device, extent: wgpu::Extent3d) -> &wgpu::TextureView {
-        let fits = self
-            .held
-            .as_ref()
-            .is_some_and(|(held, _, _)| held.width >= extent.width && held.height >= extent.height);
-        if !fits {
-            let size = wgpu::Extent3d {
-                width: self
-                    .held
-                    .as_ref()
-                    .map_or(extent.width, |(held, _, _)| held.width.max(extent.width)),
-                height: self
-                    .held
-                    .as_ref()
-                    .map_or(extent.height, |(held, _, _)| held.height.max(extent.height)),
-                depth_or_array_layers: 1,
-            };
-            let texture = gpu.create_texture(&wgpu::TextureDescriptor {
-                label: Some("quorra winding"),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: WINDING_FORMAT,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.held = Some((size, texture, view));
-        }
-        // `held` is `Some` on both paths — it either fitted or was just replaced — and
-        // saying so with a match rather than an `expect` keeps the invariant in the
-        // type rather than in a panic message.
-        match self.held.as_ref() {
-            Some((_, _, view)) => view,
-            None => unreachable!("the branch above assigns `held` when it does not fit"),
-        }
-    }
-}
-
-/// One round's winding pass for one pane: clear, then one draw per sample of the group.
-///
-/// The pane's extent is **not** the attachment's size: [`WindingTexture`] is kept between
-/// frames and is at least as large as any pane it has held, and the frame's own panes
-/// differ in size from one another. See the viewport below for what that costs if it is
-/// forgotten.
-#[allow(clippy::cast_precision_loss)] // an extent bounded by the adapter's texture limit
-fn accumulate(
-    encoder: &mut wgpu::CommandEncoder,
-    winding_view: &wgpu::TextureView,
-    pipeline: &wgpu::RenderPipeline,
-    buffers: &Buffers,
-    globals: &PaneGlobals,
-    pane: &Pane,
-) {
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("quorra winding"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: winding_view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                // Every round starts from no winding at all: the sheet accumulates
-                // coverage, the winding texture does not accumulate across rounds.
-                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
-    // **The pane is the top-left of this texture, not the whole of it.** `vs_winding`
-    // divides by the *pane's* size to reach clip space, and clip space spans whatever is
-    // attached — so with a texture kept from a larger frame, and no viewport, every
-    // pane pixel would be written `held / pane` times further down and across than the
-    // resolve pass reads it. The viewport is what makes the two agree, and it makes them
-    // agree without either shader learning the size of a texture that is nobody's
-    // business but this module's.
-    //
-    // Forgetting it is the caller's `QUORRA_FEEDBACK.md` §11: a page zoomed past 1000%
-    // and back drew one glyph's coverage under another glyph's quad — the right place,
-    // the right size, the wrong letter — because the resolve read the sheet's
-    // coordinates out of a texture the winding pass had stretched over a larger one.
-    pass.set_viewport(
-        0.0,
-        0.0,
-        pane.size[0].max(1) as f32,
-        pane.size[1].max(1) as f32,
-        0.0,
-        1.0,
-    );
-    pass.set_pipeline(pipeline);
-    pass.set_vertex_buffer(0, buffers.vertices.slice(..));
-    for bind_group in &globals.samples {
-        pass.set_bind_group(0, bind_group, &[]);
-        // This pane's tiles' triangles, and only those. Under ADR 0027 every band drew
-        // every vertex in the frame and the shader mapped the outsiders out of clip
-        // space, which was affordable while a band was a shelf of the sheet; a pane can
-        // be a single large tile, so the frame would have paid its whole vertex buffer
-        // once per tile. The runs cost nothing to keep — the encoder appends a tile's
-        // vertices contiguously — and in sheet order they coalesce back to one draw.
-        for run in &pane.vertex_runs {
-            pass.draw(run.clone(), 0..1);
-        }
-    }
-}
-
-/// One round's resolve: each tile's quad turns four samples into a quarter of its
-/// coverage, added to whatever earlier rounds contributed.
-#[allow(clippy::too_many_arguments)] // the pass's inputs, named once at the one call
-fn resolve(
-    encoder: &mut wgpu::CommandEncoder,
-    coverage_view: &wgpu::TextureView,
-    pipeline: &wgpu::RenderPipeline,
-    buffers: &Buffers,
-    globals: &PaneGlobals,
-    pane: &Pane,
-    winding_source: &wgpu::BindGroup,
-    first: bool,
-) {
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("quorra winding resolve"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: coverage_view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                // Cleared once, and only when this lane owns the sheet: the CPU lane's
-                // bytes are already in it otherwise, and a clear would take them out.
-                load: if first {
-                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                } else {
-                    wgpu::LoadOp::Load
-                },
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
-    pass.set_pipeline(pipeline);
-    pass.set_bind_group(0, &globals.resolve, &[]);
-    pass.set_bind_group(1, winding_source, &[]);
-    pass.set_vertex_buffer(0, buffers.tiles.slice(..));
-    // This pane's tiles, and only those: the winding target holds this pane's rectangle,
-    // so another pane's quad would read texels that belong to somebody else.
-    let first_tile = pane.first_tile;
-    pass.draw(0..4, first_tile..first_tile.saturating_add(pane.tile_count));
-}
-
-/// One group of four samples, as the offsets they place their geometry by.
-///
-/// The bind groups are built per pane rather than held here: the uniform carries the
-/// pane, so one per sample would be one per pane per sample, and building them where
-/// they are used keeps the pane from having to be threaded into a field.
-struct Group {
-    offsets: Vec<[f32; 2]>,
-}
-
-impl Group {
-    /// This group's uniforms for one pane: one per sample for the winding pass, and one
-    /// for the resolve, which reads the sheet size and the pane and nothing else.
-    fn for_pane(
-        &self,
-        gpu: &wgpu::Device,
-        queue: &wgpu::Queue,
-        pipelines: &PipelineStore,
-        sheet: &Sheet,
-        pane: &Pane,
-    ) -> PaneGlobals {
-        let layout = pipelines.winding_layout();
-        let samples = self
-            .offsets
-            .iter()
-            .enumerate()
-            .map(|(channel, offset)| {
-                globals_bind_group(gpu, queue, &layout, sheet, *offset, channel, pane)
-            })
-            .collect();
-        let resolve = globals_bind_group(gpu, queue, &layout, sheet, [0.0, 0.0], 0, pane);
-        PaneGlobals { samples, resolve }
-    }
-}
-
-/// One group's uniforms, bound to one pane.
-struct PaneGlobals {
-    samples: Vec<wgpu::BindGroup>,
-    resolve: wgpu::BindGroup,
-}
-
-/// Everything the two passes read, built once per frame.
-struct Buffers {
-    vertices: wgpu::Buffer,
-    tiles: wgpu::Buffer,
-    groups: Vec<Group>,
-}
-
-impl Buffers {
-    #[allow(clippy::cast_precision_loss)] // sheet extents are far below f32's exact range
-    #[allow(clippy::arithmetic_side_effects)] // a Vec length times its element count
-    fn new(
-        gpu: &wgpu::Device,
-        queue: &wgpu::Queue,
-        sheet: &Sheet,
-        plan: &Plan,
-        samples: u32,
-    ) -> Self {
-        let vertices = create_buffer(
-            gpu,
-            queue,
-            "quorra winding vertices",
-            &to_bytes(&sheet.vertices),
-            wgpu::BufferUsages::VERTEX,
-        );
-        // Tiles go up in the plan's order, so a pane's instances are one contiguous
-        // range and its resolve is one draw. The vertices stay where the encoder put
-        // them — permuting the largest buffer in the frame would cost more than the
-        // per-tile draw ranges the plan carries instead.
-        let mut tile_data: Vec<f32> = Vec::with_capacity(sheet.tiles.len() * 6);
-        for index in &plan.order {
-            let tile = &sheet.tiles[*index as usize];
-            tile_data.extend_from_slice(&tile.rect);
-            tile_data.push(if tile.even_odd { 1.0 } else { 0.0 });
-            tile_data.push(samples as f32);
-        }
-        let tiles = create_buffer(
-            gpu,
-            queue,
-            "quorra winding tiles",
-            &to_bytes(&tile_data),
-            wgpu::BufferUsages::VERTEX,
-        );
-
-        let groups = sample_offsets(samples)
-            .chunks(SAMPLES_PER_PASS as usize)
-            .map(|chunk| Group {
-                offsets: chunk.to_vec(),
-            })
-            .collect();
-
-        Self {
-            vertices,
-            tiles,
-            groups,
-        }
-    }
-}
-
-/// The 48-byte uniform one winding draw reads.
-#[allow(clippy::cast_precision_loss)] // sheet extents are far below f32's exact range
-fn globals_bind_group(
-    gpu: &wgpu::Device,
-    queue: &wgpu::Queue,
-    layout: &wgpu::BindGroupLayout,
-    sheet: &Sheet,
-    offset: [f32; 2],
-    channel: usize,
-    pane: &Pane,
-) -> wgpu::BindGroup {
-    let mut mask = [0.0_f32; 4];
-    mask[channel.min(3)] = 1.0;
-    let data = [
-        sheet.width.max(1) as f32,
-        sheet.height.max(1) as f32,
-        offset[0],
-        offset[1],
-        mask[0],
-        mask[1],
-        mask[2],
-        mask[3],
-        pane.origin[0] as f32,
-        pane.origin[1] as f32,
-        pane.size[0].max(1) as f32,
-        pane.size[1].max(1) as f32,
-    ];
-    let buffer = create_buffer(
-        gpu,
-        queue,
-        "quorra winding globals",
-        &to_bytes(&data),
-        wgpu::BufferUsages::UNIFORM,
-    );
-    gpu.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("quorra winding globals"),
-        layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
-    })
-}
-
-/// A buffer with `data` in it. Zero-length data still makes a one-element buffer:
-/// wgpu refuses a zero-sized buffer, and a frame with no triangles is a legitimate
-/// frame that must still reach the passes and draw nothing.
-fn create_buffer(
-    gpu: &wgpu::Device,
-    queue: &wgpu::Queue,
-    label: &str,
-    data: &[u8],
-    usage: wgpu::BufferUsages,
-) -> wgpu::Buffer {
-    let size = (data.len() as u64).max(4);
-    let buffer = gpu.create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size,
-        usage: usage | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    if !data.is_empty() {
-        queue.write_buffer(&buffer, 0, data);
-    }
-    buffer
-}
-
-/// Floats as the little-endian bytes a wgpu buffer takes.
-///
-/// A copy rather than a cast: `#![forbid(unsafe_code)]` rules out reinterpreting the
-/// slice, and the crate takes no `bytemuck` (`deny.toml`'s posture is that a
-/// dependency has to earn its place). The copy is one `memcpy` per frame over data
-/// the encoder has just built anyway, which no measurement has ever noticed.
-fn to_bytes(values: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(size_of_val(values));
-    for value in values {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
-}
-
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -609,7 +188,7 @@ fn to_bytes(values: &[f32]) -> Vec<u8> {
     clippy::cast_possible_truncation
 )] // test-file policy as in `raster.rs`: a fixture that cannot run must fail loudly
 mod tests {
-    use super::{Sheet, TILE_STRIDE, render_into, sample_offsets};
+    use super::{Sheet, render_into, sample_offsets};
     use crate::device::Device;
     use crate::outline::QuadOutline;
     use crate::startup::Options;
@@ -800,45 +379,6 @@ mod tests {
         assert!(
             sum.abs() < 1e-5,
             "the grid is balanced about the centre: {sum}"
-        );
-    }
-
-    /// A sheet with no tiles costs nothing, however large the extent it carries.
-    ///
-    /// The extent is the scratch sheet's and arrives on every frame that packs a tile,
-    /// so this is the ordinary shape of a CPU-lane frame — not an edge case. Charging
-    /// it `width × height × 8` for an `rgba16float` texture nothing asks for is what
-    /// refused five real pages; `tests/coverage_lanes.rs` holds the same invariant end
-    /// to end.
-    #[test]
-    fn a_sheet_with_no_tiles_costs_nothing_however_large_its_extent() {
-        let empty = Sheet {
-            width: 16384,
-            height: 8760,
-            ..Sheet::default()
-        };
-        assert!(empty.is_empty());
-        assert_eq!(empty.device_bytes(), 0);
-
-        // And the target is priced the moment a tile makes the texture real. This sheet
-        // is 64 × 4, well inside the pane budget, so the target is the whole of it —
-        // which is what makes this the same arithmetic it was before panes.
-        let mut one_tile = Sheet {
-            width: 64,
-            height: 4,
-            ..Sheet::default()
-        };
-        let mut vertices = Vec::new();
-        QuadOutline::from_segments(&rect_path(0.0, 0.0, 4.0, 4.0)).append_triangles(
-            |p| [p.x, p.y],
-            [0.0, 0.0, 4.0, 4.0],
-            &mut vertices,
-        );
-        one_tile.push_tile([0.0, 0.0, 4.0, 4.0], false, &vertices);
-        let vertex_count = vertices.len() as u64;
-        assert_eq!(
-            one_tile.device_bytes(),
-            64 * 4 * 8 + vertex_count * crate::outline::WindingVertex::STRIDE + TILE_STRIDE
         );
     }
 }
