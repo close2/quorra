@@ -28,6 +28,31 @@ const WINDING_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Samples per pass: one per channel of the winding texel.
 pub(crate) const SAMPLES_PER_PASS: u32 = 4;
 
+/// Who else has already written into the coverage sheet this lane draws onto
+/// (ADR 0016).
+///
+/// One texture, two producers: the CPU lane uploads its rasterised tiles into the sheet
+/// and this lane draws its own into the gaps the packer left between them. Which of the
+/// two arrives first is the caller's fact, not this module's, and it decides exactly one
+/// thing here — whether the first pass may clear the texture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SheetUse {
+    /// This lane owns the whole texture: nothing else put bytes in it, so the first
+    /// pass clears it and the rest add to what it drew.
+    LaneAlone,
+    /// The CPU lane's coverage bytes are in the sheet already. Each tile's quad covers
+    /// only its own rectangle, so this lane's tiles land beside those bytes without
+    /// touching them — and a clear would take them out.
+    BesideCpuBytes,
+}
+
+impl SheetUse {
+    /// Whether the first pass of this frame may clear the sheet.
+    fn clears_the_sheet(self) -> bool {
+        matches!(self, Self::LaneAlone)
+    }
+}
+
 /// What the encoder built for the GPU lane this frame.
 #[derive(Debug, Default)]
 pub(crate) struct Sheet {
@@ -131,9 +156,8 @@ pub(crate) fn sample_offsets(count: u32) -> Vec<[f32; 2]> {
 
 /// Draws `sheet`'s tiles into `coverage_view`, which is the frame's scratch sheet.
 ///
-/// `clear` says whether this pass owns the whole texture: false when the CPU lane
-/// uploaded bytes into the same sheet, and then the tiles drawn here land beside those
-/// bytes without touching them — each tile's quad covers only its own rectangle.
+/// [`SheetUse`] says whether this lane has the sheet to itself, which is what decides
+/// whether the first pass clears it.
 ///
 /// # Errors
 ///
@@ -148,7 +172,7 @@ pub(crate) fn render_into(
     coverage_view: &wgpu::TextureView,
     sheet: &Sheet,
     samples: u32,
-    clear: bool,
+    sheet_use: SheetUse,
     max_dimension: u32,
 ) -> Result<(), RenderError> {
     if sheet.width > max_dimension || sheet.height > max_dimension {
@@ -214,7 +238,7 @@ pub(crate) fn render_into(
                 // The coverage sheet is cleared once, by the first pass that touches
                 // it, and only when this lane owns it: every later pane and round adds
                 // to what is there.
-                clear && index == 0 && round == 0,
+                sheet_use.clears_the_sheet() && index == 0 && round == 0,
             );
         }
     }
@@ -646,7 +670,7 @@ mod tests {
             &view,
             &sheet,
             samples,
-            true,
+            super::SheetUse::LaneAlone,
             device.limits().max_target_size,
         )
         .expect("the sheet is inside every limit");

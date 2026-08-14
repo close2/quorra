@@ -32,7 +32,7 @@ use quorra_scene::{
 };
 
 use crate::atlas::AtlasStore;
-use crate::compose::{self, Executor, Region};
+use crate::compose::{self, Executor, PassLoad, Region};
 use crate::encode::{self, ChildOp, Encoded, ImageOp, MaskPlan, PaintSource, ShadedOp};
 use crate::error::{DeviceError, RenderError};
 use crate::frame::{Counters, Frame, Payload, Raster, TimingProvenance, Timings};
@@ -899,7 +899,13 @@ impl Device {
         } else if flat {
             // is_flat checked: a flat root holds drawable ops only.
             let root_ops = compose::run_ops(&encoded.root.ops);
-            executor.draw_pass(&mut recorder, &target_view, target_format, true, &root_ops)?;
+            executor.draw_pass(
+                &mut recorder,
+                &target_view,
+                target_format,
+                PassLoad::Clear,
+                &root_ops,
+            )?;
         } else {
             executor.realise_masks(&mut recorder)?;
             let root = executor.render_plan(&mut recorder, 0, None)?;
@@ -1188,7 +1194,11 @@ impl Device {
                 &view,
                 &winding,
                 self.coverage_samples,
-                scratch.data.is_empty(),
+                if scratch.data.is_empty() {
+                    crate::winding::SheetUse::LaneAlone
+                } else {
+                    crate::winding::SheetUse::BesideCpuBytes
+                },
                 self.limits.max_target_size,
             )?;
         }

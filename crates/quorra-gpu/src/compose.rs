@@ -26,6 +26,21 @@ use crate::layers::LayerPool;
 use crate::mask::{MaskPlacement, Realised};
 use crate::pipeline::Kind;
 
+/// What a content pass does with the pixels already in the attachment it draws onto.
+///
+/// The first pass onto a plan's accumulator clears it: §11.4.5 begins a group over a
+/// fully transparent initial backdrop, and §3 hands the caller pixels over one. Every
+/// later pass onto the same accumulator keeps what the earlier ones put there, because
+/// the painter's order is passes as much as it is instances — so this says which pass
+/// this is, and never a preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PassLoad {
+    /// The first pass onto this attachment: clear to transparent, then draw.
+    Clear,
+    /// A later pass: load what is there and draw over it.
+    Keep,
+}
+
 /// One drawable item of a pass: an instanced lane batch, or a single-quad op
 /// (image, shading, mesh — ADR 0011's rare cases).
 pub(crate) enum RunOp {
@@ -412,7 +427,11 @@ impl Executor<'_> {
                         recorder,
                         &view,
                         wgpu::TextureFormat::Rgba8Unorm,
-                        !cleared,
+                        if cleared {
+                            PassLoad::Keep
+                        } else {
+                            PassLoad::Clear
+                        },
                         &run,
                     )?;
                     cleared = true;
@@ -427,7 +446,7 @@ impl Executor<'_> {
                             recorder,
                             &view,
                             wgpu::TextureFormat::Rgba8Unorm,
-                            true,
+                            PassLoad::Clear,
                             &[],
                         )?;
                         cleared = true;
@@ -447,7 +466,13 @@ impl Executor<'_> {
             }
         }
         if !cleared {
-            self.draw_pass(recorder, &view, wgpu::TextureFormat::Rgba8Unorm, true, &[])?;
+            self.draw_pass(
+                recorder,
+                &view,
+                wgpu::TextureFormat::Rgba8Unorm,
+                PassLoad::Clear,
+                &[],
+            )?;
         }
         self.region = outer;
         Ok(Rendered {
@@ -516,7 +541,7 @@ impl Executor<'_> {
         recorder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         format: wgpu::TextureFormat,
-        clear: bool,
+        load: PassLoad,
         ops: &[RunOp],
     ) -> Result<(), RenderError> {
         let (ready, needed) = self.prepare_run(ops)?;
@@ -540,10 +565,9 @@ impl Executor<'_> {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     // Render onto transparency, always (§3; §11.4.7).
-                    load: if clear {
-                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                    } else {
-                        wgpu::LoadOp::Load
+                    load: match load {
+                        PassLoad::Clear => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        PassLoad::Keep => wgpu::LoadOp::Load,
                     },
                     store: wgpu::StoreOp::Store,
                 },
