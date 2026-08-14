@@ -215,11 +215,17 @@ pub struct Counters {
     /// composited, a copy of the pixels it covers is alive beside it, because a pass
     /// cannot read the attachment it writes.
     ///
-    /// It is the number `Limits::max_frame_bytes` is spent on for a page of nested
-    /// artwork, which is why it is a counter rather than an inference: a frame that
-    /// reports 4 here allocated 4, whatever its group count says. **A count, not a size**
-    /// — since ADR 0036 the textures differ in size, so this says how many existed at
-    /// once and `Timings`/the budget refusal say what they cost.
+    /// **The unit is textures alive at one instant, and it is not bytes.** It was never
+    /// bytes, but until ADR 0036 every layer texture was the size of the target, so
+    /// multiplying this by the target's size answered the budget question by accident.
+    /// It no longer does — the textures differ in size — and the number
+    /// `Limits::max_frame_bytes` is spent on is the budget refusal's own arithmetic,
+    /// not anything derivable from here. What this is good for is unchanged: a frame
+    /// that reports 4 allocated 4, whatever its group count says.
+    ///
+    /// A layer culled by ADR 0041 allocates nothing and is counted by
+    /// [`layers_culled`](Counters::layers_culled) instead, so the two move in opposite
+    /// directions on the same page.
     pub layer_textures: u32,
 }
 

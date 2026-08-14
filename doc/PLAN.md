@@ -16,6 +16,48 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A rectangle costs a fifth of a microsecond more as a `Fill` than as a `Rect`, and the
+lane that would close the gap is already written on the wrong half of the fill path**
+(2026-08-14, `examples/rect_lane.rs`, the caller's `QUORRA_FEEDBACK.md` §19). Their corpus
+emits no `Command::Rect` at all — every rectangle a document draws arrives as a `Fill`
+whose outline happens to be one — and they asked for the one number only this side can
+produce, at the two sizes their profile says a page contains. Three scenes drawing the
+identical device rectangles, timed **round-robin** because contiguous per-scene blocks put
+a factor of three between two runs of the same binary at load 85. Minima over five runs at
+load average 2.8–4.5:
+
+| commands | lane | RADV | llvmpipe |
+|---:|---|---:|---:|
+| 12 | `rect` | 0.0006–0.0012 ms | 0.0010–0.0013 ms |
+| 12 | `fill`, one outline many placements | 0.0023–0.0049 (3.3–4.1×) | 0.0030–0.0041 (2.7–3.5×) |
+| 12 | `fill`, an outline each | 0.0026–0.0053 (3.7–4.4×) | 0.0033–0.0047 (3.3–3.9×) |
+| 4 320 | `rect` | 0.083–0.103 ms | 0.100–0.110 ms |
+| 4 320 | `fill`, one outline many placements | 0.679–0.804 (7.7–8.4×) | 0.791–0.916 (7.7–8.6×) |
+| 4 320 | `fill`, an outline each | 0.991–1.438 (11.4–14.0×) | 1.855–2.203 (18.0–21.0×) |
+
+The ratios agree across the adapters for every row but the last, and the milliseconds do
+not travel at all — `encode` is host work running identical code on both, so that last row
+is the machine rather than the lane: llvmpipe is rasterising the previous frame on the same
+cores and caches between our measurements. It is the oldest rule in `HANDOVER.md` arriving
+in a new place — never publish a crossover as a constant.
+
+Read as a per-rectangle cost it is **0.13–0.19 µs for a reused outline and 0.21–0.49 µs for
+a placed-once one**, so the median twelve-command page saves two to four *microseconds* and
+only a page of thousands of rectangles saves the 0.6–2.1 ms that would matter against a
+2.84–3.38 ms frame. §19's other condition is now a property the example prints rather than
+a claim: **0 of 8 022 576 bytes differ** between the lanes, at both sizes, on both adapters,
+for both fill variants.
+
+The finding the measurement did not go looking for: `StoredOutline::rect_hint` is computed
+for every outline at upload (`resources.rs:150`) and `encode.rs:1473` uses it to send a
+*shaded* fill of a rectangular outline down the analytic lane — but a **solid** fill
+returns into `fill_solid` at `encode.rs:1458` before that check is reached, and takes the
+atlas or the coverage path like any other shape (the example's counters show 12, 280 and
+4 320 distinct atlas keys where the rectangle lane reports none). Output is byte-identical,
+so it is a defect of symmetry rather than of correctness — but most of what §19 proposes
+buying with a recogniser on the *caller's* side is available on ours, without any scene
+vocabulary changing. It is in `HANDOVER.md`'s list.
+
 **§6.2 has its number at last, and the frame it describes is CPU-bound** (2026-08-14,
 `examples/surface_measure.rs` and ADR 0043): the brief's success criterion — a third of
 the CPU backend's 5.9 ms on a dense text page at 1191×1684, *presenting to a surface* —

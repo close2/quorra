@@ -78,20 +78,29 @@ fix their own §22.7 predicted and wants to re-run first thing after a bump. Twe
 commits are local. Their `QUORRA_FEEDBACK.md` has three sections waiting on this side,
 and two of them cost an afternoon:
 
+**All three are drafted** in `doc/feedback-answers-draft.md` (2026-08-14) — a draft for the
+owner to carry across, since we never edit their tree. What each one says:
+
 - **§15** asks whether the coverage lane bounds a clipped fill by its clip's extent, and
   offers to close itself if yes. It is yes: every coverage tile is `shape ∩ clip ∩
-  target` (`encode.rs` — the footprint comment and `residue_intersection`). The answer
-  is a written reply with that evidence, and it should cross-reference item 5 below,
-  because §15 and the tiling ceiling are the same seam seen from two sides.
-- **§19** waits on one number: what a `Command::Rect` costs against a `Fill` of the same
-  four-edge outline, at the median 12 and p99 4 320 commands. Headless, measurable here,
-  a morning with `Timings` and two scenes.
-- **§22.5** (a process note, not code): `Counters::layer_textures` changed meaning while
-  keeping its name and cost them two sentences of wrong prose. Decide rename-vs-document
-  and answer.
+  target` (`encode.rs:2151` `visible_tile`, `:2099` `coverage_tile`, `:1281`
+  `residue_intersection`, `:206` for the image lane). Its secondary ask — can the scene
+  say "this fill is bounded by this rectangle" — is answered by the same fact: a
+  rectangular clip collapses to a device rectangle at `encode.rs:433` and never becomes a
+  mask, so the clip already *is* the bound. The draft cross-references item 5, because
+  §15 and the tiling ceiling are the same seam seen from two sides.
+- **§19** is measured: `examples/rect_lane.rs`, numbers and interpretation in `PLAN.md`'s
+  2026-08-14 entry. Median page: microseconds, so nothing. A page of thousands of
+  rectangles: 0.6–1.8 ms. Which of those the corpus actually has is a row their profile
+  does not carry, and the draft asks for it before either side writes a recogniser.
+- **§22.5** (a process note, not code): the recommendation is *document*, because the name
+  `layer_textures` always meant what it still means and what was wrong was a derived claim
+  in our own rustdoc that theirs inherited. The rustdoc is corrected in the same commit,
+  and the draft states the rule — rename when the *unit* changes, date a correction when a
+  derived claim does, and name the counter in the ADR that moves its value.
 
 Push (or hand the owner the push), deliver the answers, and let their corpus re-baseline
-absorb ADRs 0036–0042 in one round instead of five.
+absorb ADRs 0036–0043 in one round instead of six.
 
 ### 3. §21.2 — a tiny outline flattens to its inscribed polygon
 
@@ -141,6 +150,15 @@ existing mechanism — and it is worth its own measurement before its own design
 The 2026-08-13 review's code-health pass, so a fresh session can pick one without
 re-auditing. Each is one sitting:
 
+- **A solid fill of a rectangular outline does not take the rectangle lane**, and a
+  shaded one does. `StoredOutline::rect_hint` is computed for every outline at upload
+  (`resources.rs:150`) and read at `encode.rs:1473` — but only on the shading arm; a solid
+  paint returns into `fill_solid` at `encode.rs:1458` first and takes the atlas or the
+  coverage path. Output is byte-identical either way (`examples/rect_lane.rs` checks it),
+  so this is symmetry rather than correctness — but it is worth **0.13–0.49 µs a
+  rectangle**, it is where most of the caller's §19 lives, and it is four lines against a
+  recogniser they would otherwise write. Take it with a corpus run: it moves which lane a
+  page takes, and `HANDOVER`'s "the corpus is part of a change" trap applies exactly.
 - **`SceneError` is a tenant of `scene.rs`** (~180 lines at `scene.rs:392-570`) while
   serving the whole crate — CLAUDE.md names this exact anti-pattern, and `quorra-gpu`'s
   `error.rs` is the in-tree example of the fix.
