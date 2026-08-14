@@ -111,17 +111,25 @@ few segments per turn. Small, self-contained in `raster.rs`, and its evidence al
 exists: the caller's `sub_pixel_marks` example rows, plus a corpus run that must not
 move except where it should. A good first item for a fresh session.
 
-### 4. Split `encode.rs` along its stated seams — **before** the tiling work
+### 4. Split `encode.rs` along its stated seams — **done** (2026-08-14)
 
-2 600 production lines, one ~1 640-line `impl Encoder`, eleven of the workspace's
-thirteen `too_many_arguments` allows, and a module comment that enumerates
-responsibilities instead of naming one. The seams are already visible in the file:
-`ClipResolver`, `ScratchPacker`, the rare-case lane encoders, and the thrice-repeated
-verbatim `ChildOp` construction (`encode.rs:1134/1603/1656`) that wants one named
-helper. ADR 0042 just did the same to `pipeline.rs` (779 → 460 plus two named halves);
-this is the same move. It goes before item 5 **because item 5 lands exactly there** —
-the tiling logic is `encode.rs`'s tenant, and redesigning it inside the current file is
-how threading-style growth continues.
+Six commits over two rounds, on the `pipeline.rs`/`pipeline/` layout ADR 0042 used:
+`encode.rs` 2 852 → 2 060, with `encode/scratch.rs` (307, the coverage sheet and its
+packer), `encode/clips.rs` (187, a chain resolved to a rectangle and a residue) and
+`encode/rare.rs` (401, ADR 0011's image and shading quads) beside it. Each is a pure
+move — same bodies, same signatures, same comments, same test names — and what is left
+in `encode.rs` is the walk and the two lanes the brief is about. The thrice-repeated
+verbatim `ChildOp` construction is now `ChildOp::implicit_blend_group`; the three sites
+were compared field by field first and were identical in all nine. Item 5 still lands
+here, which is why this went before it.
+
+**One thing the comparison found and did not fix**, because it wants the CPU oracle on a
+page that draws it rather than a one-line edit: `encode_stroke` wraps a non-Normal blend
+in §11.3.5's implicit one-element group on the blend mode alone, where `encode_fill` and
+`encode_image` also require `self.style == DrawStyle::Over` — on the stated argument that
+inside a knockout group every mode degenerates to Normal (§11.4.6 with §11.3.6's αb = 0).
+So a blended stroke inside a knockout group composites today as an ordinary blend of a
+child layer instead of as §11.4.6's replacement.
 
 ### 5. A page-sized coverage tile per clipped shape — **not** multi-sheet passes
 
