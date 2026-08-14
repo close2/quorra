@@ -58,7 +58,7 @@ we never edit their tree:
   date a correction when a derived claim does, name the counter in the ADR that moves its
   value.
 
-Deliver the answers and let their corpus re-baseline absorb the eight commits in one round.
+Deliver the answers and let their corpus re-baseline absorb the twenty commits in one round.
 The draft's release-note section doubles as what the bump delivers.
 
 ### 2. A page-sized coverage tile per clipped shape — **not** multi-sheet passes
@@ -66,24 +66,34 @@ The draft's release-note section doubles as what the bump delivers.
 *(This was **item 5** while three finished items still stood above it, and ADR 0048 and
 `doc/feedback-answers-draft.md` both cite it under that number.)*
 
-Three pages at 4× and one at scale 1 refuse with `ScratchExhausted` — the coverage sheet
-against the adapter's 16 384 limit, a different ceiling from the frame budget. **It is the
-only reason any frame of the corpus is refused.** (A fourth refusal at 4×,
-`22060_A1_01_Plans.pdf`, is a third budget again: 548 MB of resident images against
-`max_resource_bytes`, refused at upload rather than at the frame.)
+Two pages at 4× refuse with `ScratchExhausted` — `bug1703683_page2_reduced.pdf` and
+`issue1905.pdf`, the coverage sheet against the adapter's 16 384 limit, a different ceiling
+from the frame budget. **It is the only *budget* that refuses a frame we could otherwise
+draw.** The other three refusals of their corpus are each something else: 548 MB of resident
+images against `max_resource_bytes` (`22060_A1_01_Plans.pdf`, at upload rather than at the
+frame), and two clause refusals that are correct — a four-component blending colour space
+and a non-isolated knockout group. Counted on 2026-08-15; the earlier "three at 4× and one
+at scale 1, the only reason any frame is refused" was their tree at an earlier revision,
+and was too strong in both halves.
 
 This item used to read "a frame would have to use more than one sheet". **That was measured
-and refused**: the three pages have placed 194, 240 and 253 MB of tiles against a 268 MiB
-budget when they run out of *height*, and the tile that does not fit is 2 448 × 3 168 or
+and refused**: the pages have placed 194, 240 and 253 MB of tiles against a 268 MiB budget
+when they run out of *height*, and the tile that does not fit is 2 448 × 3 168 or
 4 763 × 7 204. A second sheet takes `bug1721218_reduced` to 287 013 092 bytes — it refuses
 again, on bytes — and lets the other two draw at a quarter of a gigabyte of per-frame
 coverage upload each. That is a page "drawn" at a cost §6.2 would call a failure.
 
+**ADR 0049 took the other half of this item and left this one untouched, deliberately.**
+The residue is no longer re-rasterised per command — that was 17.3 ms of artwork's 65.6 ms
+of geometry, *not* the whole of the "35 ms of a 43 ms frame" this item used to claim — and
+artwork's encode geometry went 37.8 → 28.9 ms. But a *region* is host memory that never
+reaches the sheet, and `Counters::tiles` is unchanged on every archetype, which is the
+evidence that no refusal moved.
+
 So the ceiling that bites is not the sheet's dimension: it is that a clipped shape becomes
 one coverage tile of its own device bounds, and at 4× a full-page clipped shape is a
 full-page tile. The work is on the *tiling* side — ADR 0028's panes are the nearest existing
-mechanism. Its steady-state cost is the artwork row in `PLAN.md`: **35 ms of a 43 ms frame
-re-rasterising the same residue coverage every frame.**
+mechanism.
 
 *(A paragraph filed here since ADR 0048 — a page whose glyph tiles overflow the atlas
 re-encodes on every frame — has been **removed rather than moved**. ADR 0050 did it, and
@@ -94,12 +104,15 @@ claim was also too broad, which is its own lesson and is now a trap below.)*
 
 - **`device.rs` hosts ramp sampling** (`sample_ramp`, `ramp_color_at`, `RAMP_RESOLUTION`)
   outside its stated responsibility — a candidate seam whenever that file is next open.
-  `device.rs` is 2 183 lines and `encode.rs` 2 342, which since ADR 0051's round are the
+  `device.rs` is 2 215 lines and `encode.rs` 2 389, which since ADR 0051's round are the
   only two source files left far past the ~500-line smell; they were held out of that
   round because other work had them open, not because they are irreducible.
-- **`tests/retained_frame.rs` is about 1 100 lines** after ADR 0050. It is one
-  responsibility and says so, but splitting it wants a `tests/common/mod.rs` for the
-  half-dozen fixtures three test files now build separately.
+- **`tests/retained_frame.rs` is 1 139 lines** after ADR 0050. It is one responsibility and
+  says so, but splitting it wants a `tests/common/mod.rs` for the half-dozen fixtures three
+  test files now build separately.
+- **The 7 `cargo doc` warnings** are all "public documentation links to private item", in
+  `mask.rs`, `pipeline.rs` and `retained.rs`. They predate this round, and ADR 0051's
+  round confirmed none of them is new.
 - **`SceneBuilder::image` refuses a bad image alpha with `SceneError::InvalidGroupAlpha`**
   — a shared variant, visible since ADR 0051's round factored the check. Public API, so it
   is a bump's business rather than a refactor's.
@@ -125,6 +138,13 @@ claim was also too broad, which is its own lesson and is now a trap below.)*
   `tests/archetypes.rs` before believing any of it** — that is what says the harness encoded
   §6.2's page. Delete the harness with the round; `Cargo.toml`'s note on `criterion` is the
   standing decision that a benchmark harness does not live in this tree.
+- **A page of curve-clipped marks**: `examples/residue_clip.rs` — the artwork archetype,
+  headless into a texture, `instrument_encode` on, minima of twenty steady frames with the
+  first reported apart and the load average printed beside them. It prints
+  `clip_residue_regions` and `clip_residue_tiles` with the clocks, which is what makes two
+  runs on a loaded machine comparable at all: the counters are exact functions of the
+  scene. Two builds of it cannot be round-robined inside one process, so the A/B is a
+  `git checkout` between the base and the change, three rounds each, alternating.
 - **Whether the atlas settles**: `examples/retained.rs`'s second section — twelve retained
   frames of a page whose tiles overflow a stated atlas budget, printed as a string of `E`
   (encoded) and `.` (replayed). A **property, not a clock**, so it reads the same at load
@@ -211,6 +231,15 @@ machine-independent and can be reasoned about; which lane is faster is a propert
 processor *and* the adapter together, so never publish a crossover as a constant — the two
 ADRs that tried (0027, then 0028) both had to delete one.
 
+**A tile is not a window on a wider region unless the rasteriser cuts at its border.**
+`fill_mask` clamped the endpoints of an edge piece that left the region and interpolated
+between them: the row's total winding survived, so every column past the crossing read the
+right value and no test could see it, while the columns *at* the border took the height the
+piece spent outside. 2 684 pixels of a 2.9-million-pixel probe, the worst by 185 of 255.
+Any change that wants to compute coverage once and cut it up afterwards has to check this
+first — the probe is `a_tile_is_the_crop_of_the_region_that_contains_it`, and it took
+ninety seconds to write and settled the design of a whole round (ADR 0049).
+
 **A cache's "would this help?" test must be asked in the units the cache allocates in.**
 ADR 0024 gated the atlas repack on `bytes requested <= bytes available`, and the packer
 allocates *shelves*: a page at 63 % of the atlas by area did not fit it by packing, so the
@@ -290,7 +319,13 @@ reading it:
   has been waiting for its measurement since;
 - the *divide* half of ADR 0022 is no longer gated at all: it is a throughput claim, no wall
   clock on this machine can hold one, and its instrument is the callgrind round above rather
-  than anything in CI (0052).
+  than anything in CI (0052);
+- a residue region is the chain's own bounds and not the union of the tiles that ask for it;
+  the union needs a second pass over the commands before the first ask, which is the
+  two-pass encode ADR 0034 declined for the tiling (0049);
+- residue regions are not pooled across frames: the retained encode already answers "the
+  same page again", and a cache that outlived its scene is ADR 0029 §3's rejected memory in
+  a second place (0049).
 
 ## This machine
 

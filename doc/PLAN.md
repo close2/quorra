@@ -38,10 +38,17 @@ row, since a number without one is not evidence.
 | — execute: the GPU is about 4 % of the frame | 0.071 ms | same |
 | the same frame, unchanged, replayed rather than encoded | **0.174 ms** against 1.107 | `examples/retained.rs`, headless RADV, ADR 0048 |
 | — and now also when the page's glyph tiles overflow the atlas | 1 encode per page, not 1 per frame | `examples/retained.rs`'s overflow section, ADR 0050 |
-| artwork — the corpus's p99 clip shape — steady | 43.3 ms, geometry 35.4 of it | `surface_measure`, same run |
+| artwork — the corpus's p99 clip shape — steady | 43.3 ms, geometry 35.4 of it | `surface_measure`, RADV at the real display, 2026-08-14 — **before ADR 0049**, and not re-run on the display since |
+| — the same page's encode, before → after ADR 0049 | geometry **37.8 → 28.9 ms**, encode 46.3 → 37.2 | `examples/residue_clip.rs`, headless RADV into a texture, three alternating rounds, minima, load 3.8–4.8, 2026-08-15 |
 | first frames, presenting | pipeline compiles: **none**, eight of eight | same; ADR 0043 |
-| the caller's corpus at scale 1 | **934** agree / 20 differ / 2 refused / 18 not comparable | their tree, one copy, 2026-08-14 |
-| the caller's corpus at scale 4 | **936** / 10 / 5 / 23 | same |
+| the caller's corpus at scale 1 | **931** agree / 23 differ / 2 refused / 18 not comparable | their tree, one copy, 2026-08-15 (ADR 0049; `issue2177.pdf` stops differing) |
+| the caller's corpus at scale 4 | **936** / 10 / 5 / 23 | same run, unmoved |
+
+The scale-1 row fell from 934 and **nothing regressed**: the base commit re-run on
+2026-08-15 in a fresh copy reads 930/24/2/18 for the same quorra commit that read 934/20 a
+day earlier. Their tree moved under us, which is what `HANDOVER.md` says a count quoted
+from an older run is worth. **930 → 931 is what ADR 0049 is worth; 934 is not a baseline it
+can be compared against.**
 
 **§6.2's success bar is met and its clear-win figure is not.** A third of the CPU
 backend's 5.9 ms is 2.0 and we are at 1.816; a tenth is 0.6, and the thing that points at
@@ -58,10 +65,16 @@ on the GPU.
 
 ### What is still open
 
-- **The residue-clip tiling seam** — the artwork row above, 35 ms of re-rasterising the
-  same clip coverage every frame, and the only reason any corpus frame is refused (three
-  pages at 4×, `ScratchExhausted`). Multi-sheet passes are measured and refused as the
-  answer; the work is on the tiling side. `HANDOVER.md` item 2 has the numbers.
+- **The residue-clip seam, half taken.** The residue itself is now rasterised once per
+  chain rather than once per clipped command (ADR 0049): artwork's encode geometry is
+  37.8 → 28.9 ms and its 600 residue rasterisations are 185. What is *not* taken is the
+  reason two pages at 4× refuse with `ScratchExhausted` — that is the coverage **sheet**,
+  one tile per clipped command, and ADR 0049 leaves `Counters::tiles` unchanged on every
+  archetype on purpose. `HANDOVER.md` item 2 holds what is left, and it is tiling work.
+  (The refusal count in this bullet used to read "three pages at 4× and one at scale 1",
+  and "the only reason any corpus frame is refused". Both were too strong: today it is
+  **two** at 4× and none at scale 1, and the corpus's other three refusals are a different
+  budget or a correct clause refusal each.)
 - **The caller's adoption round** — they pin twenty commits back, three sections of their
   `QUORRA_FEEDBACK.md` have drafted answers waiting, and `RetainedScene` is an API they
   must take up rather than merely receive. `HANDOVER.md` item 1. Two `Counters` fields
@@ -223,12 +236,18 @@ clip mask through the path lane's coverage machinery.
 The caller's numbers say the residue is the exception: its page 6 states one clipping
 rectangle 303 times and its display list already collapses them to one identifier
 (§1.1), and §6.4 is blunt that a rectangular clip must never become a mask texture.
-Where a residue mask is built, it is cached **keyed by the resolved region under the
-current viewport, never by an identifier** — the caller's clip-mask cache once answered
-all 303 lookups a page made and built 303 identical page-wide masks because the key was
-a name (ADR 0132 lesson, restated in CLAUDE.md) — and `Counters` reports the count of
-distinct regions, not a hit rate. An empty clip admits nothing, which is a different
-thing from an absent clip, and both have tests.
+Where a residue mask is built, the chain is rasterised **once over the region it
+occupies** and every mark takes a window on it (ADR 0049). The key is the chain's deepest
+non-rectangular link, which under one viewport *determines* the region — the transform is
+fixed for the frame — so the failure the identifier rule warns about cannot happen here:
+two commands under one chain cannot get two different masks. (That rule is the caller's
+clip-mask cache, which once answered all 303 lookups a page made and built 303 identical
+page-wide masks because its key was a name — their ADR 0132, restated in CLAUDE.md.) What
+a chain-identity key cannot do is *unify* two chains that happen to resolve to the same
+region, and `Counters::clip_residue_regions` would show that honestly, as two regions.
+`Counters` reports the count of distinct regions and the count of chains that paid per tile
+instead — keys, never a hit rate. An empty clip admits nothing, which is a different thing
+from an absent clip, and both have tests.
 
 ## 1.5 Memory that grows
 
@@ -244,6 +263,13 @@ worth stating as design rather than leaving implicit in the phases:
   exceeding it is a typed `Err` naming the limit and the number that hit it, so the
   caller can fall back to its CPU backend, which its window already knows how to do
   (§5).
+
+  A **cache** is the one place where the answer is *decline* rather than `Err`: the
+  residue regions of ADR 0049 are checked against a quarter of `max_frame_bytes` before
+  allocation, and a region that does not fit is not built — the frame draws it per tile
+  instead, which is what every frame did before. Refusing a drawable frame because a cache
+  filled up would be principle 6 pointed the wrong way, and the atlas has said so since
+  ADR 0029.
 - **Before the frame:** `Scene::cost()` against `Device::limits` gives the caller the
   same arithmetic we will do, so a refusal can happen before a frame is attempted at
   all — §5's second preference, satisfied in addition to the first, not instead of it.
