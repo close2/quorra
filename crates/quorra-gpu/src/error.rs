@@ -65,6 +65,20 @@ pub enum DeviceError {
         /// What exactly was wrong.
         reason: ResourceProblem,
     },
+    /// This device has issued every resource identifier it has. Nothing was stored.
+    ///
+    /// The identifier space is a `u32` shared by the four resource families and an id
+    /// is **never** reused, so a store that has issued `u32::MAX` of them cannot admit
+    /// another. Refusing is the only honest answer: reusing an id would silently replace
+    /// whatever still held it, and a retained encode naming that id would draw the wrong
+    /// resource with every generation counter still agreeing that nothing had moved
+    /// (ADR 0048's key, ADR 0050's audit of it). Releasing resources returns bytes to
+    /// the budget but never returns identifiers.
+    #[error("this device has issued all {limit} resource identifiers; none can be reused")]
+    ResourceIdsExhausted {
+        /// The size of the identifier space, which is also how many were issued.
+        limit: u32,
+    },
     /// A release of a resource this device never issued or already released. An error
     /// rather than a no-op: a double release is a caller bug, and hiding it would
     /// hide the defect.

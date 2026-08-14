@@ -80,9 +80,12 @@ pub(crate) struct ResourceStore {
     /// that names resource ids can tell whether those ids still mean what they meant
     /// (`retained.rs`, ADR 0048).
     ///
-    /// **Release only.** An upload mints an id from a monotonic counter and never
-    /// revives a released one, so a stored encode's ids cannot come to name different
-    /// bytes; a release is the one operation that can take a referenced resource away.
+    /// **Release only**, and that is sound because an upload mints an id by increment
+    /// from a counter that is never allowed to wrap ([`ResourceStore::allocate_id`]) and
+    /// never revives a released one: a stored encode's ids cannot come to name different
+    /// bytes, so a release is the one operation that can take a referenced resource
+    /// away. The counter *did* wrap until ADR 0050 audited this claim, which is why the
+    /// bound is stated on `allocate_id` rather than assumed here.
     generation: u64,
 }
 
@@ -178,8 +181,8 @@ impl ResourceStore {
         let bytes = (path.len() as u64)
             .saturating_mul(size_of::<Segment>() as u64)
             .saturating_add(quads.stored_bytes());
+        let id = self.allocate_id()?;
         self.charge(bytes)?;
-        let id = self.allocate_id();
         self.outlines.insert(
             id,
             StoredOutline {
@@ -211,8 +214,8 @@ impl ResourceStore {
             });
         }
         let bytes = image.byte_size();
+        let id = self.allocate_id()?;
         self.charge(bytes)?;
-        let id = self.allocate_id();
         self.images.insert(
             id,
             StoredImage {
@@ -262,8 +265,8 @@ impl ResourceStore {
             }
         }
         let bytes = (stops.len() as u64).saturating_mul(size_of::<Stop>() as u64);
+        let id = self.allocate_id()?;
         self.charge(bytes)?;
-        let id = self.allocate_id();
         self.ramps.insert(
             id,
             StoredRamp {
@@ -293,8 +296,8 @@ impl ResourceStore {
             });
         }
         let bytes = mesh.byte_size();
+        let id = self.allocate_id()?;
         self.charge(bytes)?;
-        let id = self.allocate_id();
         self.meshes.insert(
             id,
             StoredMesh {
@@ -343,11 +346,29 @@ impl ResourceStore {
     }
 
     /// One id space across the four families, so a stale id of one kind can never
-    /// alias a live resource of another.
-    fn allocate_id(&mut self) -> u32 {
+    /// alias a live resource of another — and an id is never reused, so a stale id of
+    /// one *era* cannot alias a live resource of the next.
+    ///
+    /// **That second property is what `generation`'s claim rests on**, and until ADR
+    /// 0050 audited it the counter wrapped: after `u32::MAX` uploads an id would have
+    /// been reissued, `HashMap::insert` would have silently replaced whatever still held
+    /// it, `generation` would not have moved — it counts releases — and a retained
+    /// encode naming that id would have drawn the new resource through the old
+    /// instances, with every check in `retained::EncodeKey` agreeing that nothing had
+    /// changed. A `u32` is four billion uploads and no document reaches it; a wrong page
+    /// that no counter can see is not a thing to leave behind a bound nobody stated.
+    ///
+    /// Called **before** the budget is charged, so that a refusal here charges nothing;
+    /// the gap a later refusal leaves in the id space costs nothing, because ids are
+    /// opaque and never enumerated.
+    fn allocate_id(&mut self) -> Result<u32, DeviceError> {
+        let next = self
+            .next_id
+            .checked_add(1)
+            .ok_or(DeviceError::ResourceIdsExhausted { limit: u32::MAX })?;
         let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        id
+        self.next_id = next;
+        Ok(id)
     }
 }
 
@@ -384,6 +405,34 @@ mod tests {
             store.release(ResourceId::Outline(id)),
             Err(DeviceError::UnknownResource { .. })
         ));
+    }
+
+    /// **An id is never reused, and the store says so rather than wrapping** (ADR 0050).
+    ///
+    /// The counter is wound to its last value rather than four billion uploads being
+    /// performed, which is the only way to reach this at all — and is why it wrapped
+    /// unnoticed until the retained encode's key was audited. A reissued id would have
+    /// replaced a live resource inside `HashMap::insert`, moved no generation counter
+    /// (that one counts releases) and left a retained encode drawing bytes it never
+    /// named: a plausible wrong page, arrived at through arithmetic nobody had bounded.
+    #[test]
+    fn identifiers_run_out_loudly_rather_than_wrapping() {
+        let mut store = ResourceStore::new(1 << 20);
+        let first = store.upload_outline(&square()).expect("valid outline");
+        store.next_id = u32::MAX;
+        match store.upload_outline(&square()) {
+            Err(DeviceError::ResourceIdsExhausted { limit }) => assert_eq!(limit, u32::MAX),
+            other => panic!("an exhausted id space must refuse by name: {other:?}"),
+        }
+        assert_eq!(
+            store.next_id,
+            u32::MAX,
+            "a refusal issues nothing and consumes nothing"
+        );
+        assert!(
+            store.outline(first).is_some(),
+            "and it leaves every resource that was already resident exactly where it was"
+        );
     }
 
     /// The budget is checked before storing, and the refusal names all three numbers.
