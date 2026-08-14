@@ -845,8 +845,9 @@ impl Encoder<'_> {
         {
             return Ok(());
         }
-        if blend != BlendMode::Normal {
-            // §11.3.5 for a single element: an implicit one-element group.
+        if blend != BlendMode::Normal && self.style == DrawStyle::Over {
+            // §11.3.5 for a single element: an implicit one-element group (the same
+            // degeneracy argument as in `encode_fill` skips it under knockout).
             let child = self.plan_child(|encoder| {
                 let plain = Command::Stroke {
                     outline,
