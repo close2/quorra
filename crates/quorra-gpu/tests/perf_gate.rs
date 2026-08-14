@@ -107,12 +107,24 @@ fn dense_page_at_window_scale_stays_under_the_gate() {
 /// number the caller's offscreen corpus gate is mostly measuring, so it gets a gate of
 /// its own.
 ///
-/// Wall-clocked by nature (the span is CPU-bound and includes a wait), so the threshold
-/// is ~4× the measured value rather than tight: RADV, release, fastest of five,
-/// 2026-08-11 — readback 1.32 ms, whole frame 1.65 ms (ADR 0022; it was 3.84 and 4.94
-/// before). A regression to the shape that existed before this ADR fails here.
+/// **This test reports and does not assert, and that is ADR 0052's decision.** It used
+/// to carry a `best < 6 ms` gate, which was wrong in both directions at once: the
+/// regression it named is 3.84 ms measured (ADR 0022: RADV, release, fastest of five,
+/// 2026-08-11 — readback 1.32 ms and whole frame 1.65 against 3.84 and 4.94 before), so
+/// the shape it existed to catch passed it comfortably, while ambient load on this
+/// machine failed it two runs in five with nothing changed. A threshold cannot be both
+/// tight enough to see 1.32 against 3.84 and loose enough to survive a desktop; no
+/// constant fitted to that noise would be evidence of anything, and `HANDOVER.md`'s
+/// standing rule is never to publish a crossover as a constant.
+///
+/// What replaced it is `tests/readback_cost.rs`, which counts the target-sized
+/// allocations a readback frame makes — one, the raster itself, against two before
+/// ADR 0022. That is the same claim as a property: deterministic, adapter-independent,
+/// and verified in both directions before it was written down. The number below stays
+/// printed because a human reading a CI log is the one instrument that notices a
+/// tenfold change nobody predicted.
 #[test]
-fn a_readback_frame_does_not_pay_for_its_pixels_twice() {
+fn a_readback_frame_reports_what_its_pixels_cost() {
     let mut device = Device::headless(&Options::default()).expect("some adapter must exist");
     device.wait_until_warm();
     let scene = dense_scene();
@@ -135,19 +147,14 @@ fn a_readback_frame_does_not_pay_for_its_pixels_twice() {
         "readback gate on {}: {best:?} for 1191x1684",
         device.description()
     );
-    // The conversion is a byte loop, so an unoptimised build is 26× slower — 1.32 ms
-    // in release against 34.9 ms in debug, both measured — and a debug threshold wide
-    // enough for that is wide enough to be pushed past by a busy machine rather than by
-    // a regression. It has been: load average 19 took this to 80 ms with the code
-    // unchanged. So the gate is the release build's, and debug prints its number.
-    if cfg!(debug_assertions) {
-        eprintln!("note: the readback gate does not run in a debug build (see the comment)");
-        return;
-    }
+    // What the number means, for whoever reads the log: 1.32 ms is the measured release
+    // figure on RADV (ADR 0022), 3.84 ms was the shape before it, and an unoptimised
+    // build is 26× either — 34.9 ms in debug, because the conversion is a byte loop.
+    // Load moves all three: load average 19 has taken this line to 80 ms with the code
+    // unchanged. Read it as a magnitude, and let `tests/readback_cost.rs` do the gating.
     assert!(
-        best < Duration::from_millis(6),
-        "reading back a page took {best:?}; measured 1.32 ms on RADV (ADR 0022), \
-         against 3.84 ms in release before it"
+        !best.is_zero(),
+        "the readback span is zero, so nothing timed the copy-out at all"
     );
 }
 
