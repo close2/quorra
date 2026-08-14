@@ -28,7 +28,8 @@ surface's negotiated format (0043), a flatness bound that is relative to the sha
 shape is smaller than the tolerance — the caller's §21.2 (0044) — and what an unchanged
 frame need not pay again, priced whole and landed by half (0045); the other half is now
 built as the retained `RetainedScene`/`render_retained` API (0048), under the owner's
-same-day authorisation to change the API. The rest of those rounds
+same-day authorisation to change the API, and the rectangle a document draws takes the
+lane a rectangle nobody sends already had (0047). The rest of those rounds
 carry no ADR because none decided anything: `examples/rect_lane.rs` and the §19 numbers,
 the fuzz vocabulary, the shader-sameness guard, `SceneError`'s own module, and
 `encode.rs` split along the seams its own comments named.
@@ -265,15 +266,6 @@ three pages the coverage sheet refuses outright.
 The 2026-08-13 review's code-health pass, plus what the `encode.rs` split turned up, so a
 fresh session can pick one without re-auditing. Each is one sitting:
 
-- **A solid fill of a rectangular outline does not take the rectangle lane**, and a
-  shaded one does. `StoredOutline::rect_hint` is computed for every outline at upload
-  (`resources.rs:160`) and read at `encode.rs:1086` — but only on the shading arm; a solid
-  paint returns into `fill_solid` at `encode.rs:1071` first and takes the atlas or the
-  coverage path. Output is byte-identical either way (`examples/rect_lane.rs` checks it),
-  so this is symmetry rather than correctness — but it is worth **0.13–0.49 µs a
-  rectangle**, it is where most of the caller's §19 lives, and it is four lines against a
-  recogniser they would otherwise write. Take it with a corpus run: it moves which lane a
-  page takes, and `HANDOVER`'s "the corpus is part of a change" trap applies exactly.
 - **`device.rs` hosts ramp sampling** (`sample_ramp`, `ramp_color_at`,
   `RAMP_RESOLUTION`) outside its stated responsibility — a candidate seam whenever that
   file is next open.
@@ -354,6 +346,13 @@ so differing values took the same cross-worktree build from 2 misses to 121. Use
 stable target dir per user (the untracked `.cargo/config.toml` here pins
 `/home/AI/cargo-target/quorra`), share it across worktrees when builds are
 sequential, and leave path remapping alone until `sccache` learns to normalise it.
+
+**The shared cargo target dir is not yours alone.** Sibling agents in other worktrees
+build the same crate and example names into `/home/AI/cargo-target/quorra`, and
+`release/examples/<name>` is whoever linked last. A measurement round was published from
+another tree's binary and only caught because its counters were impossible. Anything you
+read numbers from gets its own `CARGO_TARGET_DIR`; `cargo build` reporting "Compiling"
+is not proof the binary on disk is yours.
 
 **Wall clocks lie under load, and this machine is somebody's desktop.** A first-frame
 improvement measured at 24.7 ms → 10.3 on a quiet machine re-measured as 19.9 → 20.0 an

@@ -16,6 +16,52 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A document's rectangles reach the rectangle lane, which until now nothing did**
+(2026-08-14, ADR 0047, `examples/rect_lane.rs`, the caller's `QUORRA_FEEDBACK.md` §19).
+The rect-lane entry below priced the gap and named the defect in the same paragraph:
+`rect_hint` is computed for every outline at upload and was read on the *shaded* fill
+arm only, so a solid fill of a rectangular outline — the only form a document rectangle
+arrives in, their corpus emitting no `Command::Rect` at all — took the atlas or the
+coverage sheet. It now takes ADR 0007's analytic lane under exactly the shaded arm's
+three conditions: no residue clip, an axis-preserving transform, a `rect_hint`. The
+fill rule is not a fourth, because a simple closed quadrilateral bounds the same region
+under both of §8.5.3.3's rules.
+
+Base and change alternating, both adapters, minima at load 32–39 — the ratio to the
+`rect` row is the column that travels:
+
+| commands | lane | RADV | llvmpipe |
+|---:|---|---|---|
+| 12 | `fill`, one outline many placements | 4.38–4.60× → **2.54–2.60×** | 4.13–4.39× → **1.85–2.38×** |
+| 12 | `fill`, an outline each | 5.13–5.26× → **2.94–3.21×** | 4.57–5.02× → **2.70–3.22×** |
+| 4 320 | `fill`, one outline many placements | 5.94–6.12× → **2.66–3.49×** | 6.12–6.21× → **2.63–2.70×** |
+| 4 320 | `fill`, an outline each | 18.10–20.70× → **6.07–12.67×** | 19.31–20.01× → **11.12–11.65×** |
+
+The counters are the half that is not a wall clock: the two fill scenes went from 12,
+280 and 4 320 distinct atlas keys and 276 480 bytes of quad instances to **none, and
+the same 138 240 bytes of rectangle instances the `Rect` scene writes**. 0 of
+8 022 576 bytes differ between any pair, as before.
+
+**The corpus says it moved a cost and not a mark.** One copy of their tree, flipping
+only the `[patch]` between `87898c6` and the change: 934 / 20 / 2 / 18 at scale 1 and
+936 / 10 / 5 / 23 at scale 4, *identical before and after*, and five pages in 951
+moving a mean by between 0.0001 and 0.0021 with every worst tile and every SSIM digit
+but one unchanged. Three moved toward the oracle and two away, which is the expected
+shape rather than a defect: the analytic lane intersects a clip where the coverage lane
+multiplies it, and `tiny-skia` multiplies.
+
+**What is left is measured rather than guessed.** A `Fill` still costs 0.03 µs a
+rectangle more than a `Rect` when the outline repeats and 0.10–0.21 µs when it does
+not, and the larger term is a control hull `encode_fill` measures before it knows which
+lane the paint will take. Taking it means moving the lane decision above the cull — an
+optimisation with its own measurement, not this ADR's symmetry — and the number is
+written down so the next round starts from it. §19's ask on the caller's side is now
+worth a third of what it was.
+
+And what it left behind: three tests in `m45.rs` had been using a rectangle as a
+stand-in glyph. One failed; two would have gone on passing while comparing one lane
+with itself. **A fixture that names a lane should say which lane it means.**
+
 **A blended stroke inside a knockout group is replaced, not blended** (2026-08-14, no
 ADR — a defect). `encode_stroke` wrapped a non-Normal blend in §11.3.5's implicit
 one-element group on the blend mode alone, where `encode_fill` and `encode_image` also
