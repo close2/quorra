@@ -19,8 +19,17 @@ made necessary (no ADR — a defect), masks sized to their plans (0037, in two c
 one accumulator per plan instead of a ping-pong pair (0038, in two commits), the root sized
 like every other plan (0039), the compositor's two pipelines moved into the warm set after
 ADR 0035's first-frame number failed to reproduce (0040), a child the encoder drops when its
-clip leaves it nothing to contribute (0041), and the round cap that was drawing the
-half-disc *inside* the stroke — the caller's `QUORRA_FEEDBACK.md` §21.1.
+clip leaves it nothing to contribute (0041), the round cap that was drawing the
+half-disc *inside* the stroke — the caller's `QUORRA_FEEDBACK.md` §21.1 — and a WGSL
+compile failure turned from a silent test-suite hang into a refusal that names its span
+(0042).
+
+On 2026-08-13 the tree had a full review — code, plan, and both sides of the caller
+conversation — and the "What to do next" list below is its result. The review's one
+structural finding: the work itself is disciplined, but the brief's own success metric
+(§6.2, surface-tier) has never been measured, and the caller sync is lagging the local
+work. `examples/surface_measure.rs` was built for the first of those; it is the only
+code the review added.
 
 **What the caller must do to take it** is written for them in
 `/home/cl/projects/pdf-viewer/doc/QUORRA_UPGRADE.md`: one line for `GroupSpec::compose`, a
@@ -32,7 +41,80 @@ answered it.
 
 ## What to do next, in this order
 
-### 1. A page-sized coverage tile per clipped shape — **not** multi-sheet passes
+The order is the 2026-08-13 review's (a full pass over the tree, the plan, the caller's
+feedback and the code-health of every crate), and its reasoning is one sentence: **the
+metric the brief judges us by has never been measured in its own terms, and the caller
+conversation is going stale while local work stacks up — both cost less to fix than one
+more optimisation round, so they go first.**
+
+### 1. The two surface-tier numbers — **done** (2026-08-14), and what they left behind
+
+The owner ran `examples/surface_measure.rs` on RADV at the real display, twice, and the
+warm-set fix is landed and verified: ADR 0043, the numbers in `PLAN.md`'s entry for the
+date, **compiles: none on eight presenting first frames of eight** on the re-run. The
+owner also left a trigger loop for this instrument — `touch tmp/start-measurement` in
+this repository and the loop rebuilds the working tree and runs `surface_measure` on
+the real GPU, writing `tmp/output.stdout.txt` — so a measurement no longer waits for a
+hand-off (confirm the loop still runs before relying on it).
+
+What the numbers re-rank, recorded here rather than jumped on:
+
+- **The §6.2 gap is CPU recording, not the device.** A steady presenting dense-text
+  frame is 2.84–3.38 ms against the 2.0 ms success bar, and the device's share is
+  0.11–0.13 ms; recording (hash lookups, instance writes — 4 320 commands) is
+  1.90–2.32 ms of it and submit/device-wait another 0.55–0.71. Before designing
+  anything: profile what recording actually spends its time on, and price **encode
+  reuse across identical frames** — a retained scene redrawn unchanged pays full
+  recording today, and a page a person is reading is exactly that frame after frame.
+- **The artwork shape's steady frame is geometry: 37–47 ms of residue-clip
+  re-rasterisation** every frame, on the corpus's p99 clip shape. That is item 5's
+  seam with a steady-state cost beside its refusal count, and §15's question measured
+  from our side — the three answers belong together in the sync round.
+
+### 2. A sync round with the caller — cheap, and overdue
+
+The viewer pins `a7babab`, five commits behind, and those five include the §21.1 round-cap
+fix their own §22.7 predicted and wants to re-run first thing after a bump. Twenty-five
+commits are local. Their `QUORRA_FEEDBACK.md` has three sections waiting on this side,
+and two of them cost an afternoon:
+
+- **§15** asks whether the coverage lane bounds a clipped fill by its clip's extent, and
+  offers to close itself if yes. It is yes: every coverage tile is `shape ∩ clip ∩
+  target` (`encode.rs` — the footprint comment and `residue_intersection`). The answer
+  is a written reply with that evidence, and it should cross-reference item 5 below,
+  because §15 and the tiling ceiling are the same seam seen from two sides.
+- **§19** waits on one number: what a `Command::Rect` costs against a `Fill` of the same
+  four-edge outline, at the median 12 and p99 4 320 commands. Headless, measurable here,
+  a morning with `Timings` and two scenes.
+- **§22.5** (a process note, not code): `Counters::layer_textures` changed meaning while
+  keeping its name and cost them two sentences of wrong prose. Decide rename-vs-document
+  and answer.
+
+Push (or hand the owner the push), deliver the answers, and let their corpus re-baseline
+absorb ADRs 0036–0042 in one round instead of five.
+
+### 3. §21.2 — a tiny outline flattens to its inscribed polygon
+
+The caller's other live defect report: at d ≤ 1 device pixel a circle loses 36 % of its
+area to a quarter-pixel flattening tolerance, filed as a report (§10.7.3 licenses a
+device tolerance) with a suggestion — a tolerance relative to the shape, or a floor of a
+few segments per turn. Small, self-contained in `raster.rs`, and its evidence already
+exists: the caller's `sub_pixel_marks` example rows, plus a corpus run that must not
+move except where it should. A good first item for a fresh session.
+
+### 4. Split `encode.rs` along its stated seams — **before** the tiling work
+
+2 600 production lines, one ~1 640-line `impl Encoder`, eleven of the workspace's
+thirteen `too_many_arguments` allows, and a module comment that enumerates
+responsibilities instead of naming one. The seams are already visible in the file:
+`ClipResolver`, `ScratchPacker`, the rare-case lane encoders, and the thrice-repeated
+verbatim `ChildOp` construction (`encode.rs:1134/1603/1656`) that wants one named
+helper. ADR 0042 just did the same to `pipeline.rs` (779 → 460 plus two named halves);
+this is the same move. It goes before item 5 **because item 5 lands exactly there** —
+the tiling logic is `encode.rs`'s tenant, and redesigning it inside the current file is
+how threading-style growth continues.
+
+### 5. A page-sized coverage tile per clipped shape — **not** multi-sheet passes
 
 Three pages at 4× and one at scale 1 refuse with `ScratchExhausted` — the coverage sheet
 against the adapter's 16 384 limit, which is a different ceiling from the frame budget and
@@ -54,17 +136,31 @@ one coverage tile of its own device bounds, and at 4× a full-page clipped shape
 full-page tile. The work is on the *tiling* side — ADR 0028's panes are the nearest
 existing mechanism — and it is worth its own measurement before its own design.
 
-### 2. The warm set is compiled for one format, and a surface has another
+### Small debts, none blocking — fill-in work between the numbered items
 
-Every pipeline is keyed by `(kind, target format)`. The warm set compiles `Rgba8Unorm`;
-`SurfaceState::new` negotiates **`Bgra8Unorm`** where the adapter offers it. So a presenting
-host's first frame compiles the lane it draws with inside that frame — and the blit too, if
-the page has a group — which is the same cost ADR 0040 just took off a headless first frame,
-still sitting on the caller's launch path. The device knows the surface's format one line
-above `spawn_warm_up`, so the change is small; **what is missing is the measurement**, and
-it needs a window. This account has no X authority for the owner's display and `lavapipe`
-under `Xvfb` would time a software compiler rather than the one a viewer waits for, so this
-is the owner's number to take — after which the fix is a line.
+The 2026-08-13 review's code-health pass, so a fresh session can pick one without
+re-auditing. Each is one sitting:
+
+- **`SceneError` is a tenant of `scene.rs`** (~180 lines at `scene.rs:392-570`) while
+  serving the whole crate — CLAUDE.md names this exact anti-pattern, and `quorra-gpu`'s
+  `error.rs` is the in-tree example of the fix.
+- **`pipeline/spec.rs:112`** carries a bare `#[allow(clippy::too_many_lines)]` on a
+  138-line `fn of` — split into named phases or write the reason.
+- **`composite.wgsl:142` and `:174`** (`hard_light_channel`, `soft_light_channel`) are
+  missing the `§11.3.5.2` citations their siblings carry.
+- **`soft_mask_at` and `fs_shape` are copied across five shaders** with a comment
+  promising textual sameness and nothing enforcing it — a test that reads the shader
+  sources and compares the extracted bodies makes the promise checkable.
+- **`resources.rs:32`'s `#[allow(dead_code)]` reason** ("consumed by the lanes from
+  M4/M5") describes a state that shipped; refresh or remove.
+- **`criterion` is pinned in the workspace with no bench anywhere** — add the benchmark
+  the pin promises or drop the pin.
+- **The fuzz generator's vocabulary stopped at M5** (`fuzz_scene.rs`: `rect`, `fill`,
+  `stroke`, `clip`, `group`) — images, shadings, masks and the compose vocabulary are
+  where the surface area grew since, and extending `random_ops` is cheap.
+- **`device.rs` hosts ramp sampling** (`sample_ramp`, `ramp_color_at`,
+  `RAMP_RESOLUTION`) outside its stated responsibility — a candidate seam whenever that
+  file is next open.
 
 ### The memory path is finished, and this is what finished looks like
 

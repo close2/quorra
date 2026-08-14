@@ -1,6 +1,7 @@
 /target
 **/*.rs.bk
 *.profraw
+/tmp
 
 # Rendered artefacts from the conformance and comparison harnesses: PNGs, diffs and
 # heatmaps are regenerated on demand from committed scenes, so they are output rather

@@ -16,6 +16,46 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**§6.2 has its number at last, and the frame it describes is CPU-bound** (2026-08-14,
+`examples/surface_measure.rs` and ADR 0043): the brief's success criterion — a third of
+the CPU backend's 5.9 ms on a dense text page at 1191×1684, *presenting to a surface* —
+had never been measured in its own terms; every number this tree tracked was offscreen
+with readback, the tier the design pays its worst cost in. The owner ran the new
+instrument on RADV at the real display (fresh device per round, warmed first — the
+caller's hand-over order; `MESA_SHADER_CACHE_DISABLE=true`; load averages 5 to 55
+across runs, so medians are contamination and every figure here is a minimum over 80
+frames):
+
+- **Dense text: 2.84–3.38 ms `wall − acquire`, against the CPU backend's 5.9.** Better
+  than the baseline; short of the 2.0 ms success bar. The composition is the finding:
+  execute is **0.11–0.13 ms** — the GPU is four per cent of the frame — and the rest
+  is encode at 1.96–2.35 ms, of which the instrumented rounds put **1.90–2.32 in
+  recording** (geometry 0.16–0.18, staging 0.05–0.07), plus 0.55–0.71 ms of submit and
+  device wait. So §6.2's remaining gap lives in per-command CPU recording — hash
+  lookups and instance writes for 4 320 commands — and no work on the device can close
+  it.
+- **Artwork (the corpus's p99 clip shape): 48.2–61.4 ms steady**, encode 43.6–57.3 of
+  which **geometry is 37.2–47.4** — the 600 residue-clipped commands re-rasterise
+  their coverage every frame, because a clipped tile cannot enter the atlas (the clip
+  multiplies into it) and the scratch sheet is per-frame. Eight to ten times the dense
+  page, on a shape 5 % of documents have. This is the caller's §15 seam measured from
+  our side, and it lands on the same tiling question as the three refusing pages.
+- **First frames, attributed at last**: 38–206 ms wall — cold-atlas encode, upload
+  (0.76 MB dense, 5.71 MB artwork), and 18–70 ms of unattributed submit/device wait —
+  with exactly one **0.3–1.0 ms** `pipeline compile (first use)` entry per presenting
+  first frame: `CoverOver` on the flat shape, `Blit` on the layered one, both in the
+  surface's negotiated `Bgra8Unorm`. ADR 0043 moves the presenting lanes into the warm
+  set keyed by that format (`Composite` deliberately excluded — its target is always
+  an internal accumulator since ADR 0038's hand-off), holds the property in two
+  headless unit tests, and the owner's re-run is the end-to-end verification:
+  **compiles: none, on eight first frames of eight.**
+
+Two directions this re-ranks, recorded and deliberately not yet taken: **encode reuse
+across identical frames** (a retained scene redrawn unchanged pays full recording
+today; what recording actually spends its time on wants a profile before a design),
+and the **residue-clip tiling seam**, which now has a steady-state cost beside its
+refusal count. Both are in `HANDOVER.md`'s list with the numbers.
+
 **A round cap is the half-disc outside the stroke, not the one inside it** (2026-08-13,
 the caller's `QUORRA_FEEDBACK.md` §21.1): they measured a round cap depositing exactly what
 a butt cap does, to the last digit, at every width and both angles, and offered the cause —
