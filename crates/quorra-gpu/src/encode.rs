@@ -1221,7 +1221,6 @@ impl Encoder<'_> {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
     #[allow(clippy::too_many_arguments)] // one draw's parameters, threaded once
-    #[allow(clippy::too_many_arguments)] // one draw's parameters, threaded once
     fn push_glyph(
         &mut self,
         outline: OutlineId,
