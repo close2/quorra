@@ -17,7 +17,7 @@
 //! no device.** In this crate that is structural rather than aspirational — there is no
 //! device type in scope to require. See `doc/adr/0001`.
 //!
-//! # The four parts, and where each one's rules live
+//! # The five parts, and where each one's rules live
 //!
 //! This file holds the finished scene and nothing else; the parts that make one are
 //! private modules re-exported here, so that every path a caller has ever written keeps
