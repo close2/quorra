@@ -155,8 +155,17 @@ pub(crate) enum CacheProspect {
     /// It may be cached, under this key.
     Admitted {
         placement: GlyphPlacement,
-        /// The entry exists already, so this placement costs a lookup and a quad.
-        resident: bool,
+        /// The entry, when one exists already — so this placement costs a quad and
+        /// nothing else.
+        ///
+        /// The *entry* rather than a `resident` flag, because the lane and the draw
+        /// both need the answer and asking twice hashed the key twice for every glyph
+        /// on the page: ADR 0024 recorded that shape as the reason `keyhash` exists,
+        /// and it was still here. Carrying it grows a `Copy` enum that lives in one
+        /// local by 28 bytes, and makes it the same read *by construction* — which is
+        /// the property `prospect`'s comment already asks for and could previously
+        /// only state.
+        entry: Option<AtlasEntry>,
         /// The scene places this shape exactly once, so an entry made for it would be
         /// written and read one time each.
         once: bool,
@@ -176,15 +185,22 @@ impl CacheProspect {
     pub(crate) fn worth_caching(self) -> bool {
         match self {
             Self::TooLarge => false,
-            Self::Admitted { resident, once, .. } => resident || !once,
+            Self::Admitted { entry, once, .. } => entry.is_some() || !once,
         }
     }
 
-    /// The key and offsets this placement would use, when the atlas would take it.
-    pub(crate) fn placement(self) -> Option<GlyphPlacement> {
+    /// The key and offsets this placement would use, and the entry already holding it,
+    /// when the atlas would take it.
+    ///
+    /// Both together and not two accessors: a lane chosen on one reading of the cache
+    /// and drawn on another is how a tile ends up rasterised twice, which is the
+    /// hazard [`AtlasStore::prospect`] is written against.
+    pub(crate) fn admission(self) -> Option<(GlyphPlacement, Option<AtlasEntry>)> {
         match self {
             Self::TooLarge => None,
-            Self::Admitted { placement, .. } => Some(placement),
+            Self::Admitted {
+                placement, entry, ..
+            } => Some((placement, entry)),
         }
     }
 }
@@ -287,10 +303,10 @@ impl AtlasStore {
         if !self.admits(width, height) {
             return CacheProspect::TooLarge;
         }
-        let resident = self.entries.contains_key(&placement.key);
+        let entry = self.get(&placement.key);
         CacheProspect::Admitted {
-            resident,
-            once: placed_once && !resident,
+            once: placed_once && entry.is_none(),
+            entry,
             placement,
         }
     }

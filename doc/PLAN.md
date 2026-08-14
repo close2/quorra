@@ -16,6 +16,132 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**A third of `recording` is one function measuring a bound the previous frame already
+measured** (2026-08-14, callgrind on the dense-text archetype). §6.2 left recording at
+1.90–2.32 ms of a 2.84–3.38 ms presenting frame with nothing said about what it *is*;
+`HANDOVER`'s item 1 asked, and this is the answer. Three rows of the attribution were
+free and are landed — **6.4 % of the dense-text encode by instruction count, and
+0.940 → 0.627 ms on `examples/zoom`'s page** — and the largest row was left standing,
+because it is the case for encode reuse rather than an edit.
+
+**The instrument, because it decides what the numbers are worth.** `perf` is not
+installed for this user and the machine's load average ran between 11 and 33 all
+afternoon — a wall clock said the same encode took 4.49 ms at load 33 against the
+1.96–2.35 ms the owner measured on the quiet machine, which is the `HANDOVER` trap
+arriving before the first measurement rather than after it. So: **callgrind**, which
+counts instructions and does not care what else the machine is doing, on a device-free
+harness that calls `encode` directly (`ResourceStore` and `AtlasStore` need no adapter)
+with the archetype `examples/surface_measure.rs` builds — 4 320 commands, 818 outlines,
+12-cubic letterforms, 1191×1684, `Coverage::Cpu`, quantum 16. Two warm-up encodes fill
+the atlas; `--collect-atstart=no --toggle-collect` takes only the steady ones. Counters
+came out `[quad bytes 276 480, rect bytes 0, keys 2 164, tiles 40, culled 0, outlines
+818]` — the same row `tests/archetypes.rs` pins for dense text, which is what says the
+harness encoded §6.2's page and not a lookalike. **A steady encode is 19 704 029
+instructions.** The harness was deleted with the round; the recipe above is the whole of
+it, and rebuilding it is twenty minutes.
+
+**Instructions are not milliseconds, and the direction of the error is known.** The Ir
+split below puts recording at 78 % where the owner's clock puts it at ~90 %. That is the
+expected sign: recording's work is random probing of a 2 164-entry key table, which
+stalls more per instruction than the sequential byte-writing of the rasteriser, so the
+table *understates* recording. Nothing here is a millisecond; every ratio is.
+
+| seam | Ir a frame | of encode | phase |
+|---|---:|---:|---|
+| **whole encode** | 19 704 029 | 100 % | |
+| `outline_device_bounds` — the control hull of 4 320 × 37 points | **5 171 040** | **26.2 %** | recording |
+| `push_coverage_styled` — the curve-clipped fills, 40 tiles on the sheet | 3 962 914 | 20.1 % | mixed |
+| — `fill_mask` into the tile | 1 414 585 | 7.2 % | geometry |
+| — `pack_scratch` onto the sheet | 1 456 663 | 7.4 % | staging |
+| — `residue_intersection`, the clip re-rasterised | 992 981 | 5.0 % | geometry |
+| `distinct_outlines` — `SipHash` over one `u32`, once per fill | 1 653 386 | 8.4 % | recording |
+| `push_quad_instance` — 4 320 × 16 `f32` into a `Vec<u8>` | 1 449 346 | 7.4 % | recording |
+| software `floorf`/`ceilf`/`roundf` | 1 291 736 | 6.6 % | recording |
+| `raster::flatten` for those same fills and their clips | 861 613 | 4.4 % | geometry |
+| `AtlasStore::prospect` — hash and probe the key | 721 728 | 3.7 % | recording |
+| `AtlasStore::get` — hash and probe **the same key again** | 552 408 | 2.8 % | recording |
+| `atlas_keys` growing from empty to 2 164 every frame | 304 381 | 1.5 % | recording |
+| `note_batch` | 168 624 | 0.9 % | recording |
+| `resolve_clip` (memoised; 4 320 calls) | 97 870 | 0.5 % | recording |
+| `use_mask` | 86 400 | 0.4 % | recording |
+
+Summing the clocked spans gives **geometry 2 816 779 (14.3 %), staging 1 456 663 (7.4 %),
+recording 15 430 587 (78.3 %)** — so ADR 0023's remainder is honest: everything the
+module comment claims for geometry really is inside a span, including
+`residue_intersection`, which rasterises a clip mask a hundred lines away from the
+lane and was the one this went looking for.
+
+**Three of those rows were free, and were taken** — each small, each behaviour-preserving
+by construction, each measured on the same instrument before and after with the counter
+row unchanged and the suite green:
+
+| change | Ir saved a frame | of encode |
+|---|---:|---:|
+| `distinct_outlines` from `HashSet` to `FastSet` | 564 121 | 2.86 % |
+| the instance buffers reserved from the count phase 1 already took | 125 931 | 0.64 % |
+| `CacheProspect` carries the entry, so the glyph key is probed once | 579 324 | 2.94 % |
+| **together** | **1 269 377** | **6.44 %** |
+
+**And they are milliseconds too**, which the Ir table could not say on its own.
+`examples/zoom` at 1× is the instrument `keyhash.rs` is measured on — 5 933 fills over
+107 outlines, warm atlas, RADV, `encode` alone — so the comparison is against a published
+baseline rather than a fresh one. A `git worktree` at `33ce2b8` and the working tree,
+built into separate target dirs, run **round-robin for 30 rounds** so drift falls on
+both, load average 15–35 throughout:
+
+| | fastest | 2nd | 3rd | median |
+|---|---:|---:|---:|---:|
+| `33ce2b8` | 0.940 ms | 0.956 | 0.957 | 1.075 |
+| this round | **0.627 ms** | 0.639 | 0.640 | 0.660 |
+
+**−33 %**, with each variant's top three inside two per cent of each other — a floor that
+tight under that much load is the minimum doing its job. Every counter the example prints
+is identical at all nine magnifications (`culled` and `segments`, 0/29 665 through
+5 930/15), which is the behaviour gate on a second page shape.
+
+Why 33 % here and 6.4 % on the archetype: the zoom page's outlines are five segments
+where the archetype's letterforms are twelve cubics, so `outline_device_bounds` — the
+term none of these three changes touches — is a much smaller share of its encode, and
+the three that *are* per-fill are a correspondingly larger one. Two page shapes, one
+direction, and the spread between them is itself the argument for the paragraph below.
+
+That is **8.2 % off recording**, and the last row is the one with a lesson in it. ADR 0024
+recorded the glyph key as "hashed twice per glyph, twelve thousand times a frame" and
+`keyhash.rs` exists because of it; the profile shows **three** probes — the lane asked
+"is it resident", the draw asked "give me the entry", and `atlas_keys` asked "have I seen
+this". Two `RawTable<(GlyphKey, AtlasEntry)>::find` entries of 1 096 832 and 1 107 072 Ir,
+within one per cent of each other, are as plain a signature as a profile produces. The
+fix is that `CacheProspect::Admitted` carries the `AtlasEntry` rather than a `resident`
+flag, which also makes true by construction the property `prospect`'s own comment could
+previously only ask for: the lane and the draw now cannot read the cache differently.
+
+**Two more were found and deliberately not taken**, both because they are decisions
+rather than edits:
+
+- **`floorf`, `ceilf` and `roundf` are software**, 1.29 M instructions a frame — 25 920
+  floors and 12 960 rounds, from `tile_side` and `GlyphPlacement::of`'s phase
+  quantisation. The baseline `x86-64` target has no SSE4.1 `roundss`, so `rustc` calls
+  `compiler-builtins`. Raising `target-cpu` would collect it and would also decide which
+  processors this library runs on, which is not a thing to do inside a profiling round.
+- **`atlas_keys` is rebuilt from empty every frame** and rehashes its way to 2 164 entries
+  for 0.30 M. Reserving needs a count nobody has before the walk; the previous frame's is
+  a guess, and ADR 0029 already refused to let one frame's cache state decide another's.
+
+**What it means for encode reuse** — `HANDOVER` item 1's second half, which this round
+does not price but does aim. The largest single term in recording, at a third of it, is
+`outline_device_bounds`: for every one of the 4 320 fills it transforms all 37 control
+points of a 12-cubic letterform and min/maxes them into a box. On a page a person is
+*reading*, every frame computes the identical 4 320 boxes from the identical inputs. And
+it is not alone in that — the phase quantisation, the key construction, the lane choice,
+the instance bytes and the batch bookkeeping are all pure functions of (scene, viewport),
+and between the atlas probes and the bounds alone that is over 40 % of recording that a
+retained encode would pay once. So the encode-reuse question is now a *sized* one rather
+than a plausible one: the ceiling on reusing an unchanged frame's encode is the 78 % of
+the encode that recording is, and the floor is whatever cannot be memoised. The two
+smaller shapes it also suggests, if reuse turns out too invasive — a per-`(outline,
+linear)` bound cache, since the device box of a placement is its neighbour's translated —
+are cheaper experiments and should be priced first.
+
 **A tolerance in device pixels says nothing about a shape smaller than itself, and fifteen
 pages of prose were waiting on that sentence** (2026-08-14, ADR 0044, the caller's
 `QUORRA_FEEDBACK.md` §21.2). Their report: a filled circle of diameter 0.5 or 1.0 device

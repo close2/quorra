@@ -41,6 +41,14 @@ gets rasterised twice. And `GlyphPlacement` — the key, the integer origin and 
 quantised phase — moves out of the glyph lane into the atlas that owns the key, because
 the lane choice needs it before the glyph lane runs.
 
+> **Corrected 2026-08-14.** The second row's "a hit costs a lookup and a quad" was one
+> word too many, and the first paragraph above was an intention rather than a fact: the
+> prospect was computed once but the *table* was probed twice — once here to choose the
+> lane and once in the glyph lane to draw it — so a hit cost two hashes of the same key.
+> `CacheProspect::Admitted` now carries the `AtlasEntry` itself instead of a `resident`
+> flag, which is worth 2.94 % of a dense-text encode and makes "the two cannot disagree"
+> true by construction. Numbers and instrument in `doc/PLAN.md`'s entry for the date.
+
 ### 2. The census counts placements, and counts them loosely on purpose
 
 `crate::census` walks the scene once before the encode walk and counts solid fills by

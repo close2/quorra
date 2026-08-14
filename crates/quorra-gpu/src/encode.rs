@@ -54,7 +54,7 @@ use quorra_scene::{
 
 use clips::{ClipResolver, OPEN_CLIP, ResolvedClip, open_clip};
 
-use crate::atlas::{AtlasStore, CacheProspect, GlyphKey, GlyphPlacement};
+use crate::atlas::{AtlasEntry, AtlasStore, CacheProspect, GlyphKey, GlyphPlacement};
 use crate::census::Census;
 use crate::error::RenderError;
 use crate::instrument::EncodeClock;
@@ -433,7 +433,16 @@ struct Encoder<'a> {
     style: DrawStyle,
     budget: u64,
     spent: u64,
-    distinct_outlines: HashSet<u32>,
+    /// The `distinct_outlines` counter's working set. [`FastSet`] and not the standard
+    /// library's, because this is asked **once per fill** — the same position as the
+    /// atlas key maps, and for the same reason `keyhash` exists: a `u32` an encoder
+    /// produced is not an adversary's key, and `SipHash`'s per-process seed is a
+    /// liability rather than a defence here. Only `len()` is ever read, so the iteration
+    /// order this changes reaches nothing. Measured on the dense-text archetype (4 320
+    /// fills, callgrind, `doc/PLAN.md` 2026-08-14): 1.65 M of a 19.70 M-instruction
+    /// encode was `SipHash` on this one set, and swapping the hasher took **0.56 M**
+    /// of it — the remainder is the probing, which is `hashbrown`'s either way.
+    distinct_outlines: FastSet<u32>,
     atlas_keys: FastSet<GlyphKey>,
     used_images: HashSet<u32>,
     used_ramps: HashSet<u32>,
@@ -452,6 +461,18 @@ struct Encoder<'a> {
     scratch_charged: u64,
     /// What encode spent its time on, when the caller asked (ADR 0023).
     clock: EncodeClock,
+}
+
+/// Bytes to reserve for one instance stream, from the command count the frame budget
+/// was checked against.
+///
+/// Called only after the budget check, so the value is bounded by the caller's stated
+/// `frame_budget_bytes`: this reserves what the frame has already been *charged*, never
+/// more. The arithmetic is `u64` because the check is, and a product that does not fit
+/// a `usize` reserves **nothing** rather than saturating — a `Vec` that grows is
+/// correct and slower, while `with_capacity(usize::MAX)` is an abort.
+fn instance_reserve(commands: usize, stride: u64) -> usize {
+    usize::try_from((commands as u64).saturating_mul(stride)).unwrap_or(0)
 }
 
 /// Walk the scene once: classify, count, rasterise, check the budget, lay out
@@ -512,8 +533,18 @@ pub(crate) fn encode(
         // is capacity, not commitment — and a 2048-texel width refused real pages
         // whose coverage was well inside the budget (QUORRA_FEEDBACK.md §3).
         scratch: ScratchPacker::new(max_dimension, max_dimension),
-        rect_instances: Vec::new(),
-        quad_instances: Vec::new(),
+        // Sized from the count that was just checked, rather than grown into. The
+        // budget above has already *charged* one rect and one quad per command, so
+        // reserving that much allocates exactly what the frame was priced at — which
+        // is §5's "count then allocate" taken literally, where growing is the same
+        // bytes reached through a dozen reallocations. It over-reserves whichever of
+        // the two lanes a page does not use (a page of glyphs never writes a rect
+        // instance), and that is the stated cost: virtual bytes already inside the
+        // budget, never touched, against the growth measured on the dense-text
+        // archetype at 0.13 M of a 19.14 M-instruction encode (callgrind,
+        // `doc/PLAN.md` 2026-08-14).
+        rect_instances: Vec::with_capacity(instance_reserve(commands.len(), RECT_INSTANCE_STRIDE)),
+        quad_instances: Vec::with_capacity(instance_reserve(commands.len(), QUAD_INSTANCE_STRIDE)),
         current_plan: usize::MAX,
         root: LayerPlan::default(),
         layers: Vec::new(),
@@ -521,7 +552,7 @@ pub(crate) fn encode(
         style: DrawStyle::Over,
         budget: frame_budget_bytes,
         spent: needed,
-        distinct_outlines: HashSet::new(),
+        distinct_outlines: FastSet::default(),
         atlas_keys: FastSet::default(),
         used_images: HashSet::new(),
         used_ramps: HashSet::new(),
@@ -1153,11 +1184,12 @@ impl Encoder<'_> {
         // rather than a constant here (ADR 0024). A residue chain still takes the
         // scratch path: the clip multiplies into the tile, so the tile is not the glyph
         // and would poison the cache for every other placement of it.
-        if let (None, Some(placement)) = (resolved.residues.as_ref(), cache.placement()) {
+        if let (None, Some((placement, entry))) = (resolved.residues.as_ref(), cache.admission()) {
             return self.push_glyph(
                 fill.outline,
                 &fill.to_device,
                 &placement,
+                entry,
                 fill.rule,
                 fill.color,
                 resolved,
@@ -1218,6 +1250,12 @@ impl Encoder<'_> {
     }
 
     /// The glyph lane: rasterise (or find) the tile for this key and emit its quad.
+    ///
+    /// `resident` is the entry [`AtlasStore::prospect`] already found for this key, and
+    /// is passed in rather than looked up again: the lane was *chosen* on that reading,
+    /// so drawing on a second one could only differ if something between the two had
+    /// touched the atlas — which would be the tile-rasterised-twice defect `prospect`
+    /// is written against, not a case to be robust to.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
     #[allow(clippy::too_many_arguments)] // one draw's parameters, threaded once
@@ -1226,6 +1264,7 @@ impl Encoder<'_> {
         outline: OutlineId,
         to_device: &DeviceTransform,
         placement: &GlyphPlacement,
+        resident: Option<AtlasEntry>,
         rule: Rule,
         color: quorra_scene::Color,
         resolved: &ResolvedClip,
@@ -1237,7 +1276,7 @@ impl Encoder<'_> {
         let key = placement.key;
         let first_use = self.atlas_keys.insert(key);
 
-        let entry = if let Some(entry) = self.atlas.get(&key) {
+        let entry = if let Some(entry) = resident {
             if first_use {
                 self.atlas_requested_bytes = self
                     .atlas_requested_bytes

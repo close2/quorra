@@ -2,7 +2,20 @@
 //!
 //! A page of text asks the glyph cache two hashed questions per fill — "have I seen this
 //! key this frame" and "is it resident" — so a dense page hashes about twelve thousand
-//! times inside `encode`. The standard library's default is `SipHash` 1-3 with a
+//! times inside `encode`.
+//!
+//! *Two* questions, and until 2026-08-14 it was **three** lookups: the second was asked
+//! once to choose the lane and again to draw it, and callgrind found both probes still
+//! there on the dense-text archetype. `CacheProspect` now carries the entry it found, so
+//! the sentence above is true by construction rather than by intention. That round also
+//! moved the `distinct_outlines` counter onto this hasher — the one remaining per-fill
+//! `SipHash` in `encode` — and the table below's instrument, held at 1×, now reads
+//! **0.627 ms** where the same tree without either change reads 0.940. The 0.746 in the
+//! table is this hasher's own arrival and is left as recorded: the page has since gained
+//! ADR 0044's chords, so the rows compare to each other and not to today.
+//! `doc/PLAN.md`'s entry for the date has both measurements and their instruments.
+//!
+//! The standard library's default is `SipHash` 1-3 with a
 //! per-process random seed: a good default, chosen against hash-flooding by hostile
 //! keys, and neither property is ours. Our keys are a handful of `u32`s produced by our
 //! own encoder from a display list a friendly process built (CLAUDE.md's position 1),

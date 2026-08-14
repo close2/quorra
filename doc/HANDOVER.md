@@ -62,10 +62,41 @@ What the numbers re-rank, recorded here rather than jumped on:
 - **The §6.2 gap is CPU recording, not the device.** A steady presenting dense-text
   frame is 2.84–3.38 ms against the 2.0 ms success bar, and the device's share is
   0.11–0.13 ms; recording (hash lookups, instance writes — 4 320 commands) is
-  1.90–2.32 ms of it and submit/device-wait another 0.55–0.71. Before designing
-  anything: profile what recording actually spends its time on, and price **encode
-  reuse across identical frames** — a retained scene redrawn unchanged pays full
-  recording today, and a page a person is reading is exactly that frame after frame.
+  1.90–2.32 ms of it and submit/device-wait another 0.55–0.71.
+
+  **Recording is now attributed** (2026-08-14; the table and the instrument are in
+  `PLAN.md`'s entry for the date). Three rows of it were free and are landed —
+  `distinct_outlines` off `SipHash`, the instance buffers reserved from phase 1's
+  count, and `CacheProspect` carrying the entry so the glyph key is probed once
+  instead of twice — worth 6.4 % of the dense-text encode by instruction count and
+  **0.940 → 0.627 ms on `examples/zoom`** at 1×, 30 round-robin rounds. The
+  headline for whoever takes the second half: recording is 78 % of the encode, and
+  **`outline_device_bounds` alone is a third of recording** — 4 320 fills × 37 control
+  points transformed and min/maxed, recomputed identically on every frame of a page
+  nobody is touching. Adding the atlas probes, the key construction and the instance
+  bytes, **over 40 % of recording is a pure function of (scene, viewport)**. So
+  **encode reuse across identical frames** is the item, it is sized rather than
+  guessed, and two cheaper experiments should be priced before it: a per-`(outline,
+  linear)` bound cache (a placement's device box is its neighbour's translated), and
+  whether the reuse can be a whole retained `Encoded` rather than a set of caches.
+
+  **How to measure it, so the next round does not re-derive this.** `perf` is not
+  installed for this user, and wall clocks on this machine are worthless at the load
+  averages it actually runs at — 4.49 ms for an encode the owner clocked at 1.96–2.35.
+  Use **callgrind**: it is installed, it counts instructions, and load cannot touch it.
+  `encode` needs no adapter, so the harness is a `#[cfg(test)]` module inside
+  `quorra-gpu` that builds a `ResourceStore` and an `AtlasStore` directly, copies the
+  archetype out of `examples/surface_measure.rs`, encodes twice to fill the atlas and
+  then N times from an `#[inline(never)]` wrapper. Build with
+  `CARGO_PROFILE_RELEASE_DEBUG=1` into its own target dir, then
+  `valgrind --tool=callgrind --collect-atstart=no --toggle-collect='*steady_run*'
+  --read-inline-info=yes --cache-sim=no`, and read it with `callgrind_annotate
+  --inclusive=yes` (the lines carrying the binary's path are the per-function
+  inclusive totals) and `--tree=caller` for call sites and counts. **Check the counter
+  row against `tests/archetypes.rs` before believing any of it** — that is what says
+  the harness encoded §6.2's page. Delete the harness with the round; `Cargo.toml`'s
+  note on `criterion` is the standing decision that a benchmark harness does not live
+  in this tree.
 - **The artwork shape's steady frame is geometry: 37–47 ms of residue-clip
   re-rasterisation** every frame, on the corpus's p99 clip shape. That is item 5's
   seam with a steady-state cost beside its refusal count, and §15's question measured
