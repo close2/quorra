@@ -9,7 +9,8 @@ three sections it answers are the three that document lists as waiting on us: **
 and is the largest thing either side is holding. It ends with what the pending push
 delivers, so it doubles as the release note for the sync round.
 
-Everything below was produced on 2026-08-14 at `f1873da` plus this round's commits.
+Everything below was produced on 2026-08-14, and the line numbers and figures were brought
+up to `7896874` — the end of that day's ten rounds — at the close of it.
 
 ---
 
@@ -22,21 +23,21 @@ Every coverage tile this device places is `shape ∩ clip ∩ target`, and the i
 happens *before* anything is rasterised rather than after. The evidence, in the order a
 reader should take it:
 
-- `crates/quorra-gpu/src/encode.rs:2151` — `visible_tile`, whose doc comment is the claim
+- `crates/quorra-gpu/src/encode.rs:1470` — `visible_tile`, whose doc comment is the claim
   verbatim: *"The tile a shape with these device bounds occupies: shape ∩ clip ∩ target,
   rounded out to whole pixels."* It intersects the shape's device bounds with
   `resolved.rect` and with the viewport, and returns `None` — draws nothing, legitimately
   — when the result is empty.
-- `crates/quorra-gpu/src/encode.rs:2099` — `coverage_tile`, the rasterising sibling, which
+- `crates/quorra-gpu/src/encode.rs:1415` — `coverage_tile`, the rasterising sibling, which
   does that same arithmetic and then rasterises **only the surviving rectangle**. A page
   rectangle admitted by a 24-pixel clip rasterises 24 pixels here, not a page.
-- `crates/quorra-gpu/src/encode.rs:1281` — `residue_intersection`, which handles the part a
-  rectangle cannot express: when the clip chain has a non-rectangular link, its coverage is
-  rasterised over *the tile that survived the rectangular intersection* and multiplied in.
-  So a residue clip narrows the tile further; it never widens it.
-- `crates/quorra-gpu/src/encode.rs:206` — the same rule stated for the image lane
+- `crates/quorra-gpu/src/encode/clips.rs:146` — `residue_intersection`, which handles the
+  part a rectangle cannot express: when the clip chain has a non-rectangular link, its
+  coverage is rasterised over *the tile that survived the rectangular intersection* and
+  multiplied in. So a residue clip narrows the tile further; it never widens it.
+- `crates/quorra-gpu/src/encode/rare.rs:42` — the same rule stated for the image lane
   (`ImageOp::dest`: *"The quad drawn: footprint ∩ clip ∩ target, at pixel bounds"*), and at
-  `:1696` for the shading and mesh lane. It is the whole device's rule, not the path lane's.
+  `:87` for the shading and mesh lane. It is the whole device's rule, not the path lane's.
 
 So for `bug1721218_reduced.pdf`'s 3 490 page-sized `sh` rectangles under 24-pixel clips:
 each one costs us a clipped tile, not a page. **Calling `pdf_render::cropped_rectangle`
@@ -48,8 +49,8 @@ shrink is geometry we already intersect.
 
 It can, and it already does: **the clip is the bound.** A `ClipId` whose outline is an
 axis-aligned rectangle collapses, at
-`crates/quorra-gpu/src/encode.rs:434`, to a device-space rectangle and nothing else —
-`StoredOutline::rect_hint` is computed once at upload (`resources.rs:150`,
+`crates/quorra-gpu/src/encode/clips.rs:96`, to a device-space rectangle and nothing else —
+`StoredOutline::rect_hint` is computed once at upload (`resources.rs:160`,
 `quorra_scene::axis_aligned_rect`) and a rectangular clip under an axis-preserving
 transform never becomes a mask, a texture or a residue. It intersects into
 `ResolvedClip::rect` and is carried by every lane. That is exactly the "state the bound
@@ -73,11 +74,13 @@ Measured from our side on 2026-08-14, on the corpus's p99 clip shape (`doc/PLAN.
 for the date, `examples/surface_measure.rs`, RADV presenting to a real surface, minima over
 80 frames):
 
-- **artwork archetype: 48.2–61.4 ms steady per frame**, of which encode is 43.6–57.3 and
-  **geometry alone is 37.2–47.4 ms** — 600 residue-clipped commands re-rasterising their
+- **artwork archetype: 43.3–61.4 ms steady per frame**, of which encode is 39.6–57.3 and
+  **geometry alone is 35.4–47.4 ms** — 600 residue-clipped commands re-rasterising their
   coverage, every frame;
-- against the dense text page's 2.84–3.38 ms total on the same instrument. Eight to ten
-  times the cost, on a shape about 5 % of documents have.
+- against the dense text page's 1.8–3.4 ms total on the same instrument. Twenty times the
+  cost, on a shape about 5 % of documents have — and the ratio grew rather than shrank
+  over the day, because everything that made the text page faster was in recording and
+  this page's cost is not.
 
 It is the same seam as the three pages this device still refuses with `ScratchExhausted`
 (`bug1703683_page2_reduced`, `issue1905`, `bug1721218_reduced` — 194 to 253 MB of coverage
@@ -101,7 +104,7 @@ per cent.
 The three scenes:
 
 - **`rect`** — `SceneBuilder::rect`, the analytic lane of ADR 0007
-  (`encode.rs:1325`, `encode_rect`): intersect with the clip, intersect with the target,
+  (`encode.rs:938`, `encode_rect`): intersect with the clip, intersect with the target,
   push one instance. Nothing is rasterised and no tile is placed.
 - **`fill (shared)`** — one uploaded unit-square outline placed by scale-and-translate.
   The friendliest case the fill lanes have: one shape at many placements is exactly what
@@ -153,7 +156,7 @@ than a claim either side is making.
 (The condition it does **not** cover is the one §19 names itself: a fill of an `re` path
 under a transform that is not axis-aligned is not a rectangle, and any recogniser has to
 say so. Our own lanes ask `transform_preserves_axes` before taking any analytic path —
-`encode.rs:1336` for the rectangle, `:433` for a rectangular clip — and fall through to the
+`encode.rs:949` for the rectangle, `encode/clips.rs:96` for a rectangular clip — and fall through to the
 path lane when it is false. A recogniser on your side needs the same question, on the
 composed device transform rather than on the outline.)
 
@@ -173,9 +176,10 @@ and it is two answers, not one:
   the whole page, even if every one of the twelve were a rectangle. No recognition pass can
   be worth writing for that, and the recognition itself would eat it.
 - **For a page whose commands really are thousands of rectangles, it is 0.6 to 2.1 ms
-  per frame.** For scale: `doc/PLAN.md`'s 2026-08-14 entry measures a whole steady
-  presenting dense-text frame at 2.84–3.38 ms, of which per-command recording is 1.90–2.32.
-  So on such a page the `Rect` lane is worth between a fifth and two thirds of the frame.
+  per frame.** For scale: `doc/PLAN.md`'s closing 2026-08-14 entry measures a whole steady
+  presenting dense-text frame at **1.816 ms**, of which per-command recording is 1.130. So
+  on such a page the `Rect` lane is worth between a third of the frame and more than the
+  whole of one — the day's encode work made this saving a *larger* share, not a smaller.
 
 **The honest reading is that neither side yet knows whether such a page is in the corpus.**
 Your profile counts commands per page; what decides this is *how many of them are
@@ -188,9 +192,9 @@ as *already handled* like §15. If it has four thousand, it is worth a morning o
 
 **The recogniser exists here already, and it is wired to the wrong half of the fill path.**
 `StoredOutline::rect_hint` is computed for every outline at upload
-(`resources.rs:150`), and `encode.rs:1473` uses it to send a *shaded* fill of a rectangular
+(`resources.rs:160`), and `encode.rs:1086` uses it to send a *shaded* fill of a rectangular
 outline down the analytic lane with no scratch tile at all. But a **solid** fill returns at
-`encode.rs:1458` into `fill_solid` (`:1491`) before that check is ever reached, and takes
+`encode.rs:1071` into `fill_solid` (`:1104`) before that check is ever reached, and takes
 the GPU triangle lane, the glyph atlas or the scratch coverage path like any other shape.
 The counters in the table above show it: the `fill` rows report 12, 280 and 4 320 distinct
 atlas keys where the `rect` rows report none.
@@ -326,9 +330,9 @@ memoised box is the direct box bit for bit. It is in the push below.
 
 ## What the pending push delivers
 
-Ten commits past the `a7babab` your `Cargo.lock` pins, and twenty-seven past `a35dc70`,
-which is the last revision the owner pushed. The three that change something you can see,
-and one thing to re-run:
+Twenty-four commits past the `a7babab` your `Cargo.lock` pins, and forty-one past
+`a35dc70`, which is the last revision the owner pushed. The four that change something you
+can see, and one thing to re-run:
 
 - **`d594566` — the §21.1 round cap.** Your prediction in §22.7 was right, and the effect
   is worse than the reading: the far cap is a correct outward semicircle and the near cap
@@ -348,14 +352,32 @@ and one thing to re-run:
   re-run on the real display reads **compiles: none, on eight presenting first frames of
   eight.** `Composite` is deliberately excluded — since ADR 0038's hand-off its target is
   always an internal accumulator, never the surface.
-- **§6.2 measured in its own terms at last** (`doc/PLAN.md`, 2026-08-14). The brief's
-  success criterion had never been measured *presenting to a surface*; every number this
-  tree tracked was offscreen with readback. Dense text is **2.84–3.38 ms** against your CPU
-  backend's 5.9 and the 2.0 ms bar. **The composition is the finding: execute is
-  0.11–0.13 ms — the GPU is four per cent of the frame** — and the rest is per-command CPU
-  recording (1.90–2.32 ms for 4 320 commands) plus 0.55–0.71 of submit and device wait. So
-  the remaining gap is ours and is on the host thread, and no work on the device can close
-  it. The artwork archetype's 48.2–61.4 ms is in §15 above.
+- **§21.2 — a tiny outline no longer flattens to its inscribed polygon** (ADR 0044). Your
+  report was right and the mechanism is exactly the one you named: `FLATTEN_TOLERANCE` is a
+  quarter of a device pixel, and a curve whose whole extent is a pixel meets that bound with
+  four chords — the inscribed square. A cubic's bound is now the tighter of that tolerance
+  and 1/32 of the cubic's own device extent, which floors it at 16 chords a full turn. On
+  your corpus, one copy, the same hour, flipping only the `[patch]`: **at scale 1, 919/35
+  becomes 934/20; at scale 4, 935/11 becomes 936/10. Sixteen pages moved onto your oracle
+  and none moved off.** Most of them are prose rather than the sub-pixel dots the report is
+  about — a bowl at body size is a cubic two to five device pixels across — so **§21.3's
+  deferred gate is worth writing after the bump**. One correction to carry with it: **the
+  clause you cite is not the one that governs.** §10.7.3 is *smoothness*, a shading's colour
+  error; flatness is §10.7.2, and it is the stronger citation for you — it licenses a device
+  tolerance outright ("PDF processors may choose to ignore any flatness tolerance specified
+  within a PDF file") and its own NOTE 2 says where that licence stops: "the purpose of the
+  flatness tolerance is to control the precision of curve rendering, **not to draw inscribed
+  polygons**".
+- **§6.2 measured in its own terms at last, and met** (`doc/PLAN.md`, 2026-08-14). The
+  brief's success criterion had never been measured *presenting to a surface*; every number
+  this tree tracked was offscreen with readback. The first run read **2.84–3.38 ms** for
+  dense text against your CPU backend's 5.9 and the 2.0 ms bar; **the closing run the same
+  day reads 1.816 ms**, under the bar, on nothing but encode work. **The composition was the
+  finding and still is: execute is 0.071–0.13 ms — the GPU is about four per cent of the
+  frame** — and the rest is per-command CPU recording (1.130 ms for 4 320 commands, from
+  1.90–2.32) plus 0.380 of submit and device wait. Read it as a minimum from one run on a
+  desktop rather than as a margin. The artwork archetype's 43.3–61.4 ms is in §15 above, and
+  it is the one that did not move.
 - Also in the range, and none of them should be visible to you: ADR 0040 (which
   **retracts the 24.7 → 10.3 ms first-frame figure your §9.2 quotes** — it could not be
   reproduced in five configurations, and the allocation it was credited to costs 0.06 ms;

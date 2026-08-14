@@ -12,8 +12,9 @@ an ADR if it is a decision, in `PLAN.md` if it is where we are, here if it chang
 Nine milestones are done; the swap landed on 2026-08-03 and the caller consumes this
 library as a git dependency, pinned by their `Cargo.lock`.
 
-**`a35dc70` is what the owner pushed.** Everything after it is local, and the ADRs say what
-each is: 0032 and 0033 answer the caller's §14.2, then the sheet packer (0034), the size
+**`a35dc70` is what the owner pushed, and `git log --oneline a35dc70..HEAD` counts 41
+commits since.** Everything after it is local, and the ADRs say what each is: 0032 and 0033
+answer the caller's §14.2, then the sheet packer (0034), the size
 hint (0035), layers sized to their plans (0036, in two commits), a scissor fix that 0036
 made necessary (no ADR — a defect), masks sized to their plans (0037, in two commits), and
 one accumulator per plan instead of a ping-pong pair (0038, in two commits), the root sized
@@ -22,14 +23,21 @@ ADR 0035's first-frame number failed to reproduce (0040), a child the encoder dr
 clip leaves it nothing to contribute (0041), the round cap that was drawing the
 half-disc *inside* the stroke — the caller's `QUORRA_FEEDBACK.md` §21.1 — and a WGSL
 compile failure turned from a silent test-suite hang into a refusal that names its span
-(0042).
+(0042). Then the ten rounds of 2026-08-14, whose three ADRs are the warm set keyed by the
+surface's negotiated format (0043), a flatness bound that is relative to the shape when the
+shape is smaller than the tolerance — the caller's §21.2 (0044) — and what an unchanged
+frame need not pay again, priced whole and landed by half (0045). The rest of those rounds
+carry no ADR because none decided anything: `examples/rect_lane.rs` and the §19 numbers,
+the fuzz vocabulary, the shader-sameness guard, `SceneError`'s own module, and
+`encode.rs` split along the seams its own comments named.
 
 On 2026-08-13 the tree had a full review — code, plan, and both sides of the caller
 conversation — and the "What to do next" list below is its result. The review's one
 structural finding: the work itself is disciplined, but the brief's own success metric
-(§6.2, surface-tier) has never been measured, and the caller sync is lagging the local
+(§6.2, surface-tier) had never been measured, and the caller sync was lagging the local
 work. `examples/surface_measure.rs` was built for the first of those; it is the only
-code the review added.
+code the review added. The metric has since been measured and met (item 1); the sync is
+still lagging (item 2), and is now the older of the two problems.
 
 **What the caller must do to take it** is written for them in
 `/home/cl/projects/pdf-viewer/doc/QUORRA_UPGRADE.md`: one line for `GroupSpec::compose`, a
@@ -47,6 +55,12 @@ metric the brief judges us by has never been measured in its own terms, and the 
 conversation is going stale while local work stacks up — both cost less to fix than one
 more optimisation round, so they go first.**
 
+**As of the close of 2026-08-14, items 1, 3 and 4 are done and only 2 and 5 are open.** The
+numbers are kept rather than deleted because three later items lean on them; the two that
+remain are **the sync round** — now the largest thing either side is holding, and what
+item 1's second half is blocked on — and **the residue-clip tiling seam**, which is the
+only work left with milliseconds in it.
+
 ### 1. The two surface-tier numbers — **done** (2026-08-14), and what they left behind
 
 The owner ran `examples/surface_measure.rs` on RADV at the real display, twice, and the
@@ -55,7 +69,9 @@ date, **compiles: none on eight presenting first frames of eight** on the re-run
 owner also left a trigger loop for this instrument — `touch tmp/start-measurement` in
 this repository and the loop rebuilds the working tree and runs `surface_measure` on
 the real GPU, writing `tmp/output.stdout.txt` — so a measurement no longer waits for a
-hand-off (confirm the loop still runs before relying on it).
+hand-off (confirm the loop still runs before relying on it; it was alive and turned a
+trigger round in about ninety seconds on 2026-08-14, `stderr` beside the output showing
+what it rebuilt).
 
 What the numbers re-rank, recorded here rather than jumped on:
 
@@ -64,11 +80,18 @@ What the numbers re-rank, recorded here rather than jumped on:
   0.11–0.13 ms; recording (hash lookups, instance writes — 4 320 commands) is
   1.90–2.32 ms of it and submit/device-wait another 0.55–0.71.
 
+  **And the gap is closed** (2026-08-14, closing re-run on the same instrument, the
+  numbers in `PLAN.md`'s top entry): **1.816 ms `wall − acquire`**, encode 1.126 of it,
+  recording 1.130 — under §6.2's 2.0 ms success bar, by the two landed encode changes
+  below and nothing else. It is a minimum from one run on a desktop, not a margin; the
+  clear-win figure is 0.6 ms and ADR 0045's unbuilt half is what points at it.
+
   **Recording is now attributed** (2026-08-14; the table and the instrument are in
   `PLAN.md`'s entry for the date). Three rows of it were free and are landed —
   `distinct_outlines` off `SipHash`, the instance buffers reserved from phase 1's
   count, and `CacheProspect` carrying the entry so the glyph key is probed once
-  instead of twice — worth 6.4 % of the dense-text encode by instruction count and
+  instead of three times (ADR 0024 said twice; the profile found a third) — worth
+  6.4 % of the dense-text encode by instruction count and
   **0.940 → 0.627 ms on `examples/zoom`** at 1×, 30 round-robin rounds. The
   headline for whoever takes the second half: recording is 78 % of the encode, and
   **`outline_device_bounds` alone is a third of recording** — 4 320 fills × 37 control
@@ -111,15 +134,16 @@ What the numbers re-rank, recorded here rather than jumped on:
   the harness encoded §6.2's page. Delete the harness with the round; `Cargo.toml`'s
   note on `criterion` is the standing decision that a benchmark harness does not live
   in this tree.
-- **The artwork shape's steady frame is geometry: 37–47 ms of residue-clip
+- **The artwork shape's steady frame is geometry: 35–47 ms of residue-clip
   re-rasterisation** every frame, on the corpus's p99 clip shape. That is item 5's
   seam with a steady-state cost beside its refusal count, and §15's question measured
   from our side — the three answers belong together in the sync round.
 
 ### 2. A sync round with the caller — cheap, and overdue
 
-The viewer pins `a7babab`, five commits behind, and those five include the §21.1 round-cap
-fix their own §22.7 predicted and wants to re-run first thing after a bump. Twenty-five
+The viewer pins `a7babab`, twenty-four commits behind, and those include the §21.1
+round-cap fix their own §22.7 predicted and wants to re-run first thing after a bump, and
+ADR 0044, which moved sixteen of their corpus pages onto their own oracle. Forty-one
 commits are local. Their `QUORRA_FEEDBACK.md` has three sections waiting on this side,
 and two of them cost an afternoon:
 
@@ -128,15 +152,16 @@ owner to carry across, since we never edit their tree. What each one says:
 
 - **§15** asks whether the coverage lane bounds a clipped fill by its clip's extent, and
   offers to close itself if yes. It is yes: every coverage tile is `shape ∩ clip ∩
-  target` (`encode.rs:2151` `visible_tile`, `:2099` `coverage_tile`, `:1281`
-  `residue_intersection`, `:206` for the image lane). Its secondary ask — can the scene
-  say "this fill is bounded by this rectangle" — is answered by the same fact: a
-  rectangular clip collapses to a device rectangle at `encode.rs:433` and never becomes a
-  mask, so the clip already *is* the bound. The draft cross-references item 5, because
-  §15 and the tiling ceiling are the same seam seen from two sides.
+  target` (`encode.rs:1470` `visible_tile`, `:1415` `coverage_tile`,
+  `encode/clips.rs:146` `residue_intersection`, `encode/rare.rs:42` for the image lane).
+  Its secondary ask — can the scene say "this fill is bounded by this rectangle" — is
+  answered by the same fact: a rectangular clip collapses to a device rectangle at
+  `encode/clips.rs:96` and never becomes a mask, so the clip already *is* the bound. The
+  draft cross-references item 5, because §15 and the tiling ceiling are the same seam seen
+  from two sides.
 - **§19** is measured: `examples/rect_lane.rs`, numbers and interpretation in `PLAN.md`'s
   2026-08-14 entry. Median page: microseconds, so nothing. A page of thousands of
-  rectangles: 0.6–1.8 ms. Which of those the corpus actually has is a row their profile
+  rectangles: 0.6–2.1 ms. Which of those the corpus actually has is a row their profile
   does not carry, and the draft asks for it before either side writes a recogniser.
 - **§22.5** (a process note, not code): the recommendation is *document*, because the name
   `layer_textures` always meant what it still means and what was wrong was a derived claim
@@ -145,7 +170,9 @@ owner to carry across, since we never edit their tree. What each one says:
   derived claim does, and name the counter in the ADR that moves its value.
 
 Push (or hand the owner the push), deliver the answers, and let their corpus re-baseline
-absorb ADRs 0036–0043 in one round instead of six.
+absorb ADRs 0036–0045 in one round instead of ten. The draft's release-note section carries
+ADR 0044 as a fourth answer — their §21.2 was not on the waiting list because it landed
+after that list was written, and it is the one of the four they can see in pixels.
 
 ### 3. §21.2 — a tiny outline flattens to its inscribed polygon — **done** (2026-08-14)
 
@@ -163,9 +190,11 @@ left behind for whoever answers the caller next:
   not the expectation — the population a chord floor reaches is glyph outlines, not just
   the sub-pixel dots the report is about. `doc/PLAN.md`'s entry has the tables.
 
-What is still open is the cost: the extra chords have never been priced on a dense text
-page, because `geometry` is only visible through `examples/surface_measure.rs` on the real
-GPU. It is the ADR's revisit condition and the gate on ever raising the floor to 32.
+The cost was still open here and **is now answered**: the closing surface re-run
+(`PLAN.md`'s top entry, 2026-08-14) puts `geometry` on the dense-text page at **0.161 ms**,
+inside the 0.16–0.18 ms it read before the chords were added. That is the ADR's revisit
+condition discharged — and it is *not* a licence to raise the floor to 32, which the ADR
+refuses on accuracy grounds rather than on cost.
 
 ### 4. Split `encode.rs` along its stated seams — **done** (2026-08-14)
 
@@ -179,13 +208,11 @@ verbatim `ChildOp` construction is now `ChildOp::implicit_blend_group`; the thre
 were compared field by field first and were identical in all nine. Item 5 still lands
 here, which is why this went before it.
 
-**One thing the comparison found and did not fix**, because it wants the CPU oracle on a
-page that draws it rather than a one-line edit: `encode_stroke` wraps a non-Normal blend
-in §11.3.5's implicit one-element group on the blend mode alone, where `encode_fill` and
-`encode_image` also require `self.style == DrawStyle::Over` — on the stated argument that
-inside a knockout group every mode degenerates to Normal (§11.4.6 with §11.3.6's αb = 0).
-So a blended stroke inside a knockout group composites today as an ordinary blend of a
-child layer instead of as §11.4.6's replacement.
+ADR 0045 then added a fifth file — `encode/hull.rs` (365, the `(outline, linear)` bound
+memo and its proof) — and its call site, so `encode.rs` reads 2 077 today rather than
+2 060. **The comparison this split made possible also found a clause question, and it is
+the first bullet of the small debts below** — it is recorded there rather than here,
+because this item is done and a done item is a thing a future session deletes.
 
 ### 5. A page-sized coverage tile per clipped shape — **not** multi-sheet passes
 
@@ -211,13 +238,22 @@ existing mechanism — and it is worth its own measurement before its own design
 
 ### Small debts, none blocking — fill-in work between the numbered items
 
-The 2026-08-13 review's code-health pass, so a fresh session can pick one without
-re-auditing. Each is one sitting:
+The 2026-08-13 review's code-health pass, plus what the `encode.rs` split turned up, so a
+fresh session can pick one without re-auditing. Each is one sitting:
 
+- **A blended stroke inside a knockout group takes the wrong clause**, found by the
+  field-by-field comparison item 4's split required and left unfixed because it wants the
+  CPU oracle on a page that draws it rather than a one-line edit. `encode_stroke` wraps a
+  non-Normal blend in §11.3.5's implicit one-element group **on the blend mode alone**,
+  where `encode_fill` and `encode_image` also require `self.style == DrawStyle::Over` — on
+  the stated argument that inside a knockout group every mode degenerates to Normal
+  (§11.4.6 with §11.3.6's αb = 0). So a blended stroke inside a knockout group composites
+  today as an ordinary blend of a child layer instead of as §11.4.6's replacement. It is
+  the only one of these that is a correctness question rather than a symmetry one.
 - **A solid fill of a rectangular outline does not take the rectangle lane**, and a
   shaded one does. `StoredOutline::rect_hint` is computed for every outline at upload
-  (`resources.rs:150`) and read at `encode.rs:1473` — but only on the shading arm; a solid
-  paint returns into `fill_solid` at `encode.rs:1458` first and takes the atlas or the
+  (`resources.rs:160`) and read at `encode.rs:1086` — but only on the shading arm; a solid
+  paint returns into `fill_solid` at `encode.rs:1071` first and takes the atlas or the
   coverage path. Output is byte-identical either way (`examples/rect_lane.rs` checks it),
   so this is symmetry rather than correctness — but it is worth **0.13–0.49 µs a
   rectangle**, it is where most of the caller's §19 lives, and it is four lines against a

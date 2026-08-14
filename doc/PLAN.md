@@ -16,6 +16,44 @@ disagrees with the tree is worse than no plan.
 
 ## Where we are
 
+**§6.2's success bar is met on the instrument that judges it: 1.816 ms against 2.0**
+(2026-08-14, closing re-run of `examples/surface_measure.rs` by the owner on RADV at the
+real display). Ten rounds ago the same instrument read 2.84–3.38 ms for the same page,
+and the entry below said the remaining gap was per-command CPU recording and that no work
+on the device could close it. It was recording, and it closed. One run, 80 frames over two
+rounds per shape, load average 5.0–16.9 during it, **minima** for the reason the first run
+gave — the medians here are 12.093 ms against a 1.816 ms minimum, so only the minima are
+evidence:
+
+| dense text, steady | first run | closing run | |
+|---|---:|---:|---|
+| `wall − acquire` | 2.84–3.38 ms | **1.816** | §6.2's 2.0 ms bar, met |
+| encode | 1.96–2.35 | **1.126** | |
+| — recording | 1.90–2.32 | **1.130** (in a 1.348 instrumented encode) | |
+| — geometry | 0.16–0.18 | **0.161** | ADR 0044's extra chords cost nothing visible |
+| — staging | 0.05–0.07 | **0.042** | |
+| execute | 0.11–0.13 | **0.071** | the GPU is still about 4 %, of a smaller frame |
+| submit + device wait | 0.55–0.71 | **0.380** | |
+
+What moved it is this session's two landed encode changes and nothing else: the
+`(outline, linear)` bound memo (ADR 0045, −21.2 % of a dense-text encode by instruction
+count) and the three free rows before it (−6.4 %, the largest being the glyph key probed
+once instead of three times). ADR 0044 went the other way by construction — it adds chords
+below 8 device pixels — and `geometry` came in inside its own earlier range, which is the
+answer to that ADR's revisit condition: **the chord floor is not visible on a dense text
+page.**
+
+Nothing regressed. The artwork archetype reads `wall − acquire` 48.2–61.4 → **43.276 ms**,
+encode 43.6–57.3 → **39.588**, geometry 37.2–47.4 → **35.402**; that last one is not
+something this session predicts, and the honest reading of it is the spread of a single run
+rather than a gain. First frames still read **compiles: none, on eight of eight** (ADR 0043
+holding), at the same 0.76 MB and 5.71 MB of upload.
+
+And what the number is *not*: a margin. A minimum on a desktop at load 5 is not the same
+claim as 2.0 ms under the caller's own frame loop on their machine, and §6.2's clear-win
+figure is 0.6 ms — which is where ADR 0045's unbuilt half, the retained `Encoded` at
+0.154 ms, still points.
+
 **An unchanged frame costs 0.154 ms instead of 1.538, and a fifth of that is already
 taken** (2026-08-14, ADR 0045, the caller's `doc/todo/44` §3). The round before this one
 left encode reuse sized rather than priced; this one prices it and takes the half that
@@ -278,14 +316,15 @@ in a new place — never publish a crossover as a constant.
 Read as a per-rectangle cost it is **0.13–0.19 µs for a reused outline and 0.21–0.49 µs for
 a placed-once one**, so the median twelve-command page saves two to four *microseconds* and
 only a page of thousands of rectangles saves the 0.6–2.1 ms that would matter against a
-2.84–3.38 ms frame. §19's other condition is now a property the example prints rather than
+2.84–3.38 ms frame (1.816 ms after the closing re-run, which makes the same saving a
+larger share of a smaller frame rather than a smaller one). §19's other condition is now a property the example prints rather than
 a claim: **0 of 8 022 576 bytes differ** between the lanes, at both sizes, on both adapters,
 for both fill variants.
 
 The finding the measurement did not go looking for: `StoredOutline::rect_hint` is computed
-for every outline at upload (`resources.rs:150`) and `encode.rs:1473` uses it to send a
+for every outline at upload (`resources.rs:160`) and `encode.rs:1086` uses it to send a
 *shaded* fill of a rectangular outline down the analytic lane — but a **solid** fill
-returns into `fill_solid` at `encode.rs:1458` before that check is reached, and takes the
+returns into `fill_solid` at `encode.rs:1071` before that check is reached, and takes the
 atlas or the coverage path like any other shape (the example's counters show 12, 280 and
 4 320 distinct atlas keys where the rectangle lane reports none). Output is byte-identical,
 so it is a defect of symmetry rather than of correctness — but most of what §19 proposes
@@ -293,7 +332,10 @@ buying with a recogniser on the *caller's* side is available on ours, without an
 vocabulary changing. It is in `HANDOVER.md`'s list.
 
 **§6.2 has its number at last, and the frame it describes is CPU-bound** (2026-08-14,
-`examples/surface_measure.rs` and ADR 0043): the brief's success criterion — a third of
+`examples/surface_measure.rs` and ADR 0043). **Superseded later the same day by the
+closing re-run at the top of this file — the dense-text figure below is 2.84–3.38 ms and
+is now 1.816; what stands unchanged is the *composition*, which is the finding.** The
+brief's success criterion — a third of
 the CPU backend's 5.9 ms on a dense text page at 1191×1684, *presenting to a surface* —
 had never been measured in its own terms; every number this tree tracked was offscreen
 with readback, the tier the design pays its worst cost in. The owner ran the new
