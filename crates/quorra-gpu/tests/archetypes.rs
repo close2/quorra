@@ -450,21 +450,27 @@ fn render(device: &mut Device, scene: &Scene) -> (Counters, Duration) {
 /// baseline nobody can account for is a baseline nobody can defend.
 ///
 /// `(commands, culled, distinct outlines, atlas keys, clip regions, tiles, layer
-/// textures)`. Every field is an exact function of the scene and the viewport, so these
-/// compare by equality on any machine and any adapter. Recorded 2026-08-12.
+/// textures, residue regions, residue tiles)`. Every field is an exact function of the
+/// scene and the viewport, so these compare by equality on any machine and any adapter.
+/// Recorded 2026-08-12; the last two joined it on 2026-08-15 (ADR 0049).
 ///
 /// - **median page** — twelve fills over nine outlines at twelve distinct sub-pixel
 ///   phases, so twelve keys; all cached, so no tile touches the sheet.
 /// - **dense text** — 4 320 placements over 818 outlines collapse to 2 164 keys, which
 ///   is the quantised phase doing its job. The **40 tiles** are the 40 commands under a
 ///   *curve* clip: each multiplies the clip's residue into a coverage tile of its own.
-///   The two clips resolve to one rectangle, the shape living in the residue.
+///   The two clips resolve to one rectangle, the shape living in the residue. Those two
+///   chains are **2 residue regions** and no residue tile: each is rasterised once and
+///   the 40 commands take windows on it (ADR 0049).
 /// - **artwork** — 684 top-level nodes are 676 draws plus 8 groups (`Counters::commands`
 ///   counts the scene's top level). **600 tiles** are the 600 curve-clipped commands,
 ///   and **3 layer textures** are the root's accumulator, one group's at a time, and the
 ///   copy of the pixels that group's composite covers — ADR 0020's depth pricing showing
 ///   its work on eight sibling groups, at ADR 0038's one texture per plan. It was 4 while
-///   a plan ping-ponged between two.
+///   a plan ping-ponged between two. **185 residue regions against 600 tiles** is
+///   ADR 0049's whole subject: 185 chains, 600 commands under them, and one
+///   rasterisation each rather than one per command. A residue-tile count above zero
+///   here would mean the admission rule had changed its mind about this page.
 /// - **image page** — 200 fills and 32 images under *rectangular* clips: **no tiles at
 ///   all**, against dense text's 40. That contrast is ADR 0007's whole claim, and it is
 ///   the reason `rect_clips` is a field of the archetype.
@@ -474,16 +480,16 @@ fn render(device: &mut Device, scene: &Scene) -> (Counters, Duration) {
 /// - **giant** — 1 500 commands, each its own outline and its own key: reuse of exactly
 ///   one, so the atlas answers nothing and every command rasterises. Against dense
 ///   text's 5.3 placements per outline, this is the other end of the corpus.
-const BASELINE: [(&str, [u32; 7]); 6] = [
-    ("median page", [12, 0, 9, 12, 0, 0, 0]),
-    ("dense text", [4320, 0, 818, 2164, 1, 40, 0]),
-    ("artwork", [684, 0, 300, 300, 1, 600, 3]),
-    ("image page", [232, 0, 60, 158, 4, 0, 0]),
-    ("clip mountain", [1200, 0, 200, 800, 1200, 0, 0]),
-    ("giant", [1500, 0, 1500, 1500, 0, 0, 0]),
+const BASELINE: [(&str, [u32; 9]); 6] = [
+    ("median page", [12, 0, 9, 12, 0, 0, 0, 0, 0]),
+    ("dense text", [4320, 0, 818, 2164, 1, 40, 0, 2, 0]),
+    ("artwork", [684, 0, 300, 300, 1, 600, 3, 185, 0]),
+    ("image page", [232, 0, 60, 158, 4, 0, 0, 0, 0]),
+    ("clip mountain", [1200, 0, 200, 800, 1200, 0, 0, 0, 0]),
+    ("giant", [1500, 0, 1500, 1500, 0, 0, 0, 0, 0]),
 ];
 
-fn signature(counters: &Counters) -> [u32; 7] {
+fn signature(counters: &Counters) -> [u32; 9] {
     [
         counters.commands,
         counters.commands_culled,
@@ -492,6 +498,8 @@ fn signature(counters: &Counters) -> [u32; 7] {
         counters.clip_distinct_regions,
         counters.tiles,
         counters.layer_textures,
+        counters.clip_residue_regions,
+        counters.clip_residue_tiles,
     ]
 }
 

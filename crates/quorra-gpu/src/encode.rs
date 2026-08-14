@@ -36,18 +36,20 @@
 //! [`ShadedOp`]) rather than a fourth instance stream — the brief's §0 premise is
 //! that most of a page is glyphs and rectangles, and the encoding matches it.
 //!
-//! Four of the walk's subsystems are their own concerns and their own modules:
+//! Five of the walk's subsystems are their own concerns and their own modules:
 //! [`clips`] turns a chain of [`ClipId`]s into a rectangle and a residue (ADR 0007,
-//! ADR 0030), [`scratch`] is the frame's coverage sheet with the shelf packing that
-//! fills it (ADR 0021, ADR 0034), [`rare`] is the image and shading lanes — the quads
-//! the brief's §0 calls the rare case (ADR 0011) — and [`hull`] is the memo that bounds
-//! a placement by translating its neighbour's box rather than transforming the outline
-//! again (ADR 0045). What is left here is the walk itself and the two lanes it exists
-//! for.
+//! ADR 0030), [`residue`] keeps a chain's residue region so that it is rasterised once
+//! rather than once per mark (ADR 0049), [`scratch`] is the frame's coverage sheet with
+//! the shelf packing that fills it (ADR 0021, ADR 0034), [`rare`] is the image and
+//! shading lanes — the quads the brief's §0 calls the rare case (ADR 0011) — and
+//! [`hull`] is the memo that bounds a placement by translating its neighbour's box
+//! rather than transforming the outline again (ADR 0045). What is left here is the walk
+//! itself and the two lanes it exists for.
 
 mod clips;
 mod hull;
 mod rare;
+mod residue;
 mod scratch;
 
 use std::collections::HashSet;
@@ -70,6 +72,7 @@ use crate::startup::Coverage;
 use crate::viewport::Viewport;
 
 pub(crate) use rare::{ImageOp, PaintSource, ShadedOp};
+use residue::ResidueRegions;
 pub(crate) use scratch::Scratch;
 use scratch::ScratchPacker;
 
@@ -305,6 +308,10 @@ pub(crate) struct Encoded {
     /// Coverage tiles this frame placed on the scratch sheet, both lanes.
     pub tiles: u32,
     pub clip_distinct_regions: u32,
+    /// Residue clip regions this frame rasterised once and cut every tile from, and
+    /// residue rasterisations a single command's tile paid for (ADR 0049).
+    pub clip_residue_regions: u32,
+    pub clip_residue_tiles: u32,
     pub distinct_outlines: u32,
     pub atlas_distinct_keys: u32,
     pub segments: u32,
@@ -444,6 +451,14 @@ struct Encoder<'a> {
     atlas: &'a mut AtlasStore,
     quantum: Option<u16>,
     clips: ClipResolver,
+    /// A clip chain's residue coverage, rasterised once over the chain's own region
+    /// wherever that is worth more than the tiles it replaces (ADR 0049).
+    ///
+    /// Counted before the walk, like [`Census`] above and for the same reason: what a
+    /// chain's region is worth depends on how many commands will ask for it, which is not
+    /// knowable from the one that asks first. Unlike the census this is two integer passes
+    /// with no hashing, and every lane reads it.
+    residue: ResidueRegions,
     scratch: ScratchPacker,
     rect_instances: Vec<u8>,
     quad_instances: Vec<u8>,
@@ -504,6 +519,26 @@ fn instance_reserve(commands: usize, stride: u64) -> usize {
     usize::try_from((commands as u64).saturating_mul(stride)).unwrap_or(0)
 }
 
+/// §6.4's instrument: how many **distinct clip regions** this frame resolved, keyed by
+/// the region itself and never by an identifier.
+///
+/// The caller's clip-mask cache once answered all 303 lookups a page made and built 303
+/// identical page-wide masks because its key was a name; the same page collapses to 1
+/// here. The bits of the four floats are the key, because that is what "the same
+/// rectangle" means without an `Eq` on `f32`.
+fn distinct_clip_regions(clips: &ClipResolver) -> u32 {
+    let mut distinct = HashSet::new();
+    for resolved in clips.resolved.iter().flatten() {
+        distinct.insert([
+            resolved.rect.min.x.to_bits(),
+            resolved.rect.min.y.to_bits(),
+            resolved.rect.max.x.to_bits(),
+            resolved.rect.max.y.to_bits(),
+        ]);
+    }
+    u32::try_from(distinct.len()).unwrap_or(u32::MAX)
+}
+
 /// Walk the scene once: classify, count, rasterise, check the budget, lay out
 /// instances.
 #[allow(clippy::too_many_arguments)] // the frame's inputs, named once at the one call
@@ -555,6 +590,7 @@ pub(crate) fn encode(
         atlas,
         quantum,
         clips: ClipResolver::new(scene.clips().len()),
+        residue: ResidueRegions::of(scene, residue::budget(frame_budget_bytes)),
         // The scratch sheet spans the full device dimension both ways: its *byte*
         // cost is charged tile by tile against the frame budget, so the dimension
         // is capacity, not commitment — and a 2048-texel width refused real pages
@@ -622,16 +658,6 @@ pub(crate) fn encode(
     }
     encoder.charge(winding.device_bytes())?;
 
-    let mut distinct = HashSet::new();
-    for resolved in encoder.clips.resolved.iter().flatten() {
-        distinct.insert([
-            resolved.rect.min.x.to_bits(),
-            resolved.rect.min.y.to_bits(),
-            resolved.rect.max.x.to_bits(),
-            resolved.rect.max.y.to_bits(),
-        ]);
-    }
-
     let sorted = |set: HashSet<u32>| {
         let mut ids: Vec<u32> = set.into_iter().collect();
         ids.sort_unstable();
@@ -651,7 +677,9 @@ pub(crate) fn encode(
         encode_phases: encoder.clock,
         tiles,
         commands: u32::try_from(commands.len()).unwrap_or(u32::MAX),
-        clip_distinct_regions: u32::try_from(distinct.len()).unwrap_or(u32::MAX),
+        clip_distinct_regions: distinct_clip_regions(&encoder.clips),
+        clip_residue_regions: encoder.residue.regions,
+        clip_residue_tiles: encoder.residue.tiles,
         distinct_outlines: u32::try_from(encoder.distinct_outlines.len()).unwrap_or(u32::MAX),
         atlas_distinct_keys: u32::try_from(encoder.atlas_keys.len()).unwrap_or(u32::MAX),
         segments: u32::try_from(encoder.segments).unwrap_or(u32::MAX),
