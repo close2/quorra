@@ -33,6 +33,56 @@ use crate::startup::{self, Options, PreSteps, StartupTimings, WarmUp};
 use crate::surface::SurfaceState;
 use crate::timing::{PassQuery, TimestampSupport};
 
+/// What asking an adapter for a device produced, and what the asking cost.
+struct Requested {
+    gpu: wgpu::Device,
+    queue: wgpu::Queue,
+    timestamps: Option<TimestampSupport>,
+    /// `request_device` alone, which §7 wants reported apart from adapter selection.
+    creation: Duration,
+}
+
+/// Ask the adapter for a device: which features are wanted, which limits are asked
+/// for, and what the call cost.
+///
+/// `adapter` is named rather than borrowed from the caller's `info` because the error
+/// has to say which adapter refused.
+fn request_device(adapter: &wgpu::Adapter, adapter_name: &str) -> Result<Requested, DeviceError> {
+    // Timestamp queries are the difference between measuring §11.1 and inferring
+    // it; taken when the adapter offers them, worked around (and said so) when not.
+    let wanted = wgpu::Features::TIMESTAMP_QUERY;
+    let required_features = adapter.features() & wanted;
+
+    let device_started = Instant::now();
+    let (gpu, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("quorra"),
+        required_features,
+        // The adapter's own limits, not WebGPU's portable defaults: a document
+        // renderer wants the real maximum target size, and `Device::limits`
+        // reports what was actually obtained.
+        required_limits: adapter.limits(),
+        ..Default::default()
+    }))
+    .map_err(|source| DeviceError::DeviceCreation {
+        adapter: adapter_name.to_owned(),
+        source,
+    })?;
+    let creation = device_started.elapsed();
+
+    let timestamps = required_features
+        .contains(wgpu::Features::TIMESTAMP_QUERY)
+        .then(|| TimestampSupport {
+            period: queue.get_timestamp_period(),
+        });
+
+    Ok(Requested {
+        gpu,
+        queue,
+        timestamps,
+        creation,
+    })
+}
+
 impl Device {
     /// A headless device: no window, no surface. The form the caller's test suite and
     /// oracle use, and the form developed first.
@@ -184,32 +234,12 @@ impl Device {
             .map(|surface| SurfaceState::new(surface, &adapter, &info.name))
             .transpose()?;
 
-        // Timestamp queries are the difference between measuring §11.1 and inferring
-        // it; taken when the adapter offers them, worked around (and said so) when not.
-        let wanted = wgpu::Features::TIMESTAMP_QUERY;
-        let required_features = adapter.features() & wanted;
-
-        let device_started = Instant::now();
-        let (gpu, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("quorra"),
-            required_features,
-            // The adapter's own limits, not WebGPU's portable defaults: a document
-            // renderer wants the real maximum target size, and `Device::limits`
-            // reports what was actually obtained.
-            required_limits: adapter.limits(),
-            ..Default::default()
-        }))
-        .map_err(|source| DeviceError::DeviceCreation {
-            adapter: info.name.clone(),
-            source,
-        })?;
-        let device_creation = device_started.elapsed();
-
-        let timestamps = required_features
-            .contains(wgpu::Features::TIMESTAMP_QUERY)
-            .then(|| TimestampSupport {
-                period: queue.get_timestamp_period(),
-            });
+        let Requested {
+            gpu,
+            queue,
+            timestamps,
+            creation: device_creation,
+        } = request_device(&adapter, &info.name)?;
 
         let pipelines = PipelineStore::new(gpu.clone());
         // A surface device warms the presenting lanes in the surface's own format too,
