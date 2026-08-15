@@ -21,6 +21,17 @@ fields and a `DeviceError` variant), ADR 0051 (three files split along their sea
 public API moved), ADR 0052 (the readback gate counts instead of timing) and one clause
 defect fixed: a blended stroke inside a knockout group was blended where §11.4.6 replaces.
 
+**The round is corpus-clean and the bump is ready.** Base against merged, one copy of their
+tree, one hour, both coverage lanes: scale 1 goes 930/24 → 931/23 on the CPU lane and
+928/26 → 929/25 on the GPU lane, scale 4 is unmoved at 936/10/5/23, and exactly two page
+lines change out of 956 with every other line identical to the character. `PLAN.md` carries
+the matrix.
+
+**And they are already blocked on it.** Their working tree uses `RetainedScene` and
+`EncodeSource`, which do not exist at the `87898c6` their own `Cargo.lock` pins — the corpus
+gate cannot even be built against their pin. Their adoption of ADR 0048 is done and waiting
+on a push from this side, which reverses who is holding the round up.
+
 **What the caller must do to take it** is written for them in
 `/home/cl/projects/pdf-viewer/doc/QUORRA_UPGRADE.md` and, for the retained encode,
 `QUORRA_RETAINED_FRAME.md`. Their `doc/QUORRA_FEEDBACK.md` is the other half of that

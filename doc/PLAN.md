@@ -41,14 +41,30 @@ row, since a number without one is not evidence.
 | artwork — the corpus's p99 clip shape — steady | 43.3 ms, geometry 35.4 of it | `surface_measure`, RADV at the real display, 2026-08-14 — **before ADR 0049**, and not re-run on the display since |
 | — the same page's encode, before → after ADR 0049 | geometry **37.8 → 28.9 ms**, encode 46.3 → 37.2 | `examples/residue_clip.rs`, headless RADV into a texture, three alternating rounds, minima, load 3.8–4.8, 2026-08-15 |
 | first frames, presenting | pipeline compiles: **none**, eight of eight | same; ADR 0043 |
-| the caller's corpus at scale 1 | **931** agree / 23 differ / 2 refused / 18 not comparable | their tree, one copy, 2026-08-15 (ADR 0049; `issue2177.pdf` stops differing) |
-| the caller's corpus at scale 4 | **936** / 10 / 5 / 23 | same run, unmoved |
+| the caller's corpus at scale 1 | **931** agree / 23 differ / 2 refused / 18 not comparable | their tree, one copy, 2026-08-15 |
+| the caller's corpus at scale 4 | **936** / 10 / 5 / 23 | same copy, same hour |
 
-The scale-1 row fell from 934 and **nothing regressed**: the base commit re-run on
-2026-08-15 in a fresh copy reads 930/24/2/18 for the same quorra commit that read 934/20 a
-day earlier. Their tree moved under us, which is what `HANDOVER.md` says a count quoted
-from an older run is worth. **930 → 931 is what ADR 0049 is worth; 934 is not a baseline it
-can be compared against.**
+**The whole matrix, base against the merged round, in one copy of their tree within one
+hour** — which is the only form `HANDOVER.md` accepts. Base is `6ed67f0`, the commit before
+this round; the corpus cannot be run against the `87898c6` their lock pins, because their
+working tree already uses `RetainedScene` and does not compile against it.
+
+| lane, scale | base `6ed67f0` | merged round |
+|---|---|---|
+| CPU coverage, scale 1 | 930 / 24 / 2 / 18 | **931 / 23** / 2 / 18 |
+| GPU coverage, scale 1 | 928 / 26 / 2 / 18 | **929 / 25** / 2 / 18 |
+| CPU coverage, scale 4 | 936 / 10 / 5 / 23 | 936 / 10 / 5 / 23 |
+
+**Two page lines move, out of 956, and every other line is identical to the character.**
+`issue2177.pdf` joins the oracle on both lanes; `issue11473.pdf` moves by 0.0001 of a mean
+and 0.03 of a worst tile. Nothing moved away from the oracle at either scale on either lane,
+and no refusal moved. The GPU-lane row is the one that had to be run rather than reasoned
+about: ADR 0050 changes atlas residency between frames, and under `Coverage::Gpu` residency
+can change which lane a tile takes.
+
+An older row here read `934 / 20` at scale 1 on 2026-08-14. **It is not a baseline**: the
+same quorra commit re-run a day later reads 930 / 24, because their tree moved under us.
+930 → 931 is what this round is worth.
 
 **§6.2's success bar is met and its clear-win figure is not.** A third of the CPU
 backend's 5.9 ms is 2.0 and we are at 1.816; a tenth is 0.6, and the thing that points at
