@@ -22,11 +22,11 @@
 //! for a *fully transparent* pixel — `transfer[0]` under §11.5.2's alpha rule, and the
 //! transferred luminosity of §11.5.3's backdrop under the luminosity one, which is why a
 //! luminosity mask with a white backdrop admits everything outside its group and one with
-//! the caller's default black admits nothing. [`MaskPlacement::outside`] carries that
+//! the caller's default black admits nothing. A placement's `outside` carries that
 //! constant, and a mask that is absent altogether is the placement with no area at all,
 //! whose every sample is therefore its `outside` of 1.
 //!
-//! [`transparent_value`] is a second implementation of `reduce.wgsl`'s own arithmetic for
+//! `transparent_value` is a second implementation of `reduce.wgsl`'s own arithmetic for
 //! the transparent case, on the CPU because five uniforms need the number before any pass
 //! runs. Two implementations of one rule is what the reduction already is (that one
 //! against the caller's `SoftMask::value`, §4.2), and it is held the same way: by a test
@@ -118,4 +118,52 @@ pub(crate) fn transparent_value(plan: &MaskPlan) -> f32 {
         }
     };
     f32::from(plan.table[usize::from(derived)]) / 255.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MaskPlacement;
+    use crate::shaders;
+    use crate::shaders::layout::{Lane, check};
+
+    /// The placement is written once and read by six shaders, two of which declare it
+    /// as a struct of their own — so both declarations are checked. The three numbers
+    /// go into two `vec4f` rather than a `vec2`-`vec2`-`f32`, and which half of the
+    /// second one `outside` sits in is exactly the kind of thing a uniform of the right
+    /// total size can get wrong.
+    #[test]
+    fn the_placement_is_both_lanes_mask_place() {
+        let placement = MaskPlacement {
+            origin: [1.0, 2.0],
+            size: [3.0, 4.0],
+            outside: 0.5,
+        };
+        for source in [shaders::RECT, shaders::COVERAGE] {
+            check(
+                source,
+                "MaskPlace",
+                &placement.bytes(),
+                &[
+                    ("rect", Lane::Vec4([1.0, 2.0, 3.0, 4.0])),
+                    ("outside", Lane::Vec4([0.5, 0.0, 0.0, 0.0])),
+                ],
+            );
+        }
+    }
+
+    /// §11.5's default state — a scene that names no mask is masked by nothing — as the
+    /// shaders receive it: no area, so every sample is outside, and 1 out there.
+    #[test]
+    fn an_absent_mask_admits_everything() {
+        let bytes = MaskPlacement::ABSENT.bytes();
+        check(
+            shaders::COVERAGE,
+            "MaskPlace",
+            &bytes,
+            &[
+                ("rect", Lane::Vec4([0.0, 0.0, 0.0, 0.0])),
+                ("outside", Lane::Vec4([1.0, 0.0, 0.0, 0.0])),
+            ],
+        );
+    }
 }

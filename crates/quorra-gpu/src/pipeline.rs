@@ -33,15 +33,15 @@
 //! back a handle either way and the error goes to the device's uncaptured-error
 //! handler, whose default is to panic — on whatever thread was compiling, which for
 //! the warm set is a thread nobody is listening to. Every compile here therefore runs
-//! inside a validation error scope ([`captured`]), a captured failure becomes a
-//! [`PipelineProblem`], and [`PipelineStore::get`] is fallible so the frame that needed
+//! inside a validation error scope (`captured`), a captured failure becomes a
+//! [`PipelineProblem`], and the store's `get` is fallible so the frame that needed
 //! the pipeline is refused by name (ADR 0042). What the warm-up thread ends with is
-//! recorded in [`WarmUp`] on **every** exit path, so [`PipelineStore::wait_until_warm`]
+//! recorded in [`WarmUp`] on **every** exit path, so its `wait_until_warm`
 //! always returns.
 //!
 //! Fallibility is what the module's three files are split along: `layouts.rs` is the
-//! half of a pipeline no adapter can refuse, `spec.rs` is what each [`Kind`] *is*, and
-//! this file is the store — its one lock, its laziness and its warm-up.
+//! half of a pipeline no adapter can refuse, `spec.rs` is what each pipeline `Kind`
+//! *is*, and this file is the store — its one lock, its laziness and its warm-up.
 //!
 //! # Shaders are code, and this project's rules apply to them
 //!
@@ -62,6 +62,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::PipelineProblem;
 use crate::function::ProgramHash;
+use crate::shaders;
 use crate::startup::WarmUp;
 use function::FunctionKey;
 use layouts::Layouts;
@@ -121,14 +122,14 @@ impl Modules {
             }
         };
         Ok(Self {
-            rect: module("quorra rect", include_str!("shaders/rect.wgsl"))?,
-            cover: module("quorra coverage", include_str!("shaders/coverage.wgsl"))?,
-            image: module("quorra image", include_str!("shaders/image.wgsl"))?,
-            shading: module("quorra shading", include_str!("shaders/shading.wgsl"))?,
-            composite: module("quorra composite", include_str!("shaders/composite.wgsl"))?,
-            reduce: module("quorra reduce", include_str!("shaders/reduce.wgsl"))?,
-            blit: module("quorra blit", include_str!("shaders/blit.wgsl"))?,
-            winding: module("quorra winding", include_str!("shaders/winding.wgsl"))?,
+            rect: module("quorra rect", shaders::RECT)?,
+            cover: module("quorra coverage", shaders::COVERAGE)?,
+            image: module("quorra image", shaders::IMAGE)?,
+            shading: module("quorra shading", shaders::SHADING)?,
+            composite: module("quorra composite", shaders::COMPOSITE)?,
+            reduce: module("quorra reduce", shaders::REDUCE)?,
+            blit: module("quorra blit", shaders::BLIT)?,
+            winding: module("quorra winding", shaders::WINDING)?,
         })
     }
 }

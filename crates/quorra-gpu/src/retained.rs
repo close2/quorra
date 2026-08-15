@@ -24,7 +24,7 @@
 //! promise either side keeps — so this API adds no way to produce a wrong page that
 //! passing a stale [`Scene`] to [`Device::render`] did not already have. Principle 6's
 //! hazard here is a *stale* encode, and every input an encode reads is either the
-//! scene the handle owns or is in [`EncodeKey`], which is compared by bits.
+//! scene the handle owns or is in the encode key beside it, which is compared by bits.
 //!
 //! [`Device::render`]: crate::device::Device::render
 //!

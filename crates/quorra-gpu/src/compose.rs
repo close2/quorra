@@ -318,10 +318,9 @@ pub(crate) fn submit_and_wait(
     recorder: wgpu::CommandEncoder,
 ) -> Result<Duration, RenderError> {
     let started = Instant::now();
-    device.queue().submit([recorder.finish()]);
-    device
-        .gpu()
-        .poll(wgpu::PollType::wait_indefinitely())
+    let (gpu, queue) = device.wgpu();
+    queue.submit([recorder.finish()]);
+    gpu.poll(wgpu::PollType::wait_indefinitely())
         .map_err(|e| RenderError::DeviceLost {
             detail: e.to_string(),
         })?;
