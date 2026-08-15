@@ -169,12 +169,6 @@ struct StartupSteps {
 }
 
 impl Device {
-    /// The pipeline cache, for the passes that live in modules of their own.
-    #[allow(dead_code)] // `winding.rs`'s own tests build a device to reach its pipelines
-    pub(crate) fn pipeline_store(&self) -> &PipelineStore {
-        &self.pipelines
-    }
-
     /// The adapter's name, type and backend — for reports and golden-file metadata.
     #[must_use]
     pub fn description(&self) -> &str {
@@ -225,15 +219,9 @@ impl Device {
         self.coverage = coverage;
     }
 
+    /// The pipeline cache: the passes in modules of their own, and the tests that
+    /// drive one of those passes without a frame around it, both reach it here.
     pub(crate) fn pipelines(&self) -> &PipelineStore {
         &self.pipelines
-    }
-
-    pub(crate) fn gpu(&self) -> &wgpu::Device {
-        &self.gpu
-    }
-
-    pub(crate) fn queue(&self) -> &wgpu::Queue {
-        &self.queue
     }
 }

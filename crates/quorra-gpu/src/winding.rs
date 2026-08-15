@@ -244,7 +244,7 @@ mod tests {
         render_into(
             gpu,
             queue,
-            device.pipeline_store(),
+            device.pipelines(),
             &mut reuse,
             &view,
             &sheet,
