@@ -196,22 +196,7 @@ impl Device {
             return Self::zero_size_frame(viewport, into, encoded, encode_time, reports, source);
         }
 
-        // Price the compositor's internal textures while nothing of the frame
-        // exists yet (§5: count then allocate; the refusal names both numbers).
-        // Before the target is bound on purpose: a `Surface` refusal must cost no
-        // swapchain acquire, because a texture acquired and then dropped unpresented
-        // leaves the swapchain a semaphore no submission will ever wait on — the
-        // viewer measured that as every later acquire timing out, permanently.
-        // A patched frame renders through the root pair even when flat.
-        let patches = matches!(damage, DamagePlan::Patch { rects, .. } if !rects.is_empty());
-        let internal_bytes =
-            layers::internal_texture_bytes(encoded, viewport.width, viewport.height, patches);
-        if internal_bytes > self.limits.max_frame_bytes {
-            return Err(RenderError::FrameBudgetExceeded {
-                needed: internal_bytes,
-                budget: self.limits.max_frame_bytes,
-            });
-        }
+        self.price_internal_textures(encoded, viewport, damage)?;
 
         // Phase 2: allocate (sized by phase 1) and schedule uploads — including
         // the device-resident form of any image, ramp or mesh drawn for the first
@@ -285,30 +270,66 @@ impl Device {
                 execute_provenance: provenance,
                 phases,
             },
-            counters: Counters {
-                commands: encoded.commands,
-                clip_distinct_regions: encoded.clip_distinct_regions,
-                clip_residue_regions: encoded.clip_residue_regions,
-                clip_residue_tiles: encoded.clip_residue_tiles,
-                distinct_outlines: encoded.distinct_outlines,
-                atlas_entries: u32::try_from(self.atlas.entry_count()).unwrap_or(u32::MAX),
-                atlas_distinct_keys: encoded.atlas_distinct_keys,
-                atlas_working_set_bytes: encoded.atlas_requested_bytes,
-                // Set by the caller of `draw_encoded`, which is where the repack is
-                // decided: a frame that has not settled its atlas yet has not repacked
-                // it, and a `Frame` may not carry a number that is not true.
-                atlas_repacked: false,
-                segments: encoded.segments,
-                tiles: encoded.tiles,
-                commands_culled: encoded.commands_culled,
-                layers_culled: encoded.layers_culled,
-                bytes_uploaded: upload_bytes,
-                layer_textures,
-            },
+            counters: self.counters(encoded, upload_bytes, layer_textures),
             reports,
             payload,
             encode_source: source,
         })
+    }
+
+    /// Price the compositor's internal textures while nothing of the frame
+    /// exists yet (§5: count then allocate; the refusal names both numbers).
+    ///
+    /// Before the target is bound on purpose: a `Surface` refusal must cost no
+    /// swapchain acquire, because a texture acquired and then dropped unpresented
+    /// leaves the swapchain a semaphore no submission will ever wait on — the
+    /// viewer measured that as every later acquire timing out, permanently.
+    /// A patched frame renders through the root pair even when flat.
+    fn price_internal_textures(
+        &self,
+        encoded: &Encoded,
+        viewport: &Viewport<'_>,
+        damage: &DamagePlan,
+    ) -> Result<(), RenderError> {
+        let patches = matches!(damage, DamagePlan::Patch { rects, .. } if !rects.is_empty());
+        let internal_bytes =
+            layers::internal_texture_bytes(encoded, viewport.width, viewport.height, patches);
+        if internal_bytes > self.limits.max_frame_bytes {
+            return Err(RenderError::FrameBudgetExceeded {
+                needed: internal_bytes,
+                budget: self.limits.max_frame_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// What this frame counted, for the [`Frame`] that reports it.
+    ///
+    /// Everything here is read from the encode or from what phase 2 and phase 3 spent;
+    /// nothing is computed a second way. `atlas_entries` is the one number taken from
+    /// the device rather than the encode, because it is the atlas's state after this
+    /// frame's tiles went in.
+    fn counters(&self, encoded: &Encoded, upload_bytes: u64, layer_textures: u32) -> Counters {
+        Counters {
+            commands: encoded.commands,
+            clip_distinct_regions: encoded.clip_distinct_regions,
+            clip_residue_regions: encoded.clip_residue_regions,
+            clip_residue_tiles: encoded.clip_residue_tiles,
+            distinct_outlines: encoded.distinct_outlines,
+            atlas_entries: u32::try_from(self.atlas.entry_count()).unwrap_or(u32::MAX),
+            atlas_distinct_keys: encoded.atlas_distinct_keys,
+            atlas_working_set_bytes: encoded.atlas_requested_bytes,
+            // Set by the caller of `draw_encoded`, which is where the repack is
+            // decided: a frame that has not settled its atlas yet has not repacked
+            // it, and a `Frame` may not carry a number that is not true.
+            atlas_repacked: false,
+            segments: encoded.segments,
+            tiles: encoded.tiles,
+            commands_culled: encoded.commands_culled,
+            layers_culled: encoded.layers_culled,
+            bytes_uploaded: upload_bytes,
+            layer_textures,
+        }
     }
 
     /// After a drawn frame that encoded: repack the atlas when this frame's tiles no
