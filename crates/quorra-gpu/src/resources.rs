@@ -320,6 +320,9 @@ impl ResourceStore {
             ResourceId::Image(ImageId(raw)) => self.images.remove(&raw).map(|r| r.bytes),
             ResourceId::Ramp(RampId(raw)) => self.ramps.remove(&raw).map(|r| r.bytes),
             ResourceId::Mesh(MeshId(raw)) => self.meshes.remove(&raw).map(|r| r.bytes),
+            // No `upload_function` on this device yet, so no identifier it issued can be
+            // one — `None` here is the `UnknownResource` below, which is the truth.
+            ResourceId::Function(_) => None,
         };
         match freed {
             Some(bytes) => {

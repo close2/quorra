@@ -12,6 +12,12 @@
 //! hidden: the depth bound is counted where the open frames are, in
 //! [`SceneBuilder::group`](super::SceneBuilder::group)'s nesting, because the count it
 //! refuses on *is* that stack.
+//!
+//! The [`Paint::Function`] arm is a submodule of its own ([`function`]): it is four
+//! numbers with four different clauses behind them, and a reader after "what may a
+//! function shading not be" should not have to read the rest of §4.7 to find them.
+
+pub(crate) mod function;
 
 use super::{GroupSpec, SceneBuilder};
 use crate::blend::{BlendMode, Compose};
@@ -61,15 +67,7 @@ impl SceneBuilder {
         if !transform.is_finite() {
             return Err(SceneError::NonFiniteTransform(transform));
         }
-        let magnitude = transform
-            .a
-            .abs()
-            .max(transform.b.abs())
-            .max(transform.c.abs())
-            .max(transform.d.abs())
-            .max(transform.e.abs())
-            .max(transform.f.abs());
-        if magnitude > MAX_COORDINATE {
+        if transform.max_coefficient() > MAX_COORDINATE {
             return Err(SceneError::TransformTooLarge {
                 transform,
                 limit: MAX_COORDINATE,
@@ -86,14 +84,29 @@ impl SceneBuilder {
         }
     }
 
+    /// A paint, by the arm that can say what was wrong with it.
+    ///
+    /// [`Paint::Function`] carries four numbers of its own rather than one uploaded
+    /// handle, so it gets one named variant per condition instead of this module's single
+    /// [`SceneError::InvalidShading`]; see [`function::check_function_paint`].
     pub(super) fn check_paint(paint: Paint) -> Result<(), SceneError> {
-        if !paint.is_valid() {
-            return Err(match paint {
-                Paint::Solid(color) => SceneError::InvalidColor(color),
-                Paint::Shading { .. } | Paint::Mesh(_) => SceneError::InvalidShading,
-            });
+        match paint {
+            Paint::Solid(color) => Self::check_color(color),
+            Paint::Function {
+                domain,
+                matrix,
+                range,
+                background,
+                ..
+            } => function::check_function_paint(domain, matrix, range, background),
+            Paint::Shading { .. } | Paint::Mesh(_) => {
+                if paint.is_valid() {
+                    Ok(())
+                } else {
+                    Err(SceneError::InvalidShading)
+                }
+            }
         }
-        Ok(())
     }
 
     pub(super) fn check_stroke(stroke: Stroke) -> Result<(), SceneError> {

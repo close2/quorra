@@ -917,6 +917,11 @@ impl Encoder<'_> {
             Paint::Solid(color) => {
                 self.push_coverage(&stroked, Rule::NonZero, color, &resolved, mask)
             }
+            // ADR 0053's paint is not lowered yet, and §5 forbids drawing it as
+            // something else in the meantime.
+            Paint::Function { program, .. } => {
+                Err(RenderError::UnsupportedFunctionPaint { program })
+            }
             Paint::Shading { .. } | Paint::Mesh(_) => {
                 let Some(geometry) = self.shaded_geometry(paint)? else {
                     return Ok(());

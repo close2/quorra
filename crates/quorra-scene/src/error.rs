@@ -21,6 +21,7 @@ use std::error::Error;
 use std::fmt;
 
 use crate::blend::Compose;
+use crate::function::FnRange;
 use crate::geom::{Affine, Rect};
 use crate::ids::{ClipId, MaskId};
 use crate::paint::{Color, Stroke};
@@ -154,6 +155,52 @@ pub enum SceneError {
     /// A stroke violated [`Stroke::is_valid`] — a non-positive or non-finite width
     /// (widths arrive resolved and positive, §4.5), or a miter limit below 1.
     InvalidStroke(Stroke),
+    /// A [`Paint::Function`](crate::paint::Paint::Function)'s §8.7.4.5.2 `Matrix` has no
+    /// inverse, so no fragment can be mapped back into the domain the program is
+    /// evaluated over.
+    ///
+    /// The paint's *domain* is refused by the rectangle variants above — a domain is a
+    /// rectangle, and §4.7 says one thing about rectangles.
+    SingularFunctionMatrix(Affine),
+    /// A component of a function paint's §7.10.1 `Range` was NaN or infinite. A range is
+    /// a clip, and a clip against NaN admits nothing and reports nothing.
+    NonFiniteFunctionRange(FnRange),
+    /// A function paint's `Range` had a component minimum above its maximum. Clamping
+    /// into `[max, min]` returns the upper bound for every input — a flat colour that
+    /// looks drawn — so it is refused rather than swapped.
+    UnorderedFunctionRange(FnRange),
+    /// A §7.10.5 program carried no instructions, so it produces no output value — and
+    /// ADR 0053's empty-stack rule would turn that into a plausible black. Raised at
+    /// `Device::upload_function`, not at the scene boundary.
+    EmptyFunctionProgram,
+    /// An uploaded program exceeded
+    /// [`MAX_PROGRAM_LENGTH`](crate::function::MAX_PROGRAM_LENGTH), whose doc states what
+    /// the bound costs and why it is ours to choose.
+    FunctionProgramTooLong {
+        /// How many instructions were presented.
+        length: usize,
+        /// The bound they exceeded.
+        limit: usize,
+    },
+    /// A jump named an instruction past the end of the program. A target equal to the
+    /// length is legitimate and means "stop"; anything beyond it is not.
+    FunctionJumpOutOfRange {
+        /// The jump's own position in the program.
+        at: u32,
+        /// The target it named.
+        target: u32,
+        /// The program's length; valid targets are at most this.
+        length: u32,
+    },
+    /// A jump that did not move strictly forward — backwards, or to itself. Refused
+    /// because forward-only jumping is what makes a program's length a bound on its own
+    /// execution, which is the property a fragment shader without a loop needs.
+    BackwardFunctionJump {
+        /// The jump's own position in the program.
+        at: u32,
+        /// The target it named, which is at most `at`.
+        target: u32,
+    },
     /// A group's constant alpha was NaN, infinite, or outside `0..=1`.
     InvalidGroupAlpha {
         /// The offending alpha.
@@ -208,6 +255,13 @@ pub enum SceneError {
 }
 
 impl fmt::Display for SceneError {
+    // A table with one arm per variant, not an orchestral function: the arms share no
+    // state and run no phases, and the exhaustive match is the whole point — a refusal
+    // added without a message fails to compile. Every way of splitting it costs that
+    // property (a wildcard arm, or an `unreachable!` in the half that does not own the
+    // variant), and the property is worth more here than the line count. The clause-shaped
+    // halves that *can* be lifted out already are: see `GroupComposeReason::because`.
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NonFiniteRect(rect) => {
@@ -247,6 +301,37 @@ impl fmt::Display for SceneError {
                      limit at least 1: {s:?}"
                 )
             }
+            Self::SingularFunctionMatrix(matrix) => write!(
+                f,
+                "function matrix has no inverse, so no fragment maps back into the \
+                 domain: {matrix:?}"
+            ),
+            Self::NonFiniteFunctionRange(range) => {
+                write!(f, "function range has a non-finite bound: {range:?}")
+            }
+            Self::UnorderedFunctionRange(range) => {
+                write!(f, "function range min exceeds max: {range:?}")
+            }
+            Self::EmptyFunctionProgram => {
+                write!(
+                    f,
+                    "function program is empty, so it produces no output value"
+                )
+            }
+            Self::FunctionProgramTooLong { length, limit } => write!(
+                f,
+                "function program of {length} instructions exceeds the limit of {limit}"
+            ),
+            Self::FunctionJumpOutOfRange { at, target, length } => write!(
+                f,
+                "function jump at {at} targets {target}, past the program's {length} \
+                 instructions"
+            ),
+            Self::BackwardFunctionJump { at, target } => write!(
+                f,
+                "function jump at {at} targets {target}, which is not strictly forward; \
+                 forward-only jumping is what bounds the program's execution"
+            ),
             Self::InvalidGroupAlpha { alpha } => {
                 write!(f, "group alpha non-finite or outside 0..=1: {alpha}")
             }

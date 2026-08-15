@@ -7,9 +7,10 @@
 //!
 //! Two families, and the difference matters:
 //!
-//! - **Device resources** — [`OutlineId`], [`ImageId`], [`RampId`], [`MeshId`]. Allocated
-//!   by a device, released by a device, valid for as long as that device. [`ResourceId`]
-//!   is the union, so that one `release` can take any of them.
+//! - **Device resources** — [`OutlineId`], [`ImageId`], [`RampId`], [`MeshId`],
+//!   [`FunctionId`]. Allocated by a device, released by a device, valid for as long as
+//!   that device. [`ResourceId`] is the union, so that one `release` can take any of
+//!   them.
 //! - **Scene-scoped references** — [`ClipId`], [`MaskId`]. Allocated by a scene builder
 //!   and meaningful only inside the scene that produced them, because a clip is a path
 //!   plus a parent and a mask is a rendered group. They are *not* device resources and so
@@ -49,6 +50,21 @@ pub struct RampId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MeshId(pub u32);
 
+/// A compiled ISO 32000-2 §7.10.5 program uploaded to a device.
+///
+/// A program is a resource rather than a payload on the paint for the same reason an
+/// outline is: it is heavy, it is shared, and identity is what a device wants. ADR 0053
+/// caches a generated shader by the program's hash, and an upload is the one place that
+/// hash is computed — so `Device::upload_function` is also where a program the analyser
+/// cannot accept is refused **by name, before a frame exists**, which is §5's second
+/// preference satisfied properly rather than by accident.
+///
+/// Two shadings may share one program under different matrices, which is why the domain,
+/// matrix, range and background live on [`Paint::Function`](crate::paint::Paint::Function)
+/// and not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FunctionId(pub u32);
+
 /// A clip region within one scene: a path, a fill rule and an optional parent, so that a
 /// chain is an intersection.
 ///
@@ -70,7 +86,7 @@ pub struct ClipId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MaskId(pub u32);
 
-/// Any device resource, so that one release path can take all four.
+/// Any device resource, so that one release path can take all five.
 ///
 /// §2.2's `Device::release(&mut self, id: impl Into<ResourceId>)`. [`ClipId`] and
 /// [`MaskId`] are absent on purpose — they belong to a scene, not to a device, and a
@@ -85,6 +101,8 @@ pub enum ResourceId {
     Ramp(RampId),
     /// An uploaded mesh.
     Mesh(MeshId),
+    /// An uploaded §7.10.5 program.
+    Function(FunctionId),
 }
 
 impl From<OutlineId> for ResourceId {
@@ -111,11 +129,17 @@ impl From<MeshId> for ResourceId {
     }
 }
 
+impl From<FunctionId> for ResourceId {
+    fn from(id: FunctionId) -> Self {
+        Self::Function(id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ImageId, MeshId, OutlineId, RampId, ResourceId};
+    use super::{FunctionId, ImageId, MeshId, OutlineId, RampId, ResourceId};
 
-    /// Four resource families, four variants, no crossed wires. A `From` that put an
+    /// Five resource families, five variants, no crossed wires. A `From` that put an
     /// outline in the image slot would release the wrong resource and be visible only as
     /// a later frame drawing something it should not.
     #[test]
@@ -127,5 +151,9 @@ mod tests {
         assert_eq!(ResourceId::from(ImageId(7)), ResourceId::Image(ImageId(7)));
         assert_eq!(ResourceId::from(RampId(7)), ResourceId::Ramp(RampId(7)));
         assert_eq!(ResourceId::from(MeshId(7)), ResourceId::Mesh(MeshId(7)));
+        assert_eq!(
+            ResourceId::from(FunctionId(7)),
+            ResourceId::Function(FunctionId(7))
+        );
     }
 }

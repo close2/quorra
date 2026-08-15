@@ -330,6 +330,18 @@ pub enum RenderError {
         /// The identifier that was referenced.
         mesh: quorra_scene::MeshId,
     },
+    /// A [`Paint::Function`](quorra_scene::Paint::Function) reached a device that does
+    /// not yet generate its shader (ADR 0053). Refused by name rather than drawn as
+    /// something plausible: §5 of the brief wants the caller to fall back to the raster
+    /// it builds today, and a hole and a sentence beat a plausible lie.
+    #[error(
+        "the scene paints with §7.10.5 program {program:?}, which this device cannot yet \
+         generate a shader for"
+    )]
+    UnsupportedFunctionPaint {
+        /// The program the paint named.
+        program: quorra_scene::FunctionId,
+    },
     /// A pipeline this frame needs could not be built. The frame is refused rather
     /// than drawn without the pass that pipeline was for — a page missing its blit is
     /// exactly the plausible-looking wrong page §5 has a name for.
