@@ -16,7 +16,7 @@
 //! What the compositor *does* with a `ChildOp` is `compose`'s half; what a group means
 //! to the walk is this one.
 
-use quorra_scene::{BlendMode, MaskId, MaskKind};
+use quorra_scene::{BlendMode, Command, Compose, GroupSpec, MaskId, MaskKind};
 
 use super::clips::{OPEN_CLIP, ResolvedClip};
 use super::{DrawStyle, Encoder, LayerPlan, Op};
@@ -125,6 +125,63 @@ pub(super) fn blend_word(mode: BlendMode) -> u32 {
 }
 
 impl Encoder<'_> {
+    /// The group arm of the command walk: encode the elements into a plan of their own,
+    /// then composite that plan once under the group's own spec (ISO 32000-2 §11.4.5).
+    ///
+    /// A match arm until this round, and its own method now for the reason the rest of
+    /// this file is one: every field of the `ChildOp` it ends with is a clause read at
+    /// the group, and the two other groups that build one are its neighbours here.
+    pub(super) fn encode_group(
+        &mut self,
+        spec: &GroupSpec,
+        commands: &[Command],
+    ) -> Result<(), RenderError> {
+        let mask = self.use_mask(spec.mask)?;
+        let resolved = self.resolve_clip(spec.clip)?;
+        let outer_style = self.style;
+        let child = self.plan_child(|encoder| {
+            // §11.4.6 binds inside this group. What the elements draw *onto* is
+            // `spec.isolated`: transparent for §11.4.5's group, a copy of the
+            // backdrop for §11.4.4's — a decision the compositor makes when it
+            // seeds the layer, not one the elements can see.
+            encoder.style = if spec.knockout {
+                DrawStyle::Knockout
+            } else {
+                DrawStyle::Over
+            };
+            for (i, command) in commands.iter().enumerate() {
+                encoder.command(i, command)?;
+            }
+            Ok(())
+        });
+        self.style = outer_style;
+        let child = child?;
+        let (residue_rect, residue_origin) = self.plan_group_residue(&resolved)?;
+        self.push_op(Op::Child(ChildOp {
+            layer: child,
+            mode: blend_word(spec.blend),
+            alpha: spec.alpha,
+            clip_rect: [
+                resolved.rect.min.x,
+                resolved.rect.min.y,
+                resolved.rect.max.x,
+                resolved.rect.max.y,
+            ],
+            residue_rect,
+            residue_origin,
+            compose: match spec.compose {
+                Compose::DestOut => 1,
+                Compose::Plus => 2,
+                // §11.4.6's other two are the group's own model rather than a
+                // stage of it: `SrcOver` is the ordinary composite and `Src` is
+                // what `knockout` states, which the builder refuses on a group.
+                Compose::SrcOver | Compose::Src => 0,
+            },
+            mask,
+            isolated: spec.isolated,
+        }))
+    }
+
     /// Plan a child layer: run `body` with the current plan switched to a fresh
     /// node, restoring on both paths.
     ///

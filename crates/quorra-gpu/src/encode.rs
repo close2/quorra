@@ -70,7 +70,6 @@ use quorra_scene::{
 
 use clips::{ClipResolver, ResolvedClip, open_clip};
 use encoded::finish;
-use layer::blend_word;
 use parallel::{Draw, Job};
 
 use crate::atlas::{AtlasStore, CacheProspect, GlyphKey, GlyphPlacement};
@@ -503,52 +502,7 @@ impl Encoder<'_> {
                 blend,
                 mask,
             } => self.encode_image(*image, *transform, *alpha, *filter, *clip, *blend, *mask),
-            Command::Group { spec, commands } => {
-                let mask = self.use_mask(spec.mask)?;
-                let resolved = self.resolve_clip(spec.clip)?;
-                let outer_style = self.style;
-                let child = self.plan_child(|encoder| {
-                    // §11.4.6 binds inside this group. What the elements draw *onto* is
-                    // `spec.isolated`: transparent for §11.4.5's group, a copy of the
-                    // backdrop for §11.4.4's — a decision the compositor makes when it
-                    // seeds the layer, not one the elements can see.
-                    encoder.style = if spec.knockout {
-                        DrawStyle::Knockout
-                    } else {
-                        DrawStyle::Over
-                    };
-                    for (i, command) in commands.iter().enumerate() {
-                        encoder.command(i, command)?;
-                    }
-                    Ok(())
-                });
-                self.style = outer_style;
-                let child = child?;
-                let (residue_rect, residue_origin) = self.plan_group_residue(&resolved)?;
-                self.push_op(Op::Child(ChildOp {
-                    layer: child,
-                    mode: blend_word(spec.blend),
-                    alpha: spec.alpha,
-                    clip_rect: [
-                        resolved.rect.min.x,
-                        resolved.rect.min.y,
-                        resolved.rect.max.x,
-                        resolved.rect.max.y,
-                    ],
-                    residue_rect,
-                    residue_origin,
-                    compose: match spec.compose {
-                        Compose::DestOut => 1,
-                        Compose::Plus => 2,
-                        // §11.4.6's other two are the group's own model rather than a
-                        // stage of it: `SrcOver` is the ordinary composite and `Src` is
-                        // what `knockout` states, which the builder refuses on a group.
-                        Compose::SrcOver | Compose::Src => 0,
-                    },
-                    mask,
-                    isolated: spec.isolated,
-                }))
-            }
+            Command::Group { spec, commands } => self.encode_group(spec, commands),
         }
     }
 
