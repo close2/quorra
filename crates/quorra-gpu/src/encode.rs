@@ -51,6 +51,7 @@ mod clips;
 mod encoded;
 mod function;
 mod hull;
+mod instance;
 mod layer;
 mod parallel;
 mod plan;
@@ -70,6 +71,7 @@ use quorra_scene::{
 
 use clips::{ClipResolver, ResolvedClip, open_clip};
 use encoded::finish;
+use instance::instance_reserve;
 use parallel::{Draw, Job};
 
 use crate::atlas::{AtlasStore, CacheProspect, GlyphKey, GlyphPlacement};
@@ -84,21 +86,15 @@ use crate::viewport::Viewport;
 
 pub(crate) use encoded::Encoded;
 pub(crate) use function::{FunctionOp, empty_stack_reports};
+pub(crate) use instance::{
+    Batch, BatchKind, DrawStyle, QUAD_INSTANCE_STRIDE, RECT_INSTANCE_STRIDE,
+};
 pub(crate) use layer::{ChildOp, MaskPlan};
 pub(crate) use plan::{LayerPlan, Op};
 pub(crate) use rare::{ImageOp, PaintSource, ShadedOp};
 use residue::ResidueRegions;
 pub(crate) use scratch::Scratch;
 use scratch::ScratchPacker;
-
-/// Bytes per rectangle instance: device rect (4 × f32), premultiplied colour
-/// (4 × f32). Must match `rect.wgsl`.
-pub(crate) const RECT_INSTANCE_STRIDE: u64 = 32;
-
-/// Bytes per coverage-quad instance: dest min (2), size (2), texel origin + source
-/// selector (4), premultiplied colour (4), clip rect (4) — 16 × f32. Must match
-/// `coverage.wgsl`.
-pub(crate) const QUAD_INSTANCE_STRIDE: u64 = 64;
 
 /// A shape's device extent along one axis, as the tile that would hold it: the same
 /// `floor`/`ceil` the rasteriser uses, so the number the atlas is asked about is the
@@ -145,40 +141,6 @@ fn linear_bits(transform: Affine) -> [u32; 4] {
         transform.c.to_bits(),
         transform.d.to_bits(),
     ]
-}
-
-/// Which lane a batch draws.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BatchKind {
-    Rect,
-    Quad,
-}
-
-/// How a batch composites: ordinary premultiplied over, or the knockout two-pass
-/// (per-element erase by shape, then additive deposit — ADR 0010, §11.4.6/§4.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DrawStyle {
-    Over,
-    Knockout,
-    /// §11.4.6's first stage alone: scale the backdrop by `1 − shape` and deposit
-    /// nothing ([`Compose::DestOut`], ADR 0025). The same erase pass the knockout pair
-    /// opens with, asked for by name.
-    DestOut,
-    /// §11.4.6's second stage alone: add the mark, premultiplied ([`Compose::Plus`]).
-    Plus,
-}
-
-/// A run of consecutive instances in one lane with one style and one soft mask, in
-/// scene order — the painter's algorithm survives switching by batch breaks, not by
-/// reordering.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Batch {
-    pub kind: BatchKind,
-    pub first: u32,
-    pub count: u32,
-    pub style: DrawStyle,
-    /// The soft mask sampled by these draws, as a mask index.
-    pub mask: Option<u32>,
 }
 
 fn compose(transform: Affine, viewport: &Viewport<'_>) -> DeviceTransform {
@@ -325,18 +287,6 @@ struct Encoder<'a> {
     /// points again — 21 % of the encode, and [`hull`] carries the benchmark and the
     /// argument that it changes no bit of any box.
     hulls: hull::HullMemo,
-}
-
-/// Bytes to reserve for one instance stream, from the command count the frame budget
-/// was checked against.
-///
-/// Called only after the budget check, so the value is bounded by the caller's stated
-/// `frame_budget_bytes`: this reserves what the frame has already been *charged*, never
-/// more. The arithmetic is `u64` because the check is, and a product that does not fit
-/// a `usize` reserves **nothing** rather than saturating — a `Vec` that grows is
-/// correct and slower, while `with_capacity(usize::MAX)` is an abort.
-fn instance_reserve(commands: usize, stride: u64) -> usize {
-    usize::try_from((commands as u64).saturating_mul(stride)).unwrap_or(0)
 }
 
 /// Walk the scene once: classify, count, rasterise, check the budget, lay out
@@ -1369,114 +1319,5 @@ impl Encoder<'_> {
         }
         self.spent = needed;
         Ok(())
-    }
-
-    /// One instance of the analytic rectangle lane.
-    ///
-    /// `style` is a parameter rather than `self.style` because the lane now takes fills
-    /// as well as [`Command::Rect`]s (ADR 0047), and a fill names its own pass through
-    /// [`Compose`]: `Src` is §11.4.6's knockout, `DestOut` and `Plus` are its two stages
-    /// asked for by name (ADR 0025). A `Rect` carries no compose mode and so passes the
-    /// enclosing group's style, which is what this method used to read for itself.
-    fn push_rect_instance(
-        &mut self,
-        rect: Rect,
-        color: quorra_scene::Color,
-        style: DrawStyle,
-        mask: Option<u32>,
-    ) -> Result<(), RenderError> {
-        // Draw order is the scene's order, so anything queued draws first (`parallel`).
-        self.drain_queue()?;
-        self.plan_mut()
-            .mark([rect.min.x, rect.min.y, rect.max.x, rect.max.y]);
-        let premultiplied = [
-            color.r * color.a,
-            color.g * color.a,
-            color.b * color.a,
-            color.a,
-        ];
-        for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
-            self.rect_instances.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in premultiplied {
-            self.rect_instances.extend_from_slice(&value.to_le_bytes());
-        }
-        self.note_batch(BatchKind::Rect, style, mask);
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)] // one instance layout, one writer
-    fn push_quad_instance(
-        &mut self,
-        dest: Point,
-        width: f32,
-        height: f32,
-        tex_x: f32,
-        tex_y: f32,
-        source: f32,
-        color: quorra_scene::Color,
-        clip: Rect,
-        style: DrawStyle,
-        mask: Option<u32>,
-    ) -> Result<(), RenderError> {
-        // Draw order is the scene's order, so anything queued draws first (`parallel`).
-        self.drain_queue()?;
-        self.plan_mut()
-            .mark([dest.x, dest.y, dest.x + width, dest.y + height]);
-        let premultiplied = [
-            color.r * color.a,
-            color.g * color.a,
-            color.b * color.a,
-            color.a,
-        ];
-        let values = [
-            dest.x,
-            dest.y,
-            width,
-            height,
-            tex_x,
-            tex_y,
-            source,
-            0.0,
-            premultiplied[0],
-            premultiplied[1],
-            premultiplied[2],
-            premultiplied[3],
-            clip.min.x,
-            clip.min.y,
-            clip.max.x,
-            clip.max.y,
-        ];
-        for value in values {
-            self.quad_instances.extend_from_slice(&value.to_le_bytes());
-        }
-        self.note_batch(BatchKind::Quad, style, mask);
-        Ok(())
-    }
-
-    /// Extend the current batch, or start a new one on any switch of lane, style or
-    /// mask — scene order is preserved by breaking batches, never by reordering.
-    #[allow(clippy::cast_possible_truncation, clippy::arithmetic_side_effects)]
-    fn note_batch(&mut self, kind: BatchKind, style: DrawStyle, mask: Option<u32>) {
-        let index = match kind {
-            BatchKind::Rect => (self.rect_instances.len() as u64 / RECT_INSTANCE_STRIDE) - 1,
-            BatchKind::Quad => (self.quad_instances.len() as u64 / QUAD_INSTANCE_STRIDE) - 1,
-        } as u32;
-        if let Some(Op::Draw(last)) = self.plan_mut().ops.last_mut()
-            && last.kind == kind
-            && last.style == style
-            && last.mask == mask
-            && last.first + last.count == index
-        {
-            last.count += 1;
-            return;
-        }
-        self.append_op(Op::Draw(Batch {
-            kind,
-            first: index,
-            count: 1,
-            style,
-            mask,
-        }));
     }
 }
