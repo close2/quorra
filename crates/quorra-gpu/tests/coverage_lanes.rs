@@ -30,6 +30,10 @@ use quorra_scene::{
     SceneBuilder, Segment, Stroke,
 };
 
+mod common;
+
+use common::scene::black;
+
 /// The fixtures are written in a 48-unit square and drawn at [`MAGNIFY`] times it, so
 /// their tiles are ones [`TINY_ATLAS`] will not hold and the GPU lane actually takes
 /// them — otherwise every comparison below would be the CPU lane against itself,
@@ -82,10 +86,6 @@ fn alpha(pixels: &[u8], x: u32, y: u32) -> u8 {
 /// middle of unit cell `(x, y)` is the same place in the shape at either scale.
 fn at_unit(pixels: &[u8], x: u32, y: u32) -> u8 {
     alpha(pixels, x * MAGNIFY + MAGNIFY / 2, y * MAGNIFY + MAGNIFY / 2)
-}
-
-fn black() -> Paint {
-    Paint::Solid(Color::new(0.0, 0.0, 0.0, 1.0))
 }
 
 /// A curved blob big enough to leave the atlas, so the CPU lane takes its path lane

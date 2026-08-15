@@ -22,25 +22,10 @@ use quorra_scene::{
     Affine, ClipId, Color, FillRule, OutlineId, Point, Rect, Scene, SceneBuilder, Segment,
 };
 
-fn device() -> Device {
-    Device::headless(&Options {
-        adapter: Some("llvmpipe".into()),
-        ..Options::default()
-    })
-    .expect("llvmpipe is present wherever this suite runs")
-}
+mod common;
 
-/// A rectangle as an outline, the way the caller's clips arrive (its display list has
-/// no rectangle type — recognition is our side's job, §6.4).
-fn rect_outline(rect: Rect) -> Vec<Segment> {
-    vec![
-        Segment::MoveTo(rect.min),
-        Segment::LineTo(Point::new(rect.max.x, rect.min.y)),
-        Segment::LineTo(rect.max),
-        Segment::LineTo(Point::new(rect.min.x, rect.max.y)),
-        Segment::Close,
-    ]
-}
+use common::headless::device;
+use common::scene::rect_outline;
 
 /// The reference for clipped rectangles: ADR 0005's coverage and compositing rule
 /// with ADR 0007's clip resolution — chains intersect to one rectangle, applied by

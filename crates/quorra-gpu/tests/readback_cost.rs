@@ -27,33 +27,20 @@
 )]
 
 use quorra_gpu::{Device, Options, Target, Viewport};
-use quorra_scene::{Affine, Color, Point, Rect, Scene, SceneBuilder};
+use quorra_scene::Affine;
 
 mod counting_allocator;
 
 use counting_allocator::Watch;
 
-/// The page this gate reads back: the perf gate's own dense fixture, at the caller's
-/// window size, so the number below is a real page's target and not a round one.
-fn dense_scene() -> Scene {
-    let mut builder = SceneBuilder::new();
-    for i in 0..5_933_u32 {
-        let x = f64::from(i % 80).mul_add(14.5, 3.25) as f32;
-        let y = f64::from(i / 80).mul_add(15.25, 4.5) as f32;
-        builder
-            .rect(
-                Rect::new(Point::new(x, y), Point::new(x + 9.75, y + 11.5)),
-                Affine::IDENTITY,
-                Color::new(0.1, 0.1, 0.1, 1.0),
-                None,
-                None,
-            )
-            .unwrap();
-    }
-    builder.finish()
-}
+mod common;
+
+use common::scene::dense_scene;
 
 /// A `Readback` frame allocates exactly one target-sized buffer: the raster it returns.
+///
+/// The page is the perf gate's own dense fixture at the caller's window size, so the byte
+/// count below is a real page's target and not a round number.
 ///
 /// The assertion is an equality rather than a bound, and deliberately: the pre-ADR 0022
 /// shape allocates a second buffer of the copy-out's *padded* extent — 8 191 kB against

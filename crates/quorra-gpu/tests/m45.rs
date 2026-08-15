@@ -21,9 +21,14 @@
 
 use quorra_gpu::{Device, Options, Target, Viewport};
 use quorra_scene::{
-    Affine, BlendMode, Color, Compose, FillRule, LineCap, LineJoin, Paint, Point, Rect, Scene,
+    Affine, BlendMode, Color, Compose, FillRule, LineCap, LineJoin, Paint, Point, Rect,
     SceneBuilder, Segment, Stroke,
 };
+
+mod common;
+
+use common::headless::render;
+use common::scene::rect_outline;
 
 fn device_with(options: Options) -> Device {
     Device::headless(&Options {
@@ -37,19 +42,10 @@ fn device() -> Device {
     device_with(Options::default())
 }
 
-fn rect_outline(rect: Rect) -> Vec<Segment> {
-    vec![
-        Segment::MoveTo(rect.min),
-        Segment::LineTo(Point::new(rect.max.x, rect.min.y)),
-        Segment::LineTo(rect.max),
-        Segment::LineTo(Point::new(rect.min.x, rect.max.y)),
-        Segment::Close,
-    ]
-}
-
-/// The same four edges as [`rect_outline`], with one redundant vertex halfway along the
-/// top: the identical region, and **not** what `quorra_scene::axis_aligned_rect`
-/// recognises, so a solid fill of it still rasterises its own coverage.
+/// The same four edges as [`common::scene::rect_outline`], with one redundant vertex
+/// halfway along the top: the identical region, and **not** what
+/// `quorra_scene::axis_aligned_rect` recognises, so a solid fill of it still rasterises
+/// its own coverage.
 ///
 /// Since ADR 0047 a solid fill of a *recognised* rectangle takes the analytic lane, and
 /// this is what is left to put a rectangle through the atlas and the scratch sheet —
@@ -66,19 +62,6 @@ fn rasterised_rect_outline(rect: Rect) -> Vec<Segment> {
         Segment::LineTo(Point::new(rect.min.x, rect.max.y)),
         Segment::Close,
     ]
-}
-
-fn render(device: &mut Device, scene: &Scene, width: u32, height: u32) -> Vec<u8> {
-    device
-        .render(
-            scene,
-            &Viewport::full(width, height, Affine::IDENTITY),
-            Target::Readback,
-        )
-        .expect("renders")
-        .into_raster()
-        .unwrap()
-        .into_pixels()
 }
 
 fn max_diff(a: &[u8], b: &[u8]) -> i32 {

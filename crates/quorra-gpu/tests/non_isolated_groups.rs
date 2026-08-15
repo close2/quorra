@@ -36,7 +36,11 @@ use quorra_scene::{
     SceneBuilder, SceneError,
 };
 
-use quorra_gpu::{Device, Options, Target, Viewport};
+use quorra_gpu::{Device, Target, Viewport};
+
+mod common;
+
+use common::headless::device;
 
 // ---------------------------------------------------------------- the clause itself
 
@@ -225,14 +229,6 @@ fn the_interpolation_is_the_clause_exactly_and_only_under_normal() {
 }
 
 // ------------------------------------------------------------------ on the device
-
-fn device() -> Device {
-    Device::headless(&Options {
-        adapter: Some("llvmpipe".into()),
-        ..Options::default()
-    })
-    .expect("llvmpipe is present wherever this suite runs")
-}
 
 const W: u32 = 32;
 const H: u32 = 16;

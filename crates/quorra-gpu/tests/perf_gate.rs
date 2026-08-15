@@ -22,38 +22,11 @@
 use std::time::Duration;
 
 use quorra_gpu::{Coverage, Device, Options, Target, TimingProvenance, Viewport};
-use quorra_scene::{Affine, Color, Point, Rect, Scene, SceneBuilder};
+use quorra_scene::Affine;
 
-/// A dense page's shape: thousands of small rectangles. (5 933 is one dense page's
-/// glyph count in the brief; rectangles stood in for glyphs until M4 and were never
-/// replaced.)
-///
-/// **What this fixture is, and is not.** It exercises the analytic rectangle lane through
-/// the command nothing sends: measured over the caller's 995-page corpus **not one page
-/// emits a single `Command::Rect`** — every rectangle a real document draws arrives as a
-/// `Fill` whose outline happens to be one (`doc/corpus-profile.md`). Since ADR 0047 such
-/// a fill takes this same lane, so the lane below is no longer unused by documents; what
-/// stays true is that they enter it by the other door, and that a page of nothing but
-/// rectangles is a floor measurement rather than a page measurement. The page shapes
-/// documents actually have are in `tests/archetypes.rs`, priced by counters instead of
-/// clocks.
-fn dense_scene() -> Scene {
-    let mut builder = SceneBuilder::new();
-    for i in 0..5_933_u32 {
-        let x = f64::from(i % 80).mul_add(14.5, 3.25) as f32;
-        let y = f64::from(i / 80).mul_add(15.25, 4.5) as f32;
-        builder
-            .rect(
-                Rect::new(Point::new(x, y), Point::new(x + 9.75, y + 11.5)),
-                Affine::IDENTITY,
-                Color::new(0.1, 0.1, 0.1, 1.0),
-                None,
-                None,
-            )
-            .unwrap();
-    }
-    builder.finish()
-}
+mod common;
+
+use common::scene::dense_scene;
 
 #[test]
 fn dense_page_at_window_scale_stays_under_the_gate() {

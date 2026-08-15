@@ -23,9 +23,11 @@
 )]
 
 use quorra_gpu::{Coverage, Device, Options, Target, Viewport};
-use quorra_scene::{
-    Affine, BlendMode, Color, Compose, FillRule, Paint, Point, Scene, SceneBuilder, Segment,
-};
+use quorra_scene::{Affine, BlendMode, Compose, FillRule, Point, Scene, SceneBuilder, Segment};
+
+mod common;
+
+use common::scene::black;
 
 /// The side of the target the compared frame is drawn at.
 const SMALL: u32 = 48;
@@ -42,10 +44,6 @@ fn device(coverage: Coverage) -> Device {
     .expect("llvmpipe is present wherever this suite runs");
     device.wait_until_warm();
     device
-}
-
-fn black() -> Paint {
-    Paint::Solid(Color::new(0.0, 0.0, 0.0, 1.0))
 }
 
 /// A curve scaled to `side`, past `MAX_GLYPH_DIM` at either size, so no atlas stands in

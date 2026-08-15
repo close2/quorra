@@ -32,20 +32,16 @@
     clippy::arithmetic_side_effects
 )]
 
-use quorra_gpu::{Counters, Device, Options, RenderError, Target, Viewport};
+use quorra_gpu::{Counters, Device, RenderError, Target, Viewport};
 use quorra_scene::{
     Affine, BlendMode, ClipId, Color, Compose, FillRule, GroupSpec, LineCap, LineJoin, Paint,
     Point, RampId, Rect, Scene, SceneBuilder, SceneError, Segment, ShadingKind, Stroke,
 };
 
-/// The software adapter, as everywhere in this suite: deterministic, always present.
-fn device() -> Device {
-    Device::headless(&Options {
-        adapter: Some("llvmpipe".into()),
-        ..Options::default()
-    })
-    .expect("llvmpipe is present wherever this suite runs")
-}
+mod common;
+
+use common::headless::device;
+use common::scene::{black, rect_outline};
 
 const SIZE: u32 = 32;
 
@@ -63,20 +59,6 @@ fn render(device: &mut Device, scene: &Scene) -> (Vec<u8>, Counters) {
 
 fn alpha_at(pixels: &[u8], x: u32, y: u32) -> u8 {
     pixels[((y * SIZE + x) * 4 + 3) as usize]
-}
-
-fn rect_outline(rect: Rect) -> Vec<Segment> {
-    vec![
-        Segment::MoveTo(rect.min),
-        Segment::LineTo(Point::new(rect.max.x, rect.min.y)),
-        Segment::LineTo(rect.max),
-        Segment::LineTo(Point::new(rect.min.x, rect.max.y)),
-        Segment::Close,
-    ]
-}
-
-fn black() -> Paint {
-    Paint::Solid(Color::new(0.0, 0.0, 0.0, 1.0))
 }
 
 /// One rectangle inside the target, plus commands of every lane placed far outside
