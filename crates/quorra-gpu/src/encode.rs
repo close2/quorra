@@ -51,6 +51,7 @@ mod clips;
 mod coverage;
 mod device_space;
 mod encoded;
+mod fill;
 mod function;
 mod hull;
 mod instance;
@@ -67,22 +68,20 @@ mod tests;
 
 use std::collections::HashSet;
 
-use quorra_scene::{
-    Affine, BlendMode, ClipId, Command, Compose, FillRule, MaskId, OutlineId, Paint, Rect, Scene,
-};
+use quorra_scene::{Affine, BlendMode, ClipId, Command, MaskId, OutlineId, Paint, Rect, Scene};
 
 use clips::{ClipResolver, ResolvedClip, open_clip};
-use device_space::{apply, compose, target_rect, tile_side, transform_preserves_axes};
+use device_space::{compose, target_rect, tile_side};
 use encoded::finish;
 use instance::instance_reserve;
 use parallel::{Draw, Job};
 
-use crate::atlas::{AtlasStore, GlyphKey, GlyphPlacement};
+use crate::atlas::{AtlasStore, GlyphKey};
 use crate::census::Census;
 use crate::error::RenderError;
 use crate::instrument::EncodeClock;
 use crate::keyhash::FastSet;
-use crate::raster::{self, DeviceTransform, Rule};
+use crate::raster::{self, Rule};
 use crate::resources::ResourceStore;
 use crate::startup::Coverage;
 use crate::viewport::Viewport;
@@ -98,41 +97,6 @@ pub(crate) use rare::{ImageOp, PaintSource, ShadedOp};
 use residue::ResidueRegions;
 pub(crate) use scratch::Scratch;
 use scratch::ScratchPacker;
-
-/// One solid fill, resolved as far as the lane choice needs it.
-///
-/// A struct rather than nine parameters: the arm that draws it asks the cache one
-/// question and then hands the same fill to whichever of three lanes answers, and
-/// threading the fill's own description through each of them by hand is how two of them
-/// come to disagree about it.
-struct SolidFill {
-    outline: OutlineId,
-    /// The scene's transform, which is what the census counted by.
-    transform: Affine,
-    /// The same transform composed with the viewport, which is what the tile is
-    /// rasterised and keyed by.
-    to_device: DeviceTransform,
-    rule: Rule,
-    color: quorra_scene::Color,
-    /// Device bounds: min x, min y, max x, max y.
-    bounds: (f32, f32, f32, f32),
-    style: DrawStyle,
-    mask: Option<u32>,
-}
-
-/// The linear part of a transform as the bits a census counts by.
-///
-/// The *scene's* transform, not the device's: the two differ by the viewport, which is
-/// one affine for the whole frame, so equal scene linear parts compose to equal device
-/// ones and the census can be taken before a viewport is in hand.
-fn linear_bits(transform: Affine) -> [u32; 4] {
-    [
-        transform.a.to_bits(),
-        transform.b.to_bits(),
-        transform.c.to_bits(),
-        transform.d.to_bits(),
-    ]
-}
 
 /// The encoder's working state for one frame walk.
 struct Encoder<'a> {
@@ -491,283 +455,6 @@ impl Encoder<'_> {
                 self.push_rare_coverage(rare, &stroked, Rule::NonZero, &resolved, style, mask)
             }
         }
-    }
-
-    /// The fill arm of the command walk: pick the glyph or path lane by device size
-    /// and residue state; route non-Normal blends through an implicit child layer;
-    /// mark `Compose::Src` for the knockout two-pass (§4.1).
-    #[allow(clippy::too_many_arguments)] // one command's fields, destructured once
-    fn encode_fill(
-        &mut self,
-        outline: OutlineId,
-        transform: Affine,
-        rule: FillRule,
-        paint: Paint,
-        clip: Option<ClipId>,
-        blend: BlendMode,
-        compose_mode: Compose,
-        mask: Option<MaskId>,
-    ) -> Result<(), RenderError> {
-        let mask = self.use_mask(mask)?;
-        let stored = self
-            .resources
-            .outline(outline)
-            .ok_or(RenderError::UnknownOutline { outline })?;
-        let to_device = compose(transform, self.viewport);
-        let resolved = self.resolve_clip(clip)?;
-        let bounds = self.hulls.bounds(outline, &stored.segments, &to_device);
-        // A *solid* fill's visibility follows from its outline alone, so it is decided
-        // here — before the implicit group a non-Normal blend would otherwise wrap it
-        // in, which is the expensive half of an off-screen blended fill. A shaded fill
-        // waits until `shaded_geometry` has resolved its paint: an unknown ramp or mesh
-        // id must refuse by name wherever the fill happens to land, and a refusal that
-        // depended on the viewport would be a worse defect than the work it saved.
-        if matches!(paint, Paint::Solid(_)) && bounds.is_none_or(|b| self.culled(b, &resolved)) {
-            return Ok(());
-        }
-        if blend != BlendMode::Normal && self.style == DrawStyle::Over {
-            return self.fill_through_blend_group(
-                outline,
-                transform,
-                rule,
-                paint,
-                clip,
-                blend,
-                compose_mode,
-                mask,
-            );
-        }
-        // A staged operator names its own pass; anything else inherits the enclosing
-        // group's style, which is knockout or over (ADR 0025 refuses the combination at
-        // the builder, so these cases cannot overlap).
-        let style = match compose_mode {
-            Compose::Src => DrawStyle::Knockout,
-            Compose::DestOut => DrawStyle::DestOut,
-            Compose::Plus => DrawStyle::Plus,
-            Compose::SrcOver => self.style,
-        };
-        self.distinct_outlines.insert(outline.0);
-        self.segments = self.segments.saturating_add(stored.segments.len() as u64);
-        let rule = match rule {
-            FillRule::NonZero => Rule::NonZero,
-            FillRule::EvenOdd => Rule::EvenOdd,
-        };
-        if let Paint::Solid(color) = paint {
-            let Some(bounds) = bounds else {
-                return Ok(()); // no geometry: draws nothing
-            };
-            // A rectangle is not a path (RENDER_LIBRARY.md §6.4) and a fill is the only
-            // way a document says one: the caller's 995-page corpus emits no
-            // `Command::Rect` at all, so this is the door real pages take to ADR 0007's
-            // lane (ADR 0047). The three conditions are the shaded arm's below, and each
-            // is the same requirement seen on a different paint:
-            //
-            // - a **residue** clip has to multiply into a coverage mask, and the
-            //   analytic lane has nowhere to put one;
-            // - an **oblique** transform makes the four edges a parallelogram, whose
-            //   coverage `rect.wgsl` cannot express;
-            // - `rect_hint` is what says the outline is four axis-aligned edges at all.
-            //
-            // The **fill rule** is deliberately not among them. `axis_aligned_rect`
-            // accepts exactly one closed subpath of four corners, and for a simple
-            // closed curve §8.5.3.3.3's even-odd rule and §8.5.3.3.2's non-zero rule
-            // bound the same region: a ray from an interior point crosses the boundary
-            // an odd number of times, and those crossings sum to a winding of ±1
-            // whichever direction the corners were given in. So `rule` cannot change
-            // the mark, which is why it is not asked about here.
-            if resolved.residues.is_none()
-                && transform_preserves_axes(&to_device)
-                && let Some(hint) = stored.rect_hint
-            {
-                match self.clipped_device_rect(hint, &to_device, &resolved) {
-                    Some(device_rect) => {
-                        self.push_rect_instance(device_rect, color, style, mask)?;
-                    }
-                    // The cull above tests bounds inflated by `CULL_MARGIN`; this one
-                    // is exact, so it can still fire, and a command that reaches no
-                    // pixel is counted wherever it is discovered.
-                    None => self.note_culled(),
-                }
-                return Ok(());
-            }
-            let placement = SolidFill {
-                outline,
-                transform,
-                to_device,
-                rule,
-                color,
-                bounds,
-                style,
-                mask,
-            };
-            return self.fill_solid(&placement, &resolved);
-        }
-        // Shading, mesh or function paint (§8.7.4.5): one quad over a coverage source.
-        // The rect-hinted case needs no scratch tile — analytic coverage, mirroring the
-        // rectangle lane (ADR 0011).
-        let Some(rare) = self.rare_paint(paint)? else {
-            return Ok(());
-        };
-        // The paint is resolved, so the fill may now be dropped for being out of
-        // sight — the half of the solid lane's test that had to wait.
-        if bounds.is_none_or(|b| self.culled(b, &resolved)) {
-            return Ok(());
-        }
-        if resolved.residues.is_none()
-            && transform_preserves_axes(&to_device)
-            && let Some(rect) = stored.rect_hint
-        {
-            return self.push_rare_rect(rare, rect, &to_device, &resolved, style, mask);
-        }
-        let span = self.clock.start();
-        let polylines = raster::flatten(&stored.segments, to_device);
-        self.clock.geometry(span);
-        self.push_rare_coverage(rare, &polylines, rule, &resolved, style, mask)
-    }
-
-    /// The solid arm of the fill walk: three lanes, and the cache decides between them.
-    ///
-    /// In order of preference, and each condition is stated where it is asked:
-    /// [`Encoder::take_gpu_lane`] for a tile the cache is no use for, the glyph lane for
-    /// one it will hold and re-read, the scratch path for everything left — a residue
-    /// clip, or a tile too large for the atlas whose triangles cost more than its
-    /// coverage.
-    fn fill_solid(&mut self, fill: &SolidFill, resolved: &ResolvedClip) -> Result<(), RenderError> {
-        let stored = self
-            .resources
-            .outline(fill.outline)
-            .ok_or(RenderError::UnknownOutline {
-                outline: fill.outline,
-            })?;
-        let (bx0, by0, bx1, by1) = fill.bounds;
-        let (tile_width, tile_height) = (tile_side(bx0, bx1), tile_side(by0, by1));
-        // What the cache would do with this placement, asked once and answered by the
-        // atlas and the census together (ADR 0029). Both lanes below read this one
-        // answer: a lane chosen on one reading of the cache and taken on another is how
-        // a tile ends up rasterised twice, or not at all.
-        let placed_once =
-            self.census
-                .placed_once(fill.outline.0, linear_bits(fill.transform), fill.rule);
-        let cache = self.prospect_for(
-            GlyphPlacement::of(fill.outline, &fill.to_device, fill.rule, self.quantum),
-            tile_width,
-            tile_height,
-            placed_once,
-        )?;
-        // The GPU lane takes the outline as it was uploaded — quadratics, not polylines
-        // — which is the whole of why its cost does not grow with the magnification:
-        // there is no flattening here to be done again at a new scale, and no atlas in
-        // front of it to be cold (ADR 0016).
-        if !stored.quads.is_empty()
-            && self.take_gpu_lane(
-                resolved,
-                cache,
-                tile_width,
-                tile_height,
-                stored.quads.triangle_count(),
-            )
-        {
-            let Some(tile) = self.visible_tile(fill.bounds, resolved) else {
-                return Ok(());
-            };
-            let quads = &stored.quads;
-            let device = fill.to_device;
-            return self.push_gpu_tile(
-                tile,
-                fill.rule,
-                fill.color,
-                resolved,
-                fill.style,
-                fill.mask,
-                |out, origin, clip| {
-                    quads.append_triangles(
-                        |p| {
-                            let q = apply(&device, p);
-                            [q.x + origin[0], q.y + origin[1]]
-                        },
-                        clip,
-                        out,
-                    );
-                },
-            );
-        }
-        // Cacheable is a question for the atlas — how much of it this tile would take —
-        // rather than a constant here (ADR 0024). A residue chain still takes the
-        // scratch path: the clip multiplies into the tile, so the tile is not the glyph
-        // and would poison the cache for every other placement of it.
-        if let (None, Some((placement, entry))) = (resolved.residues.as_ref(), cache.admission()) {
-            // The tile is rasterised at the *quantised* phase and drawn at the integer
-            // origin: that split is the whole of what the quantum does (ADR 0009).
-            let tile_transform = DeviceTransform {
-                e: placement.phase[0],
-                f: placement.phase[1],
-                ..fill.to_device
-            };
-            return self.enqueue(Job::glyph(
-                &stored.segments,
-                tile_transform,
-                fill.rule,
-                placement.key,
-                placement.origin,
-                entry,
-                // The tile the atlas was just asked about, which is the hull's box and so
-                // an upper bound on the one the rasteriser will make.
-                u64::from(tile_width).saturating_mul(u64::from(tile_height)),
-                Draw::new(fill.color, resolved.rect, fill.style, fill.mask),
-            ));
-        }
-        if let Some(rect) = self.deferrable_bounds(resolved) {
-            let bound = self.tile_bound(fill.bounds, resolved);
-            return self.enqueue(Job::sheet(
-                &stored.segments,
-                fill.to_device,
-                None,
-                fill.rule,
-                rect,
-                bound,
-                Draw::new(fill.color, resolved.rect, fill.style, fill.mask),
-            ));
-        }
-        let span = self.clock.start();
-        let polylines = raster::flatten(&stored.segments, fill.to_device);
-        self.clock.geometry(span);
-        self.push_coverage_styled(
-            &polylines, fill.rule, fill.color, resolved, fill.style, fill.mask,
-        )
-    }
-
-    /// §11.3.5 for a single element: the implicit one-element group a blended fill
-    /// draws through, so the blend function sees the element's own colour rather than
-    /// the accumulated layer's.
-    ///
-    /// Inside a knockout group the element composites with the transparent initial
-    /// backdrop, where every blend mode degenerates to Normal — §11.4.6 with §11.3.6's
-    /// αb = 0 — so knockout draws never come here.
-    #[allow(clippy::too_many_arguments)] // the fill's own parameters, forwarded once
-    fn fill_through_blend_group(
-        &mut self,
-        outline: OutlineId,
-        transform: Affine,
-        rule: FillRule,
-        paint: Paint,
-        clip: Option<ClipId>,
-        blend: BlendMode,
-        compose_mode: Compose,
-        mask: Option<u32>,
-    ) -> Result<(), RenderError> {
-        let child = self.plan_child(|encoder| {
-            encoder.encode_fill(
-                outline,
-                transform,
-                rule,
-                paint,
-                clip,
-                BlendMode::Normal,
-                compose_mode,
-                None,
-            )
-        })?;
-        self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)))
     }
 
     fn resolve_clip(&mut self, clip: Option<ClipId>) -> Result<ResolvedClip, RenderError> {
