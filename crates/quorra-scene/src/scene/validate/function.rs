@@ -60,7 +60,7 @@ pub(crate) fn check_function_paint(
 /// §7.10.1's `Range`: a clip, so each pair is finite and ordered — and nothing more, for
 /// the reason [`FnRange`] states.
 fn check_range(range: FnRange) -> Result<(), SceneError> {
-    for pair in range.pairs() {
+    for pair in range.bounds() {
         if !pair[0].is_finite() || !pair[1].is_finite() {
             return Err(SceneError::NonFiniteFunctionRange(range));
         }

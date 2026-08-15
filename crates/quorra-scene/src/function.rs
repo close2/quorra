@@ -267,13 +267,13 @@ pub enum FnRange {
 }
 
 impl FnRange {
-    /// The `[min, max]` pairs, in component order — one for
+    /// The `[min, max]` bounds, in component order — one for
     /// [`Gray`](FnRange::Gray), three for [`Rgb`](FnRange::Rgb).
     ///
     /// Borrowed rather than copied so that the two variants can be checked by one loop
     /// without either arm having to name the other's length.
     #[must_use]
-    pub fn pairs(&self) -> &[[f32; 2]] {
+    pub fn bounds(&self) -> &[[f32; 2]] {
         match self {
             Self::Gray(pair) => std::slice::from_ref(pair),
             Self::Rgb(pairs) => pairs,
@@ -284,7 +284,7 @@ impl FnRange {
     /// [`Gray`](FnRange::Gray), 3 for [`Rgb`](FnRange::Rgb).
     #[must_use]
     pub fn components(&self) -> usize {
-        self.pairs().len()
+        self.bounds().len()
     }
 
     /// Whether every pair is a clip a device can apply: finite, and with its minimum
@@ -298,7 +298,7 @@ impl FnRange {
     /// [`SceneError::UnorderedRect`](crate::error::SceneError::UnorderedRect)'s reason.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.pairs()
+        self.bounds()
             .iter()
             .all(|pair| pair[0].is_finite() && pair[1].is_finite() && pair[0] <= pair[1])
     }
