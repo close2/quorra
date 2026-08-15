@@ -27,17 +27,22 @@
 //! which WGSL built-in, which pipeline key — and ADR 0001 keeps the scene crate ignorant of
 //! all three.
 //!
-//! # What is not here
+//! # Where the rest of the lane is
 //!
-//! The lane. Nothing in `encode.rs`, `compose.rs` or the pipeline store knows this module
-//! exists, and the paint variant is not wired to a pass. That is deliberate and is stated
-//! rather than left to be discovered: a half-wired lane that draws something is exactly the
-//! plausible-looking wrong page CLAUDE.md principle 6 exists to forbid. What wave 2 needs
-//! from here is [`Analysis::program_hash`] to key the upload table by,
-//! [`GeneratedShader::hash`] to key the pipeline by,
-//! [`GeneratedShader::module`] to build it from, and
-//! [`Analysis::relies_on_empty_stack`] plus [`Analysis::agreement`] to raise the two
-//! `Report`s ADR 0053 requires.
+//! [`admit`] is the third unit and the only one with a policy in it: it is what
+//! `Device::upload_function` runs, and it turns "this program is classified `Unbounded`"
+//! into ADR 0053 §3's refusal. Everything downstream of an admitted program is elsewhere,
+//! because none of it is a question about a *program*:
+//!
+//! - `pipeline::function` keys one compiled pipeline per [`GeneratedShader::hash`] and per
+//!   target format, compiling on first use and never on the launch path;
+//! - `src/shaders/function_lane.wgsl` is the fixed half of that shader — the quad, the
+//!   coverage, the clip and the soft mask — appended to what [`generate`] emits;
+//! - `encode::function` places the quad, and `compose::function` binds it.
+//!
+//! [`Analysis::relies_on_empty_stack`] is the one thing a *frame* asks of this module: it
+//! is the `Report` ADR 0053 requires, and it is a static count rather than a dynamic one —
+//! see its own documentation for what that means for the wording.
 //!
 //! # The budgets, all three discoverable before the frame
 //!
@@ -46,6 +51,7 @@
 //! so all three are ours, and each is a public constant a caller can compare a program
 //! against without asking a device anything.
 
+mod admit;
 mod analyse;
 mod generate;
 mod hash;
@@ -56,6 +62,7 @@ mod stackops;
 mod typing;
 mod walk;
 
+pub use admit::admit;
 pub use analyse::{Analysis, INPUTS, analyse, validate_jumps};
 pub use generate::{GeneratedShader, generate};
 pub use hash::{GENERATOR_REVISION, ProgramHash};

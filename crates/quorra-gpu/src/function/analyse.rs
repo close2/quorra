@@ -41,8 +41,8 @@ pub const INPUTS: usize = 2;
 /// admitted program.
 ///
 /// Constructed only by [`analyse`], so its invariants hold by construction: the depth is
-/// within [`MAX_OPERAND_SLOTS`], every `copy`/`index`/`roll` count is resolved, every `not`
-/// is resolved to one of its two meanings, and every jump nests.
+/// within [`MAX_OPERAND_SLOTS`](super::MAX_OPERAND_SLOTS), every `copy`/`index`/`roll` count
+/// is resolved, every `not` is resolved to one of its two meanings, and every jump nests.
 ///
 /// It knows nothing about a `Range`, a `Domain`, a `Matrix` or a `Background` — those belong
 /// to the *shading*, and one uploaded program may serve several. [`Analysis::admits`] is
@@ -84,39 +84,47 @@ impl Analysis {
 
     /// How many values the program leaves on the operand stack.
     ///
-    /// A `Range` may take its components from the top of that; anything below is the
-    /// program's own scratch. Fewer values than components is
-    /// [`FunctionRefusal::InsufficientOutputs`], which [`Analysis::admits`] is how a caller
-    /// asks about before a frame.
+    /// ISO 32000-2 §7.10.5.3 requires this to *equal* the `Range`'s component count — "it
+    /// shall be an error for the number of remaining operands to differ" — and
+    /// [`Analysis::admits`] is where the two meet, before a frame.
     #[must_use]
     pub fn values_left(&self) -> u32 {
         self.values_left
     }
 
-    /// Whether this program can supply a `Range`'s components, and whether the `Range`
-    /// itself is one a clamp can be written against.
+    /// Whether this program supplies exactly a `Range`'s components, and whether the
+    /// `Range` itself is one a clamp can be written against.
     ///
     /// Separate from [`analyse`] because the `Range` belongs to the *shading*, not to the
     /// program: one uploaded program may serve two shadings, and §5 of the brief wants both
     /// questions answerable before a frame rather than during one.
     ///
+    /// **Exactly**, per ISO 32000-2 §7.10.5.3: "it shall be an error for the number of
+    /// remaining operands to *differ* from the number of output variables specified by
+    /// Range". A program leaving more values than the `Range` declares is as much that
+    /// error as one leaving fewer — reading the top three of five would draw a page the
+    /// clause calls an error, and drawing it is what principle 6 prices above refusing it.
+    ///
     /// # Errors
     ///
-    /// [`FunctionRefusal::InsufficientOutputs`], [`FunctionRefusal::RangeNotFinite`] or
+    /// [`FunctionRefusal::OutputCount`], [`FunctionRefusal::RangeNotFinite`] or
     /// [`FunctionRefusal::RangeNotOrdered`].
     pub fn admits(&self, range: FnRange) -> Result<(), FunctionRefusal> {
         validate_range(range)?;
         let required = range.components();
-        if usize::try_from(self.values_left).unwrap_or(usize::MAX) < required {
-            return Err(FunctionRefusal::InsufficientOutputs {
-                produced: usize::try_from(self.values_left).unwrap_or(usize::MAX),
-                required,
-            });
+        let produced = usize::try_from(self.values_left).unwrap_or(usize::MAX);
+        if produced != required {
+            return Err(FunctionRefusal::OutputCount { produced, required });
         }
         Ok(())
     }
 
     /// The slots a `Range`'s components are read from, bottom component first.
+    ///
+    /// [`Analysis::admits`] has already required the two counts to be equal, so this is
+    /// every slot the program leaves — the arithmetic is kept general because it is what
+    /// *says* that, and because a `Range` that reached here without admission would name
+    /// the top values rather than silently the wrong ones.
     pub(super) fn output_slots(&self, range: FnRange) -> Vec<u32> {
         let depth = self.values_left;
         let required = u32::try_from(range.components()).unwrap_or(0);
@@ -133,7 +141,8 @@ impl Analysis {
     /// How many times the program pops a value the operand stack has not got.
     ///
     /// Non-zero means the program's picture depends on a decision ISO 32000-2 does not
-    /// take — see [`Source::EmptyStackZero`]. The count rather than a flag on purpose: it is
+    /// take — see [`Source::EmptyStackZero`](super::Source::EmptyStackZero). The count rather
+    /// than a flag on purpose: it is
     /// the difference between "this program leans on it once" and the caller's own
     /// `pi_seven_segment.pdf`, which leans on it three times and has a whole dead branch as
     /// a result.
@@ -152,6 +161,21 @@ impl Analysis {
     #[must_use]
     pub fn program_length(&self) -> usize {
         self.program_length
+    }
+
+    /// How many bytes this analysis holds, for the resource budget a device charges an
+    /// uploaded program against.
+    ///
+    /// Counted over the lowered tree rather than derived from the instruction count: a
+    /// `Branch` holds two more lists, so the second number is not the first (CLAUDE.md
+    /// principle 3 — a budget that priced only half of what it stores would be a budget
+    /// in name).
+    #[must_use]
+    pub fn stored_bytes(&self) -> u64 {
+        let slots = (self.slot_types.len() as u64).saturating_mul(size_of::<SlotType>() as u64);
+        super::lowered::steps_bytes(&self.steps)
+            .saturating_add(slots)
+            .saturating_add(size_of::<Self>() as u64)
     }
 
     /// The identity of the *program*, which is what an upload deduplicates by.

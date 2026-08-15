@@ -14,6 +14,7 @@
 //! sameness that nothing checks.
 
 use super::{Layouts, Modules};
+use crate::encode::DrawStyle;
 
 /// Which pipeline: the four lane families in their three blend styles, plus the
 /// compositor's own passes.
@@ -115,19 +116,40 @@ pub(crate) struct Spec<'a> {
 
 /// Which of ADR 0010's three styles a lane draws its quad in.
 ///
-/// The four lane families differ in their shader, their bind-group layout and their
-/// instance buffer. They do *not* differ in this: in all four, knockout's shape-erase
+/// The five lane families differ in their shader, their bind-group layout and their
+/// instance buffer. They do *not* differ in this: in all five, knockout's shape-erase
 /// is `fs_shape` under [`ERASE`] and its deposit is `fs_main` under [`ADD`]. Naming the
-/// style once makes that agreement a fact of the code rather than four copies of a
+/// style once makes that agreement a fact of the code rather than five copies of a
 /// two-line rule that would have to be diffed to be checked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Style {
+///
+/// It is `pub(crate)` for the fifth family alone: a generated function pipeline is keyed
+/// by `(shader hash, style, format)` rather than by a [`Kind`], so the style is part of a
+/// key another module builds. Nothing outside this module decides what a style *means*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Style {
     /// The ordinary mark: premultiplied over.
     Over,
     /// Knockout's shape-erase, which writes only the source's shape.
     Erase,
     /// Knockout's additive deposit.
     Add,
+}
+
+impl Style {
+    /// The styles one [`DrawStyle`] draws in, in the order they must run: over alone, the
+    /// knockout erase/add pair in ADR 0010's strict order, or one half of that pair on its
+    /// own when the scene asked for §11.4.6's stages by name (ADR 0025).
+    ///
+    /// One rule, in one place, for all five families — the compositor's pass selection
+    /// reads it through the [`Kind`] it names, and the function lane reads it directly.
+    pub(crate) fn of(style: DrawStyle) -> [Option<Self>; 2] {
+        match style {
+            DrawStyle::Over => [Some(Self::Over), None],
+            DrawStyle::Knockout => [Some(Self::Erase), Some(Self::Add)],
+            DrawStyle::DestOut => [Some(Self::Erase), None],
+            DrawStyle::Plus => [Some(Self::Add), None],
+        }
+    }
 }
 
 /// What distinguishes one lane family from another; [`Style`] is what they share.
@@ -257,6 +279,26 @@ impl<'a> Spec<'a> {
                 strip: true,
             },
         }
+    }
+
+    /// The fifth lane family: one quad painted by a generated §7.10.5 shader (ADR 0053).
+    ///
+    /// It has no [`Kind`] because it has no fixed module — the shader is a function of an
+    /// uploaded program, so the module arrives as an argument rather than out of
+    /// [`Modules`]. Everything else about it is the lane rule the other four follow, which
+    /// is why it is built through the same [`Lane`].
+    pub(crate) fn function(
+        module: &'a wgpu::ShaderModule,
+        layouts: &'a Layouts,
+        style: Style,
+    ) -> Self {
+        Lane {
+            label: "quorra function",
+            shader: module,
+            layout: &layouts.function_pipe,
+            buffer: None,
+        }
+        .spec(style)
     }
 
     /// A full-screen-triangle pass with no blend state and no vertex buffer: the

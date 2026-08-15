@@ -47,6 +47,7 @@
 //! itself and the two lanes it exists for.
 
 mod clips;
+mod function;
 mod hull;
 mod rare;
 mod residue;
@@ -71,6 +72,7 @@ use crate::resources::ResourceStore;
 use crate::startup::Coverage;
 use crate::viewport::Viewport;
 
+pub(crate) use function::{FunctionOp, empty_stack_reports};
 pub(crate) use rare::{ImageOp, PaintSource, ShadedOp};
 use residue::ResidueRegions;
 pub(crate) use scratch::Scratch;
@@ -207,6 +209,8 @@ pub(crate) enum Op {
     Image(Box<ImageOp>),
     /// One shading or mesh quad.
     Shaded(Box<ShadedOp>),
+    /// One quad painted by a §7.10.5 program the device evaluates (ADR 0053).
+    Function(Box<FunctionOp>),
     Child(ChildOp),
 }
 
@@ -304,6 +308,11 @@ pub(crate) struct Encoded {
     pub used_images: Vec<u32>,
     pub used_ramps: Vec<u32>,
     pub used_meshes: Vec<u32>,
+    /// The raw ids of every §7.10.5 program this frame paints with. Nothing has to be
+    /// realised for one — the pipeline is compiled on first use, keyed by content — but
+    /// the frame owes a `Report` for each program that reads an empty operand stack, and
+    /// this is the list that says which (ADR 0053).
+    pub used_functions: Vec<u32>,
     pub commands: u32,
     /// Coverage tiles this frame placed on the scratch sheet, both lanes.
     pub tiles: u32,
@@ -363,6 +372,7 @@ impl Encoded {
                 |total, op| match op {
                     Op::Image(_) => total.saturating_add(size_of::<ImageOp>() as u64),
                     Op::Shaded(_) => total.saturating_add(size_of::<ShadedOp>() as u64),
+                    Op::Function(_) => total.saturating_add(size_of::<FunctionOp>() as u64),
                     Op::Draw(_) | Op::Child(_) => total,
                 },
             )
@@ -384,6 +394,7 @@ impl Encoded {
             bytes_of(self.used_images.len(), size_of::<u32>()),
             bytes_of(self.used_ramps.len(), size_of::<u32>()),
             bytes_of(self.used_meshes.len(), size_of::<u32>()),
+            bytes_of(self.used_functions.len(), size_of::<u32>()),
         ]
         .into_iter()
         .fold(0_u64, u64::saturating_add)
@@ -494,6 +505,7 @@ struct Encoder<'a> {
     used_images: HashSet<u32>,
     used_ramps: HashSet<u32>,
     used_meshes: HashSet<u32>,
+    used_functions: HashSet<u32>,
     segments: u64,
     /// Commands that could reach no pixel of the target, and so were never built.
     culled: u32,
@@ -630,6 +642,7 @@ pub(crate) fn encode(
         used_images: HashSet::new(),
         used_ramps: HashSet::new(),
         used_meshes: HashSet::new(),
+        used_functions: HashSet::new(),
         segments: 0,
         culled: 0,
         culled_layers: 0,
@@ -685,6 +698,7 @@ pub(crate) fn encode(
         used_images: sorted(encoder.used_images),
         used_ramps: sorted(encoder.used_ramps),
         used_meshes: sorted(encoder.used_meshes),
+        used_functions: sorted(encoder.used_functions),
         encode_phases: encoder.clock,
         tiles,
         commands: u32::try_from(commands.len()).unwrap_or(u32::MAX),
@@ -917,17 +931,14 @@ impl Encoder<'_> {
             Paint::Solid(color) => {
                 self.push_coverage(&stroked, Rule::NonZero, color, &resolved, mask)
             }
-            // ADR 0053's paint is not lowered yet, and §5 forbids drawing it as
-            // something else in the meantime.
-            Paint::Function { program, .. } => {
-                Err(RenderError::UnsupportedFunctionPaint { program })
-            }
-            Paint::Shading { .. } | Paint::Mesh(_) => {
-                let Some(geometry) = self.shaded_geometry(paint)? else {
+            // Every non-solid paint is one quad over the stroke's coverage: which one it
+            // is decided by `rare_paint`, and nothing about the difference reaches here.
+            Paint::Shading { .. } | Paint::Mesh(_) | Paint::Function { .. } => {
+                let Some(rare) = self.rare_paint(paint)? else {
                     return Ok(());
                 };
                 let style = self.style;
-                self.push_shaded_coverage(geometry, &stroked, Rule::NonZero, &resolved, style, mask)
+                self.push_rare_coverage(rare, &stroked, Rule::NonZero, &resolved, style, mask)
             }
         }
     }
@@ -1218,10 +1229,10 @@ impl Encoder<'_> {
             };
             return self.fill_solid(&placement, &resolved);
         }
-        // Shading or mesh paint (§8.7.4.5): one quad over a coverage source. The
-        // rect-hinted case needs no scratch tile — analytic coverage, mirroring the
+        // Shading, mesh or function paint (§8.7.4.5): one quad over a coverage source.
+        // The rect-hinted case needs no scratch tile — analytic coverage, mirroring the
         // rectangle lane (ADR 0011).
-        let Some(geometry) = self.shaded_geometry(paint)? else {
+        let Some(rare) = self.rare_paint(paint)? else {
             return Ok(());
         };
         // The paint is resolved, so the fill may now be dropped for being out of
@@ -1233,13 +1244,13 @@ impl Encoder<'_> {
             && transform_preserves_axes(&to_device)
             && let Some(rect) = stored.rect_hint
         {
-            self.push_shaded_rect(geometry, rect, &to_device, &resolved, style, mask);
+            self.push_rare_rect(rare, rect, &to_device, &resolved, style, mask);
             return Ok(());
         }
         let span = self.clock.start();
         let polylines = raster::flatten(&stored.segments, to_device);
         self.clock.geometry(span);
-        self.push_shaded_coverage(geometry, &polylines, rule, &resolved, style, mask)
+        self.push_rare_coverage(rare, &polylines, rule, &resolved, style, mask)
     }
 
     /// The solid arm of the fill walk: three lanes, and the cache decides between them.
@@ -1924,6 +1935,7 @@ impl Encoder<'_> {
         match &op {
             Op::Image(image) => self.plan_mut().mark(image.dest),
             Op::Shaded(shaded) => self.plan_mut().mark(shaded.dest),
+            Op::Function(function) => self.plan_mut().mark(function.placement.dest),
             // A child is the one op that may not be appended at all, so it goes through
             // the method that decides — from here, so that no call site can reach the
             // plain append and skip the decision. `ChildOp` is `Copy`.

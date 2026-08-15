@@ -158,16 +158,28 @@ pub enum FunctionRefusal {
         /// The operator, spelled as Table 42 spells it.
         operator: &'static str,
     },
-    /// The program cannot leave as many values as its `Range` declares components.
+    /// The program leaves a different number of values than its `Range` declares
+    /// components. ISO 32000-2 §7.10.5.3, verbatim:
     ///
-    /// Static, and therefore discoverable before the frame: reading the missing components
-    /// as the empty-stack zero would paint a black-or-primary-coloured page that looks like
-    /// a page.
+    /// > It shall be an error for the number of remaining operands to differ from the
+    /// > number of output variables specified by **Range** or for any of them to be objects
+    /// > other than numbers.
+    ///
+    /// **Differ**, in both directions, and the second direction is the one that is easy to
+    /// get wrong: a program leaving three values under a one-component `Range` is as much
+    /// this error as one leaving none, and reading the top value while discarding two would
+    /// draw a page the clause calls an error. The first direction would paint the missing
+    /// components with the empty-stack zero, which is a black-or-primary-coloured page that
+    /// looks like a page.
+    ///
+    /// Static, and therefore discoverable before the frame:
+    /// [`Analysis::admits`](super::Analysis::admits) is the question, and a caller can ask
+    /// it with no device in hand.
     #[error("the program leaves {produced} values; its Range declares {required} components")]
-    InsufficientOutputs {
-        /// The greatest number of values the program can leave.
+    OutputCount {
+        /// How many values the program leaves.
         produced: usize,
-        /// What [`FnRange`] requires.
+        /// What [`FnRange`](quorra_scene::FnRange) requires.
         required: usize,
     },
     /// A `Range` bound that is NaN or infinite.
@@ -176,8 +188,11 @@ pub enum FunctionRefusal {
         /// Which output component, counting from zero.
         component: usize,
     },
-    /// A `Range` component whose minimum exceeds its maximum, refused for the same reason
-    /// as [`FunctionRefusal::DomainNotOrdered`].
+    /// A `Range` component whose minimum exceeds its maximum.
+    ///
+    /// Refused for the reason the scene boundary refuses an inverted rectangle: clamping
+    /// into `[max, min]` returns the upper bound for *every* input, which is a flat colour
+    /// that looks drawn.
     #[error("the Range's component {component} is {min} to {max}, which is not an interval")]
     RangeNotOrdered {
         /// Which output component, counting from zero.

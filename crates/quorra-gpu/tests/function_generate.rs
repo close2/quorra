@@ -16,7 +16,7 @@
 
 mod function_support;
 
-use function_support::programs::{self, ODD_RGB, UNIT_GRAY, UNIT_RGB, WIDE_GRAY, WIDE_RGB};
+use function_support::programs::{self, ODD_RGB, UNIT_GRAY, UNIT_RGB, WIDE_RGB};
 use quorra_gpu::function::{ENTRY_POINT, OPERATORS, ProgramHash, analyse, generate};
 use quorra_scene::{FnOp, FnRange};
 
@@ -135,6 +135,8 @@ fn the_hash_of_a_fixed_program_is_a_fixed_number() {
 /// `f32::to_bits` says they are not, and the hash uses the second on purpose.
 #[test]
 fn positive_and_negative_zero_are_two_programs() {
+    // Three values left — the two inputs and the literal — so a three-component `Range`
+    // is the one ISO 32000-2 §7.10.5.3 admits for this program.
     let positive = analyse(&[FnOp::PushReal(0.0)]).unwrap();
     let negative = analyse(&[FnOp::PushReal(-0.0)]).unwrap();
     assert_eq!(
@@ -143,8 +145,8 @@ fn positive_and_negative_zero_are_two_programs() {
     );
     assert_ne!(positive.program_hash(), negative.program_hash());
     assert_ne!(
-        generate(&positive, UNIT_GRAY).unwrap().function(),
-        generate(&negative, UNIT_GRAY).unwrap().function()
+        generate(&positive, UNIT_RGB).unwrap().function(),
+        generate(&negative, UNIT_RGB).unwrap().function()
     );
 }
 
@@ -163,14 +165,20 @@ fn the_hash_separates_programs_that_generate_different_shaders() {
         }
     }
 
-    let one = generate(&analyse(&[FnOp::PushReal(0.25)]).unwrap(), UNIT_GRAY).unwrap();
-    let other = generate(&analyse(&[FnOp::PushReal(0.26)]).unwrap(), UNIT_GRAY).unwrap();
+    let one = generate(&analyse(&[FnOp::PushReal(0.25)]).unwrap(), UNIT_RGB).unwrap();
+    let other = generate(&analyse(&[FnOp::PushReal(0.26)]).unwrap(), UNIT_RGB).unwrap();
     assert_ne!(one.hash(), other.hash());
     assert_ne!(one.function(), other.function());
 }
 
 /// The component count changes the emitted function, so it has to change the hash. The
 /// range's *numbers* do not, because they are runtime parameters.
+///
+/// The two halves are asserted differently, and the reason is ISO 32000-2 §7.10.5.3's count
+/// rule: since a program's output count must *equal* the `Range`'s, one analysis can only be
+/// generated under one component count, and the second half is a statement about the hash
+/// rather than about two shaders. The mixing is kept because it is what makes the key
+/// correct independently of who is enforcing the count.
 #[test]
 fn the_hash_covers_the_component_count_and_not_the_bounds() {
     let analysis = analyse(programs::OUT_OF_RANGE).unwrap();
@@ -179,7 +187,19 @@ fn the_hash_covers_the_component_count_and_not_the_bounds() {
     assert_eq!(unit.hash(), odd.hash());
     assert_eq!(unit.function(), odd.function());
 
-    let grey = generate(&analysis, UNIT_GRAY).unwrap();
+    assert_ne!(
+        analysis.shader_hash(UNIT_GRAY),
+        analysis.shader_hash(UNIT_RGB)
+    );
+    assert!(
+        analysis.admits(UNIT_GRAY).is_err(),
+        "one program, one admissible component count (§7.10.5.3)"
+    );
+
+    // And the one-component shader is a different text, generated from the program that
+    // leaves one value.
+    let one_value = analyse(&[FnOp::Pop, FnOp::Pop, FnOp::PushReal(0.5)]).unwrap();
+    let grey = generate(&one_value, UNIT_GRAY).unwrap();
     assert_ne!(grey.hash(), unit.hash());
     assert_ne!(grey.function(), unit.function());
 }
@@ -197,8 +217,10 @@ fn a_literal_round_trips_through_the_emitted_text() {
         -0.0,
         16_777_217.0,
     ] {
+        // The two inputs stay on the stack, so the literal is slot 2 and the `Range` that
+        // §7.10.5.3 admits is the three-component one.
         let analysis = analyse(&[FnOp::PushReal(value)]).unwrap();
-        let source = generate(&analysis, WIDE_GRAY).unwrap();
+        let source = generate(&analysis, WIDE_RGB).unwrap();
         let printed = source
             .function()
             .lines()
@@ -257,7 +279,7 @@ fn a_grey_range_clips_one_component_and_replicates_it() {
         .unwrap()
         .function()
         .to_string();
-    assert!(function.contains("let grey = ps_clip(s2, range_low[0], range_high[0]);"));
+    assert!(function.contains("let grey = ps_clip(s0, range_low[0], range_high[0]);"));
     assert!(function.contains("return vec4<f32>(grey, grey, grey, 1.0);"));
     assert_eq!(function.matches("range_low[").count(), 1);
 }

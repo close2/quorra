@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 
 use quorra_scene::{
-    ImageId, ImageSpec, MAX_COORDINATE, MeshId, MeshSpec, OutlineId, RampId, Rect, ResourceId,
-    Segment, Stop, axis_aligned_rect,
+    FnOp, FunctionId, ImageId, ImageSpec, MAX_COORDINATE, MeshId, MeshSpec, OutlineId, RampId,
+    Rect, ResourceId, Segment, Stop, axis_aligned_rect,
 };
 
 use crate::error::{DeviceError, ResourceProblem};
@@ -66,13 +66,26 @@ pub(crate) struct StoredMesh {
     bytes: u64,
 }
 
-/// The device's resource registry: four id spaces, one budget.
+/// An admitted, resident §7.10.5 program (ADR 0053).
+///
+/// What is stored is the **analysis**, not the instruction list: every question a frame
+/// asks — how many slots, which steps, which hash, whether the empty-stack decision is
+/// relied on — was answered once at upload, and keeping the list beside it would be a
+/// second copy of the same program that a later reader could believe was consulted.
+#[derive(Debug)]
+pub(crate) struct StoredFunction {
+    pub analysis: crate::function::Analysis,
+    bytes: u64,
+}
+
+/// The device's resource registry: five id spaces, one budget.
 #[derive(Debug)]
 pub(crate) struct ResourceStore {
     outlines: HashMap<u32, StoredOutline>,
     images: HashMap<u32, StoredImage>,
     ramps: HashMap<u32, StoredRamp>,
     meshes: HashMap<u32, StoredMesh>,
+    functions: HashMap<u32, StoredFunction>,
     next_id: u32,
     in_use_bytes: u64,
     budget_bytes: u64,
@@ -96,6 +109,7 @@ impl ResourceStore {
             images: HashMap::new(),
             ramps: HashMap::new(),
             meshes: HashMap::new(),
+            functions: HashMap::new(),
             next_id: 0,
             in_use_bytes: 0,
             budget_bytes,
@@ -131,6 +145,22 @@ impl ResourceStore {
     /// The resident mesh behind an id, for the shading lane.
     pub(crate) fn mesh(&self, id: MeshId) -> Option<&StoredMesh> {
         self.meshes.get(&id.0)
+    }
+
+    /// The admitted program behind an id, for the function lane.
+    pub(crate) fn function(&self, id: FunctionId) -> Option<&StoredFunction> {
+        self.functions.get(&id.0)
+    }
+
+    /// Whether any resident program would generate the shader `hash` names.
+    ///
+    /// Two uploads of the same instructions are two identifiers and one content hash, so
+    /// releasing one of them must not drop a pipeline the other still reaches. Asked at
+    /// release only, over a map with one entry per uploaded program.
+    pub(crate) fn holds_program(&self, hash: crate::function::ProgramHash) -> bool {
+        self.functions
+            .values()
+            .any(|stored| stored.analysis.program_hash() == hash)
     }
 
     /// Validate an outline, price it, and store both the segments and the quadratic
@@ -308,6 +338,29 @@ impl ResourceStore {
         Ok(MeshId(id))
     }
 
+    /// Admit a §7.10.5 program, price it, and store what a frame will ask of it.
+    ///
+    /// The admission is [`crate::function::admit`]: the structural check, the analysing
+    /// walk, and ADR 0053 §3's agreement classification, in that order. It runs **here**
+    /// rather than at the scene boundary because a program is a resource — so a caller
+    /// learns its program is unsupported before it has built a scene at all, which is §5
+    /// of the brief's "discoverable before the frame" satisfied properly rather than by
+    /// accident.
+    ///
+    /// The content hash is computed by the walk, once, and kept with the analysis: it is
+    /// what the pipeline cache keys on, and computing it per frame per command would make
+    /// the cache's lookup cost a function of the page rather than of the program.
+    pub(crate) fn upload_function(&mut self, program: &[FnOp]) -> Result<FunctionId, DeviceError> {
+        let analysis = crate::function::admit(program)
+            .map_err(|reason| DeviceError::InvalidFunction { reason })?;
+        let bytes = analysis.stored_bytes();
+        let id = self.allocate_id()?;
+        self.charge(bytes)?;
+        self.functions
+            .insert(id, StoredFunction { analysis, bytes });
+        Ok(FunctionId(id))
+    }
+
     /// Release a resource and return its bytes to the budget.
     ///
     /// An unknown or already-released id is an error, not a no-op: a double release
@@ -320,9 +373,7 @@ impl ResourceStore {
             ResourceId::Image(ImageId(raw)) => self.images.remove(&raw).map(|r| r.bytes),
             ResourceId::Ramp(RampId(raw)) => self.ramps.remove(&raw).map(|r| r.bytes),
             ResourceId::Mesh(MeshId(raw)) => self.meshes.remove(&raw).map(|r| r.bytes),
-            // No `upload_function` on this device yet, so no identifier it issued can be
-            // one — `None` here is the `UnknownResource` below, which is the truth.
-            ResourceId::Function(_) => None,
+            ResourceId::Function(FunctionId(raw)) => self.functions.remove(&raw).map(|r| r.bytes),
         };
         match freed {
             Some(bytes) => {
@@ -348,7 +399,7 @@ impl ResourceStore {
         Ok(())
     }
 
-    /// One id space across the four families, so a stale id of one kind can never
+    /// One id space across the five families, so a stale id of one kind can never
     /// alias a live resource of another — and an id is never reused, so a stale id of
     /// one *era* cannot alias a live resource of the next.
     ///

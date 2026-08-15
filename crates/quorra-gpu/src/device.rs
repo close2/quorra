@@ -29,7 +29,8 @@ use std::time::{Duration, Instant};
 use quorra_scene::Scene;
 
 use quorra_scene::{
-    Color, ImageId, ImageSpec, MeshId, MeshSpec, OutlineId, RampId, ResourceId, Segment, Stop,
+    Color, FnOp, FunctionId, ImageId, ImageSpec, MeshId, MeshSpec, OutlineId, RampId, ResourceId,
+    Segment, Stop,
 };
 
 use crate::atlas::AtlasStore;
@@ -530,6 +531,32 @@ impl Device {
         self.resources.upload_mesh(mesh)
     }
 
+    /// Upload a §7.10.5 type 4 function for [`Paint::Function`] to name (ADR 0053).
+    ///
+    /// **This is where a program is refused, and that placement is the whole point.** A
+    /// program that cannot be lowered to a shader — a backward jump, a `roll` whose count
+    /// came off the stack, a transcendental whose value reaches a comparison — is refused
+    /// *here*, before the caller has built a scene, so that its fallback costs a branch
+    /// rather than a page. `Device::render` never refuses a paint for anything about the
+    /// program itself.
+    ///
+    /// One upload serves any number of shadings: the domain, matrix, range and background
+    /// live on the paint, so two placements of one program share this identifier and the
+    /// one generated shader it is cached by. What a page pays per *distinct* program is
+    /// one shader compile, which is what `Scene::cost`'s `function_programs` counts.
+    ///
+    /// # Errors
+    ///
+    /// [`DeviceError::InvalidFunction`] naming which of the upload's three questions was
+    /// answered no — the structure, the analysing walk, or ADR 0053 §3's agreement
+    /// classification — and by what. Also [`DeviceError::ResourceBudgetExceeded`] and
+    /// [`DeviceError::ResourceIdsExhausted`], as [`Device::upload_outline`].
+    ///
+    /// [`Paint::Function`]: quorra_scene::Paint::Function
+    pub fn upload_function(&mut self, program: &[FnOp]) -> Result<FunctionId, DeviceError> {
+        self.resources.upload_function(program)
+    }
+
     /// Release a resource and return its bytes to the budget.
     ///
     /// # Errors
@@ -539,6 +566,15 @@ impl Device {
     /// bug and hiding it would hide the defect (integration note 7 in `doc/PLAN.md`).
     pub fn release(&mut self, id: impl Into<ResourceId>) -> Result<(), DeviceError> {
         let id = id.into();
+        // Read before the release, because the analysis that carries the hash is exactly
+        // what the release removes.
+        let released_program = match id {
+            ResourceId::Function(program) => self
+                .resources
+                .function(program)
+                .map(|stored| stored.analysis.program_hash()),
+            _ => None,
+        };
         self.resources.release(id)?;
         // The device-resident form goes with the CPU copy, so the budget's word
         // stays true on the GPU side too.
@@ -552,9 +588,20 @@ impl Device {
             ResourceId::Mesh(MeshId(raw)) => {
                 self.mesh_textures.remove(&raw);
             }
-            // An outline has no device-resident twin, and a §7.10.5 program has no
-            // upload path on this device yet — `resources.release` refused it above.
-            ResourceId::Outline(_) | ResourceId::Function(_) => {}
+            // A released program takes its compiled pipelines with it, unless another
+            // resident program has the same instructions and would name the same key:
+            // they are keyed by content, so keeping them would hold GPU memory for
+            // something nothing can ask for again, and dropping one that is still
+            // reachable would cost a recompile rather than a wrong picture.
+            ResourceId::Function(_) => {
+                if let Some(hash) = released_program
+                    && !self.resources.holds_program(hash)
+                {
+                    self.pipelines.forget_program(hash);
+                }
+            }
+            // An outline has no device-resident twin.
+            ResourceId::Outline(_) => {}
         }
         Ok(())
     }
@@ -834,6 +881,11 @@ impl Device {
         encode_time: Duration,
         source: EncodeSource,
     ) -> Result<Frame, RenderError> {
+        // Before the zero-size branch and before anything is drawn: what a frame says
+        // about itself has to be true of a frame that draws nothing too, and the claim
+        // this report makes is about the scene rather than about the pixels.
+        let mut reports = reports;
+        encode::empty_stack_reports(&encoded.used_functions, &self.resources, &mut reports);
         if viewport.width == 0 || viewport.height == 0 {
             return Self::zero_size_frame(viewport, into, encoded, encode_time, reports, source);
         }
@@ -1602,6 +1654,20 @@ impl Device {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         })
+    }
+
+    /// The admitted analysis of a resident §7.10.5 program, for the lane that draws it.
+    ///
+    /// The frame reads it rather than re-deriving it: everything static about a program
+    /// was decided once at [`Device::upload_function`], and a second answer computed
+    /// per frame would be a second answer.
+    pub(crate) fn function_analysis(
+        &self,
+        program: FunctionId,
+    ) -> Option<&crate::function::Analysis> {
+        self.resources
+            .function(program)
+            .map(|stored| &stored.analysis)
     }
 
     pub(crate) fn pipelines(&self) -> &PipelineStore {

@@ -11,10 +11,11 @@
 //! pass over independent marks needs no interleaving at all.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use crate::encode::{Batch, BatchKind, DrawStyle, ImageOp, Op, ShadedOp};
+use crate::encode::{Batch, BatchKind, DrawStyle, FunctionOp, ImageOp, Op, ShadedOp};
 use crate::error::RenderError;
-use crate::pipeline::Kind;
+use crate::pipeline::{Kind, Style};
 
 use super::Executor;
 
@@ -34,11 +35,12 @@ pub(crate) enum PassLoad {
 }
 
 /// One drawable item of a pass: an instanced lane batch, or a single-quad op
-/// (image, shading, mesh — ADR 0011's rare cases).
+/// (image, shading, mesh, function — ADR 0011's rare cases and ADR 0053's).
 pub(crate) enum RunOp {
     Batch(Batch),
     Image(ImageOp),
     Shaded(ShadedOp),
+    Function(FunctionOp),
 }
 
 /// A prepared item of a pass: everything a draw needs that cannot be made while
@@ -46,8 +48,13 @@ pub(crate) enum RunOp {
 enum Ready {
     Batch(Batch),
     /// Over is one pipeline; knockout is the erase/add pair, in order.
+    ///
+    /// The pipelines are resolved here rather than named by [`Kind`] and looked up in the
+    /// pass, because ADR 0053's generated ones have no `Kind` to name — their key is a
+    /// program's content hash. Resolving both families the same way is what keeps the pass
+    /// itself ignorant of which is which.
     Single {
-        kinds: [Option<Kind>; 2],
+        pipelines: [Option<Arc<wgpu::RenderPipeline>>; 2],
         bind: wgpu::BindGroup,
     },
 }
@@ -60,6 +67,7 @@ pub(crate) fn run_ops(ops: &[Op]) -> Vec<RunOp> {
             Op::Draw(batch) => RunOp::Batch(*batch),
             Op::Image(image) => RunOp::Image(**image),
             Op::Shaded(shaded) => RunOp::Shaded(**shaded),
+            Op::Function(function) => RunOp::Function(**function),
             // The callers collect runs of drawable ops only.
             Op::Child(_) => unreachable!("a draw run contains no child composites"),
         })
@@ -78,7 +86,7 @@ impl Executor<'_> {
         load: PassLoad,
         ops: &[RunOp],
     ) -> Result<(), RenderError> {
-        let (ready, needed) = self.prepare_run(ops)?;
+        let (ready, needed) = self.prepare_run(ops, format)?;
         // The attachment this pass writes is the current plan's region, and every lane
         // maps device space through it (ADR 0036).
         let globals = self.device.region_globals(self.region);
@@ -115,9 +123,9 @@ impl Executor<'_> {
         for item in &ready {
             let batch = match item {
                 Ready::Batch(batch) => batch,
-                Ready::Single { kinds, bind } => {
-                    for kind in kinds.iter().flatten() {
-                        pass.set_pipeline(&pipelines[kind]);
+                Ready::Single { pipelines, bind } => {
+                    for pipeline in pipelines.iter().flatten() {
+                        pass.set_pipeline(pipeline);
                         pass.set_bind_group(0, bind, &[]);
                         pass.draw(0..4, 0..1);
                     }
@@ -164,10 +172,19 @@ impl Executor<'_> {
         Ok(())
     }
 
-    /// Phase one of a draw pass: build every bind group and collect every pipeline
-    /// kind the run needs — none of which can happen while the pass borrows the
-    /// recorder.
-    fn prepare_run(&mut self, ops: &[RunOp]) -> Result<(Vec<Ready>, Vec<Kind>), RenderError> {
+    /// Phase one of a draw pass: build every bind group and resolve every pipeline the
+    /// run needs — none of which can happen while the pass borrows the recorder.
+    ///
+    /// The batches hand back a list of [`Kind`]s for the pass to look up, and the
+    /// single-quad ops hand back resolved pipelines. That asymmetry is the point rather
+    /// than an oversight: a batch's pipeline is one of a fixed table and is shared by every
+    /// batch of its kind in the run, while a function quad's is generated per program and
+    /// belongs to that op alone.
+    fn prepare_run(
+        &mut self,
+        ops: &[RunOp],
+        format: wgpu::TextureFormat,
+    ) -> Result<(Vec<Ready>, Vec<Kind>), RenderError> {
         let mut needed: Vec<Kind> = Vec::new();
         let want = |needed: &mut Vec<Kind>, kind: Kind| {
             if !needed.contains(&kind) {
@@ -191,13 +208,11 @@ impl Executor<'_> {
                         Kind::ImageErase,
                         Kind::ImageAdd,
                     );
-                    for kind in kinds.iter().flatten() {
-                        want(&mut needed, *kind);
-                    }
                     let mask = self.mask_for(image.mask);
                     let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
                     let bind = self.device.image_bind(image, self.region, mask, scratch)?;
-                    ready.push(Ready::Single { kinds, bind });
+                    let pipelines = self.lane_pipelines(kinds, format)?;
+                    ready.push(Ready::Single { pipelines, bind });
                 }
                 RunOp::Shaded(shaded) => {
                     let kinds = style_kinds(
@@ -206,19 +221,42 @@ impl Executor<'_> {
                         Kind::ShadedErase,
                         Kind::ShadedAdd,
                     );
-                    for kind in kinds.iter().flatten() {
-                        want(&mut needed, *kind);
-                    }
                     let mask = self.mask_for(shaded.mask);
                     let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
                     let bind = self
                         .device
                         .shaded_bind(shaded, self.region, scratch, mask)?;
-                    ready.push(Ready::Single { kinds, bind });
+                    let pipelines = self.lane_pipelines(kinds, format)?;
+                    ready.push(Ready::Single { pipelines, bind });
+                }
+                RunOp::Function(function) => {
+                    let mask = self.mask_for(function.mask());
+                    let scratch = self.scratch_view.as_ref().unwrap_or(&self.dummy_view);
+                    let bind = self.function_bind(function, scratch, mask);
+                    let pipelines = self.function_pipelines(function, format)?;
+                    ready.push(Ready::Single { pipelines, bind });
                 }
             }
         }
         Ok((ready, needed))
+    }
+
+    /// The pipelines one fixed-table single-quad op draws with, compiling on first use.
+    fn lane_pipelines(
+        &mut self,
+        kinds: [Option<Kind>; 2],
+        format: wgpu::TextureFormat,
+    ) -> Result<[Option<Arc<wgpu::RenderPipeline>>; 2], RenderError> {
+        let mut resolved = [None, None];
+        for (slot, kind) in resolved.iter_mut().zip(kinds) {
+            let Some(kind) = kind else { continue };
+            let (pipeline, compiled) = self.device.pipelines().get(kind, format)?;
+            if let Some(duration) = compiled {
+                self.phases.push(("pipeline compile (first use)", duration));
+            }
+            *slot = Some(pipeline);
+        }
+        Ok(resolved)
     }
 
     /// Build (once per mask) the lane bind group carrying atlas, scratch, and the mask's
@@ -249,14 +287,14 @@ fn batch_kinds(batch: &Batch) -> Vec<Kind> {
         .collect()
 }
 
-/// The pipelines one style needs, in the order they must run: over alone, the knockout
-/// erase/add pair in ADR 0010's strict order, or one half of that pair on its own when
-/// the scene asked for §11.4.6's stages by name (ADR 0025).
+/// The pipelines one style needs, in the order they must run — one lane family's [`Kind`]s
+/// under [`Style::of`], which is where that rule is stated for all five families.
 fn style_kinds(style: DrawStyle, over: Kind, erase: Kind, add: Kind) -> [Option<Kind>; 2] {
-    match style {
-        DrawStyle::Over => [Some(over), None],
-        DrawStyle::Knockout => [Some(erase), Some(add)],
-        DrawStyle::DestOut => [Some(erase), None],
-        DrawStyle::Plus => [Some(add), None],
-    }
+    Style::of(style).map(|wanted| {
+        wanted.map(|wanted| match wanted {
+            Style::Over => over,
+            Style::Erase => erase,
+            Style::Add => add,
+        })
+    })
 }

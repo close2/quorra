@@ -65,10 +65,10 @@ struct Params {
 @group(0) @binding(4) var scratch_tex: texture_2d<f32>;
 
 // The soft mask at a device pixel, given where the mask sits (ADR 0037). Identical in
-// all five shaders that sample a mask; WGSL has no include, so the copies are kept
+// all six shaders that sample a mask; WGSL has no include, so the copies are kept
 // textually the same, and tests/shader_copies.rs fails the build when they drift. The
 // placement is an argument rather than a global because it reaches each lane in a
-// different uniform; `soft_mask_tex` is the one name all five bind it under.
+// different uniform; `soft_mask_tex` is the one name all six bind it under.
 fn soft_mask_value(rect: vec4f, outside: f32, p: vec2f) -> f32 {
     let local = p - rect.xy;
     if any(local < vec2f(0.0)) || any(local >= rect.zw) {

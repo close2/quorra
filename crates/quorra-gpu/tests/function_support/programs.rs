@@ -63,8 +63,12 @@ pub const WIDE_GRAY: FnRange = FnRange::Gray([-1000.0, 1000.0]);
 /// The same, in three components.
 pub const WIDE_RGB: FnRange = FnRange::Rgb([[-1000.0, 1000.0]; 3]);
 
-/// `0.25` in `DeviceGray`: the smallest program that draws anything.
-pub const CONSTANT_GREY: &[FnOp] = &[FnOp::PushReal(0.25)];
+/// `pop pop 0.25` in `DeviceGray`: the smallest program that draws anything.
+///
+/// The two pops are not decoration. ISO 32000-2 §7.10.5.3 makes it an error for the number
+/// of values left to *differ* from the `Range`'s component count, so a one-component
+/// program has to consume the two inputs a §8.7.4.5.2 shading pushes.
+pub const CONSTANT_GREY: &[FnOp] = &[FnOp::Pop, FnOp::Pop, FnOp::PushReal(0.25)];
 
 /// `x`, `y`, `x*y` in `DeviceRGB` — the program that proves the two inputs arrive in the two
 /// slots the walk reserved, and that `index` reaches past the top of the stack.
