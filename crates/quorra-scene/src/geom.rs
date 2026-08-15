@@ -297,6 +297,22 @@ impl Affine {
         self.a * self.d - self.b * self.c
     }
 
+    /// The largest magnitude among the six coefficients.
+    ///
+    /// The number §4.7's coordinate bound is applied to: a transform is refused when this
+    /// exceeds [`MAX_COORDINATE`](crate::scene::MAX_COORDINATE), and it lives here so
+    /// that every boundary asking that question asks it the same way.
+    #[must_use]
+    pub fn max_coefficient(self) -> f32 {
+        self.a
+            .abs()
+            .max(self.b.abs())
+            .max(self.c.abs())
+            .max(self.d.abs())
+            .max(self.e.abs())
+            .max(self.f.abs())
+    }
+
     /// Whether all six coefficients are finite.
     #[must_use]
     pub fn is_finite(self) -> bool {

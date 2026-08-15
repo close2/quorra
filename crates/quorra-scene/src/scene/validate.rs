@@ -61,15 +61,7 @@ impl SceneBuilder {
         if !transform.is_finite() {
             return Err(SceneError::NonFiniteTransform(transform));
         }
-        let magnitude = transform
-            .a
-            .abs()
-            .max(transform.b.abs())
-            .max(transform.c.abs())
-            .max(transform.d.abs())
-            .max(transform.e.abs())
-            .max(transform.f.abs());
-        if magnitude > MAX_COORDINATE {
+        if transform.max_coefficient() > MAX_COORDINATE {
             return Err(SceneError::TransformTooLarge {
                 transform,
                 limit: MAX_COORDINATE,
@@ -86,14 +78,25 @@ impl SceneBuilder {
         }
     }
 
-    pub(super) fn check_paint(paint: Paint) -> Result<(), SceneError> {
-        if !paint.is_valid() {
-            return Err(match paint {
-                Paint::Solid(color) => SceneError::InvalidColor(color),
-                Paint::Shading { .. } | Paint::Mesh(_) => SceneError::InvalidShading,
-            });
+    /// A paint, by the arm that can say what was wrong with it.
+    ///
+    /// [`Paint::Function`] is the arm that carries a whole program, so its refusal is
+    /// [`FunctionPaint::check`](crate::function::FunctionPaint::check)'s — one named
+    /// variant per condition, in the order that module states them — rather than this
+    /// module's single [`SceneError::InvalidShading`]. The rules live beside the type
+    /// because what they check is the program's well-formedness, not the scene's shape.
+    pub(super) fn check_paint(paint: &Paint) -> Result<(), SceneError> {
+        match paint {
+            Paint::Solid(color) => Self::check_color(*color),
+            Paint::Function(function) => function.check(),
+            Paint::Shading { .. } | Paint::Mesh(_) => {
+                if paint.is_valid() {
+                    Ok(())
+                } else {
+                    Err(SceneError::InvalidShading)
+                }
+            }
         }
-        Ok(())
     }
 
     pub(super) fn check_stroke(stroke: Stroke) -> Result<(), SceneError> {
@@ -297,6 +300,57 @@ mod tests {
         assert!(
             builder.finish().commands().is_empty(),
             "refused inputs must not be appended"
+        );
+    }
+
+    /// A [`Paint::Function`] crosses the boundary like every other input: accepted when
+    /// well-formed, refused *by the condition it broke* when not, and never appended.
+    /// The refusal grounds themselves are `crate::function`'s and are tested there; what
+    /// is tested here is that the boundary asks.
+    #[test]
+    fn a_malformed_function_paint_is_refused_at_the_boundary() {
+        use crate::scene::fixtures::function_paint;
+
+        let mut builder = SceneBuilder::new();
+        let good = Paint::Function(std::sync::Arc::new(function_paint(1)));
+        builder
+            .fill(
+                OutlineId(0),
+                Affine::IDENTITY,
+                FillRule::NonZero,
+                good,
+                None,
+                BlendMode::Normal,
+                Compose::SrcOver,
+                None,
+            )
+            .expect("a well-formed function paint is an ordinary paint");
+
+        let looping = Paint::Function(std::sync::Arc::new(crate::function::FunctionPaint {
+            program: std::sync::Arc::from([crate::function::FnOp::Jump { target: 0 }].as_slice()),
+            ..function_paint(1)
+        }));
+        assert!(matches!(
+            builder.stroke(
+                OutlineId(0),
+                Affine::IDENTITY,
+                Stroke {
+                    width: 1.0,
+                    cap: LineCap::Butt,
+                    join: LineJoin::Miter,
+                    miter_limit: 4.0,
+                },
+                looping,
+                None,
+                BlendMode::Normal,
+                None,
+            ),
+            Err(SceneError::BackwardFunctionJump { .. })
+        ));
+        assert_eq!(
+            builder.finish().commands().len(),
+            1,
+            "the refused stroke must not be appended"
         );
     }
 

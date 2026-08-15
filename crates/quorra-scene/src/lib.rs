@@ -29,6 +29,7 @@
 
 pub mod blend;
 pub mod error;
+pub mod function;
 pub mod geom;
 pub mod ids;
 pub mod image;
@@ -39,6 +40,7 @@ pub mod scene;
 
 pub use blend::{BlendMode, Compose, FillRule};
 pub use error::{GroupComposeReason, NonIsolatedReason, SceneError, StagedComposeReason};
+pub use function::{FnOp, FnRange, FunctionPaint, MAX_PROGRAM_LENGTH};
 pub use geom::{Affine, Point, Rect, Segment, Size, axis_aligned_rect};
 pub use ids::{ClipId, ImageId, MaskId, MeshId, OutlineId, RampId, ResourceId};
 pub use image::ImageSpec;
