@@ -19,12 +19,23 @@ atlas stops re-encoding itself every frame), ADR 0051 (three files split along t
 ADR 0052 (the readback gate counts instead of timing), and one clause defect: a blended
 stroke inside a knockout group was blended where §11.4.6 replaces.
 
-**Local is ahead of that by three rounds**: the function paint (ADR 0053); the 2026-08-15
-second round — ADR 0054's parallel geometry phase, the `device.rs` split (2 283 lines → 235
-over eleven submodules), and type 4's knockout and retained-frame tests; and the debt round
-below. Whether the first two reached the remote could not be checked from the `AI` user,
-which has no key for `git@github.com:close2/quorra.git`; `origin/main` in this checkout
-points at the second round's tip, which is evidence and not proof.
+**Everything through `a4380e2` is pushed** — the owner pushed it on 2026-08-16 at 00:14, and
+`.git/logs/refs/remotes/origin/main` carries the four pushes that got there:
+`6ed67f0 → a64a908 → 05fadc5 → 619ef3b → a4380e2`. That is the function paint (ADR 0053),
+ADR 0054's parallel geometry phase, the `device.rs` split, the `encode.rs` split, ADR 0055
+and the debt round. **The `AI` user cannot check this against the remote** — it has no key for
+`git@github.com:close2/quorra.git` — so read the reflog, not `git ls-remote`, and never write
+"unpushed" here from a failed fetch. An earlier version of this paragraph said two rounds were
+unpushed when both had reached the remote; the caller's own `Cargo.lock` disproved it, since
+cargo cannot resolve a git rev it could not fetch.
+
+**The caller pins `619ef3b`**, one round back, in their `Cargo.lock`
+(`git+https://github.com/close2/quorra#619ef3b4…`, no `[patch]`). Their tree builds against
+`a4380e2` unmodified — verified, at 24 encode threads — and **cannot go back**: `a64a908`
+fails their adapter with 15 compile errors across four call sites (`Paint::Function`, `FnOp`
+/`FnRange`/`FunctionId`, `Device::upload_function` + `function::admit`, and
+`Options::encode_threads`). The bump is not optional for them, and the release note should
+name those four.
 
 **The 2026-08-15 debt round** closed the small debts this file listed, in three worktrees at
 once: a generated function shader's compile cost measured here (`examples/function_compile.rs`),

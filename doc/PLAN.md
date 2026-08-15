@@ -48,7 +48,30 @@ row, since a number without one is not evidence.
 | the caller's corpus at scale 4 | **936** / 10 / 5 / 23 | same copy, same hour |
 | — the same lane re-run a day later, against an unchanged quorra | 936 / **11 / 4** / 23 | a second copy, 2026-08-15 (ADR 0055): their tree moved a page from *refused* to *differs*, which is why a count in an older document is never a baseline |
 
-**The whole matrix, base against the merged round, in one copy of their tree within one
+**The release matrix for `a64a908 → a4380e2`** — 72 commits, one copy of their tree, 29
+minutes, RADV, both lanes, both scales, taken 2026-08-16 00:04–00:33:
+
+| lane, scale | base `a64a908` | pushed `a4380e2` |
+|---|---|---|
+| CPU, scale 1 | 931 / 23 / 2 / 18 | **931 / 23 / 2 / 18** |
+| GPU, scale 1 | 929 / 25 / 2 / 18 | **929 / 25 / 2 / 18** |
+| CPU, scale 4 | 936 / 11 / 4 / 23 | **936 / 11 / 4 / 23** |
+| GPU, scale 4 | 937 / 10 / 4 / 23 | **937 / 10 / 4 / 23** |
+
+**Of 956 page lines, exactly one moves** — `issue10572.pdf` at scale 4 on both lanes, mean
+0.1332 → 0.1036 and SSIM 0.99497 → 0.99602 with its worst tile unchanged, which is ADR 0055
+to the digit and toward the oracle. No refusal moved in either direction. Two things that had
+to move nothing moved nothing, and each is worth more than the null it looks like: the
+`encode.rs` split into eleven modules got its **first** corpus exposure here and is
+character-identical across 1 907 compared pages; and ADR 0054's parallel geometry ran the
+change column at **24 threads against the base's 1** and produced identical output on every
+page — the determinism claim §4.6 asks for, held over 956 real pages carrying clip chains,
+groups, masks and atlas pressure rather than over a fixture. The function lane was exercised
+rather than merely compiled: a census over the gate's 974 files found **one** page with a
+§8.7.4.5.2 program (`function_based_shading.pdf`, 8 shadings evaluated on the device and 1
+refused to the grid), and it agrees with the oracle at both scales on both lanes.
+
+**The earlier matrix, base against the merged round, in one copy of their tree within one
 hour** — which is the only form `HANDOVER.md` accepts. Base is `6ed67f0`, the commit before
 this round; the corpus cannot be run against the `87898c6` their lock pins, because their
 working tree already uses `RetainedScene` and does not compile against it.
