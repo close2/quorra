@@ -97,13 +97,17 @@ on the GPU.
   land with ADR 0050 — `atlas_working_set_bytes` and `atlas_repacked` — and one
   `DeviceError` variant, `ResourceIdsExhausted`; all three are additive, and
   `doc/api-change-retained-atlas.md` is what the bump owes them.
-- **A paint the device evaluates** — the caller's `QUORRA_FUNCTION_PAINT.md` asks for a
-  §7.10.5 function evaluated per fragment. ADR 0053 answers **yes, type 4 only, generated
-  shader only**, and nothing is built: a full page goes 4 988 ms on their processor to
-  **0.060 ms** on RADV, and the agreement question resolves to a static classification of
-  the program rather than to any of the three tolerances they offered. What is open is
-  their answer on two contract questions, a conformance test per operator, and the paint
-  measured inside the compositor rather than as a bare pass.
+- **A paint the device evaluates — built** (ADR 0053, 2026-08-15). `Paint::Function` is a
+  §7.10.5 type 4 program uploaded once, admitted at `Device::upload_function`, generated
+  into a WGSL shader cached by the program's content hash, and drawn through the rare
+  lane's coverage, clip and soft-mask weighting. A full page went 4 988 ms on the caller's
+  processor to **0.060 ms** on RADV in the spike. 385 tests pass on **both** adapters; the
+  125-case conformance corpus runs on the device against an independently written
+  reference evaluator, and both its gate and the lane's are verified able to fail.
+  What is still open: their answer on the two contract questions ADR 0053 §3.2 names, a
+  knockout group over a function paint (the pipeline pair exists and is selected, no test
+  draws one), and a generated compile timed on a quiet machine — the spike's 6.3 ms is
+  still the only figure, and this machine reached load 66 during the round.
 - **§11.2's census** still has not run against a real corpus in the form M5 asked for; the
   path lane's design stands on the shapes `doc/corpus-profile.md` measured instead, and
   ADR 0008 names the lever if the census ever overturns it.

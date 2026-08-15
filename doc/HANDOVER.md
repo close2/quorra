@@ -12,14 +12,21 @@ happened, here if it changes how you *work*.
 Nine milestones are done; the swap landed on 2026-08-03 and the caller consumes this
 library as a git dependency, pinned by their `Cargo.lock`.
 
-**Local is ahead of `origin/main` and has not been pushed** — the 2026-08-15 round is
-merged here and nowhere else. The caller pins `87898c6`, **twenty commits back**, and what
-those twenty carry is ADR 0047 (a document's rectangles reach the rectangle lane), ADR 0048
-(`RetainedScene`, an API they must adopt rather than merely receive), ADR 0050 (a page too
-large for its atlas stops re-encoding itself every frame, plus two additive `Counters`
-fields and a `DeviceError` variant), ADR 0051 (three files split along their seams; no
-public API moved), ADR 0052 (the readback gate counts instead of timing) and one clause
-defect fixed: a blended stroke inside a knockout group was blended where §11.4.6 replaces.
+**The 2026-08-15 release round is pushed** (`a64a908`): ADR 0047 (a document's rectangles
+reach the rectangle lane), ADR 0048 (`RetainedScene`), ADR 0049 (a clip chain's residue
+rasterised once, and the border-cut defect under it), ADR 0050 (a page too large for its
+atlas stops re-encoding itself every frame), ADR 0051 (three files split along their seams),
+ADR 0052 (the readback gate counts instead of timing), and one clause defect: a blended
+stroke inside a knockout group was blended where §11.4.6 replaces.
+
+**Local is ahead of that by the function-paint round** (ADR 0053), which is not pushed.
+
+**One thing the release round owes the caller and they have not done yet.** Their corpus
+ratchet lists the pages that differ from their oracle by name, and ADR 0049 moved
+`issue2177.pdf` onto the oracle — so their `every_corpus_page_agrees_with_the_cpu_oracle`
+**fails on the pushed commit** until they re-baseline that list. The verdict counts are
+right (931/23/2/18) and every other page line is identical; the ratchet is doing its job.
+`pdf-viewer/doc/QUORRA_API_2026_08_15.md` §0 tells them to expect it.
 
 **The round is corpus-clean and the bump is ready.** Base against merged, one copy of their
 tree, one hour, both coverage lanes: scale 1 goes 930/24 → 931/23 on the CPU lane and
@@ -72,14 +79,20 @@ we never edit their tree:
 Deliver the answers and let their corpus re-baseline absorb the twenty commits in one round.
 The draft's release-note section doubles as what the bump delivers.
 
-### 1b. The function paint, if they say yes
+### 1b. The function paint — **built**; what is left of it
 
-ADR 0053 is **proposed**, the answer is in their tree, and nothing is built. If they take
-it, the order is: the static classification and its conformance test *first* (a program per
-dangerous operator refused, a program per safe operator exact), then the paint inside the
-compositor, then the generated-shader cache. The spike
-(`crates/quorra-gpu/examples/function_paint/`) is a bare full-viewport pass and is not a
-starting point for the lane — it is the evidence that the lane is worth having.
+ADR 0053 is accepted and the lane draws (`src/function/`, `src/pipeline/function.rs`,
+`src/encode/function.rs`, `src/compose/function.rs`). Read its **amendment** before quoting
+its §3: `Agreement::Exact` was renamed `Bounded` because WGSL permits reassociation and
+fusion, so bit-exactness was never ours to promise. The caller's answer document carries the
+same correction.
+
+Left, in `doc/notes-function-wiring.md` §4.5 and §6: no test draws a knockout group over a
+function paint (the pipeline pair compiles and `Style::of` selects it); no retained-frame
+test; **no generated-compile duration of our own** — the spike's 6.3 ms stands alone and
+this machine hit load 66 during the round, so the test asserts the property (one compile,
+then none) instead; and `gt`/`ge`/`lt`/`le` compare a boolean numerically where PLRM3 raises
+`typecheck`, left deliberately because it is ADR 0053 §3.2's open question with the caller.
 
 Do not build the interpreter shape. It is 133 ms against 0.060, it costs 596 ms–4.5 s of
 cold compile against 6.3 ms, and at 4× it lost the device.
