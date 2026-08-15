@@ -135,6 +135,10 @@ pub struct Device {
     coverage: Coverage,
     /// Whether a frame subdivides its encode phase (ADR 0023).
     instrument_encode: bool,
+    /// How many threads a frame's geometry may use, as the host stated it
+    /// ([`Options::encode_threads`]). Clamped where the device is built, so the encoder
+    /// reads a number rather than a request.
+    encode_threads: usize,
     coverage_samples: u32,
     /// The GPU lane's winding target, kept across frames (ADR 0016's measurement).
     winding_texture: crate::winding::WindingTexture,

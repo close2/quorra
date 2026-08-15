@@ -43,12 +43,14 @@
 //! the shelf packing that fills it (ADR 0021, ADR 0034), [`rare`] is the image and
 //! shading lanes — the quads the brief's §0 calls the rare case (ADR 0011) — and
 //! [`hull`] is the memo that bounds a placement by translating its neighbour's box
-//! rather than transforming the outline again (ADR 0045). What is left here is the walk
-//! itself and the two lanes it exists for.
+//! rather than transforming the outline again (ADR 0045), and [`parallel`] is the seam
+//! that lets a run of marks rasterise off this thread when the host asked for that. What
+//! is left here is the walk itself and the two lanes it exists for.
 
 mod clips;
 mod function;
 mod hull;
+mod parallel;
 mod rare;
 mod residue;
 mod scratch;
@@ -61,8 +63,9 @@ use quorra_scene::{
 };
 
 use clips::{ClipResolver, OPEN_CLIP, ResolvedClip, open_clip};
+use parallel::{Draw, Job};
 
-use crate::atlas::{AtlasEntry, AtlasStore, CacheProspect, GlyphKey, GlyphPlacement};
+use crate::atlas::{AtlasStore, CacheProspect, GlyphKey, GlyphPlacement};
 use crate::census::Census;
 use crate::error::RenderError;
 use crate::instrument::EncodeClock;
@@ -522,6 +525,24 @@ struct Encoder<'a> {
     scratch_charged: u64,
     /// What encode spent its time on, when the caller asked (ADR 0023).
     clock: EncodeClock,
+    /// How many threads the *host* said the frame's geometry may use
+    /// ([`crate::startup::Options::encode_threads`]). One is the default and takes the
+    /// walk this encoder has always taken, with no queue and no allocation.
+    threads: usize,
+    /// Marks whose coverage has not been made yet, in encounter order ([`parallel`]).
+    /// Always empty when `threads` is one.
+    queue: Vec<Job<'a>>,
+    /// The atlas keys the queue will write, so that two queued jobs cannot rasterise
+    /// one key against an atlas neither has reached (`parallel`'s guard).
+    queued_keys: FastSet<GlyphKey>,
+    /// The queue's weight in outline segments, against which the fan-out's floor is
+    /// tested. A `u64` because it is a sum of scene-derived counts.
+    queued_weight: u64,
+    /// Host memory the queue holds, bounded above (`Job::held`), against which
+    /// `in_flight_limit` is tested.
+    queued_bytes: u64,
+    /// What that sum may reach before the queue is drained (`parallel::in_flight_limit`).
+    in_flight_limit: u64,
     /// One control-hull box per `(outline, linear part)`, so the 3 502 repeats of a
     /// dense page's 818 letterforms add a translation instead of transforming 37 control
     /// points again — 21 % of the encode, and [`hull`] carries the benchmark and the
@@ -574,6 +595,7 @@ pub(crate) fn encode(
     quantum: Option<u16>,
     coverage: Coverage,
     instrument: bool,
+    threads: usize,
 ) -> Result<Encoded, RenderError> {
     let commands = scene.commands();
 
@@ -652,12 +674,32 @@ pub(crate) fn encode(
         scratch_charged: 0,
         clock: EncodeClock::new(instrument),
         hulls: hull::HullMemo::default(),
+        threads,
+        queue: Vec::new(),
+        queued_keys: FastSet::default(),
+        queued_weight: 0,
+        queued_bytes: 0,
+        in_flight_limit: parallel::in_flight_limit(frame_budget_bytes),
     };
 
     for (index, command) in commands.iter().enumerate() {
         encoder.command(index, command)?;
     }
+    // The last run of marks, which no later command drained. Everything below reads the
+    // sheet, the budget and the plans, and every one of those is what the queue has yet
+    // to touch.
+    encoder.drain_queue()?;
 
+    finish(encoder, commands.len())
+}
+
+/// What the frame is worth once every tile has been placed: the sheet's own extent, the
+/// GPU lane's, and the counters the walk accumulated.
+///
+/// Split from [`encode`] because it is a different subject — the walk decides what a
+/// page draws, this prices what the walk placed — and because the two together read as
+/// one function only to someone who has already read both.
+fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encoded, RenderError> {
     // The sheet's extent is only known once every tile has been placed, so the GPU
     // lane learns it here rather than carrying a guess: its triangles are already in
     // sheet coordinates, and what was missing was how large the sheet turned out to
@@ -701,7 +743,7 @@ pub(crate) fn encode(
         used_functions: sorted(encoder.used_functions),
         encode_phases: encoder.clock,
         tiles,
-        commands: u32::try_from(commands.len()).unwrap_or(u32::MAX),
+        commands: u32::try_from(commands).unwrap_or(u32::MAX),
         clip_distinct_regions: distinct_clip_regions(&encoder.clips),
         clip_residue_regions: encoder.residue.regions,
         clip_residue_tiles: encoder.residue.tiles,
@@ -813,8 +855,7 @@ impl Encoder<'_> {
                     },
                     mask,
                     isolated: spec.isolated,
-                }));
-                Ok(())
+                }))
             }
         }
     }
@@ -916,11 +957,34 @@ impl Encoder<'_> {
                 };
                 encoder.command(index, &plain)
             })?;
-            self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)));
+            self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)))?;
             return Ok(());
         }
         self.distinct_outlines.insert(outline.0);
         self.segments = self.segments.saturating_add(stored.segments.len() as u64);
+        // A solid stroke is expansion and a fill, both of them pure functions of this
+        // command's own outline, so it takes the same seam a fill does (`parallel`).
+        if let Paint::Solid(color) = paint
+            && let Some(rect) = self.deferrable_bounds(&resolved)
+        {
+            // The hull grown by the stroke's own reach, which is the box the cull above
+            // already tested and so an upper bound on the expansion's device bounds.
+            let bound = self
+                .hulls
+                .bounds(outline, &stored.segments, &to_device)
+                .map_or(0, |(x0, y0, x1, y1)| {
+                    self.tile_bound((x0 - reach, y0 - reach, x1 + reach, y1 + reach), &resolved)
+                });
+            return self.enqueue(Job::sheet(
+                &stored.segments,
+                to_device,
+                Some(stroke),
+                Rule::NonZero,
+                rect,
+                bound,
+                Draw::new(color, resolved.rect, self.style, mask),
+            ));
+        }
         // Flatten under the full transform, then expand: the width arrived
         // resolved (§4.5), so our job is caps, joins and miters only.
         let span = self.clock.start();
@@ -945,15 +1009,21 @@ impl Encoder<'_> {
 
     /// Plan a child layer: run `body` with the current plan switched to a fresh
     /// node, restoring on both paths.
+    ///
+    /// The two drains are the plan boundary: a queued mark belongs to the plan that was
+    /// current when the walk reached it, and this is the one place `current_plan` moves
+    /// (`parallel`). The second drain runs *inside* the child, before the restore, and
+    /// only when the body succeeded — a body that failed is a frame that will be refused.
     fn plan_child(
         &mut self,
         body: impl FnOnce(&mut Self) -> Result<(), RenderError>,
     ) -> Result<usize, RenderError> {
+        self.drain_queue()?;
         let child = self.layers.len();
         self.layers.push(LayerPlan::default());
         let outer = self.current_plan;
         self.current_plan = child;
-        let result = body(self);
+        let result = body(self).and_then(|()| self.drain_queue());
         self.current_plan = outer;
         result?;
         Ok(child)
@@ -1092,7 +1162,7 @@ impl Encoder<'_> {
                 self.note_culled();
                 return Ok(());
             };
-            self.push_rect_instance(device_rect, color, self.style, mask);
+            self.push_rect_instance(device_rect, color, self.style, mask)?;
             return Ok(());
         }
         // Oblique transform or residue clip: the rectangle is a polygon and
@@ -1209,7 +1279,9 @@ impl Encoder<'_> {
                 && let Some(hint) = stored.rect_hint
             {
                 match self.clipped_device_rect(hint, &to_device, &resolved) {
-                    Some(device_rect) => self.push_rect_instance(device_rect, color, style, mask),
+                    Some(device_rect) => {
+                        self.push_rect_instance(device_rect, color, style, mask)?;
+                    }
                     // The cull above tests bounds inflated by `CULL_MARGIN`; this one
                     // is exact, so it can still fire, and a command that reaches no
                     // pixel is counted wherever it is discovered.
@@ -1244,8 +1316,7 @@ impl Encoder<'_> {
             && transform_preserves_axes(&to_device)
             && let Some(rect) = stored.rect_hint
         {
-            self.push_rare_rect(rare, rect, &to_device, &resolved, style, mask);
-            return Ok(());
+            return self.push_rare_rect(rare, rect, &to_device, &resolved, style, mask);
         }
         let span = self.clock.start();
         let polylines = raster::flatten(&stored.segments, to_device);
@@ -1273,13 +1344,15 @@ impl Encoder<'_> {
         // atlas and the census together (ADR 0029). Both lanes below read this one
         // answer: a lane chosen on one reading of the cache and taken on another is how
         // a tile ends up rasterised twice, or not at all.
-        let cache = self.atlas.prospect(
+        let placed_once =
+            self.census
+                .placed_once(fill.outline.0, linear_bits(fill.transform), fill.rule);
+        let cache = self.prospect_for(
             GlyphPlacement::of(fill.outline, &fill.to_device, fill.rule, self.quantum),
             tile_width,
             tile_height,
-            self.census
-                .placed_once(fill.outline.0, linear_bits(fill.transform), fill.rule),
-        );
+            placed_once,
+        )?;
         // The GPU lane takes the outline as it was uploaded — quadratics, not polylines
         // — which is the whole of why its cost does not grow with the magnification:
         // there is no flattening here to be done again at a new scale, and no atlas in
@@ -1322,17 +1395,37 @@ impl Encoder<'_> {
         // scratch path: the clip multiplies into the tile, so the tile is not the glyph
         // and would poison the cache for every other placement of it.
         if let (None, Some((placement, entry))) = (resolved.residues.as_ref(), cache.admission()) {
-            return self.push_glyph(
-                fill.outline,
-                &fill.to_device,
-                &placement,
-                entry,
+            // The tile is rasterised at the *quantised* phase and drawn at the integer
+            // origin: that split is the whole of what the quantum does (ADR 0009).
+            let tile_transform = DeviceTransform {
+                e: placement.phase[0],
+                f: placement.phase[1],
+                ..fill.to_device
+            };
+            return self.enqueue(Job::glyph(
+                &stored.segments,
+                tile_transform,
                 fill.rule,
-                fill.color,
-                resolved,
-                fill.style,
-                fill.mask,
-            );
+                placement.key,
+                placement.origin,
+                entry,
+                // The tile the atlas was just asked about, which is the hull's box and so
+                // an upper bound on the one the rasteriser will make.
+                u64::from(tile_width).saturating_mul(u64::from(tile_height)),
+                Draw::new(fill.color, resolved.rect, fill.style, fill.mask),
+            ));
+        }
+        if let Some(rect) = self.deferrable_bounds(resolved) {
+            let bound = self.tile_bound(fill.bounds, resolved);
+            return self.enqueue(Job::sheet(
+                &stored.segments,
+                fill.to_device,
+                None,
+                fill.rule,
+                rect,
+                bound,
+                Draw::new(fill.color, resolved.rect, fill.style, fill.mask),
+            ));
         }
         let span = self.clock.start();
         let polylines = raster::flatten(&stored.segments, fill.to_device);
@@ -1373,8 +1466,7 @@ impl Encoder<'_> {
                 None,
             )
         })?;
-        self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)));
-        Ok(())
+        self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)))
     }
 
     fn resolve_clip(&mut self, clip: Option<ClipId>) -> Result<ResolvedClip, RenderError> {
@@ -1384,117 +1476,6 @@ impl Encoder<'_> {
                 .resolve(id, self.scene, self.viewport, self.resources),
             None => Ok(open_clip()),
         }
-    }
-
-    /// The glyph lane: rasterise (or find) the tile for this key and emit its quad.
-    ///
-    /// `resident` is the entry [`AtlasStore::prospect`] already found for this key, and
-    /// is passed in rather than looked up again: the lane was *chosen* on that reading,
-    /// so drawing on a second one could only differ if something between the two had
-    /// touched the atlas — which would be the tile-rasterised-twice defect `prospect`
-    /// is written against, not a case to be robust to.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
-    #[allow(clippy::too_many_arguments)] // one draw's parameters, threaded once
-    fn push_glyph(
-        &mut self,
-        outline: OutlineId,
-        to_device: &DeviceTransform,
-        placement: &GlyphPlacement,
-        resident: Option<AtlasEntry>,
-        rule: Rule,
-        color: quorra_scene::Color,
-        resolved: &ResolvedClip,
-        style: DrawStyle,
-        mask: Option<u32>,
-    ) -> Result<(), RenderError> {
-        let [ix, iy] = placement.origin;
-        let [px, py] = placement.phase;
-        let key = placement.key;
-        let first_use = self.atlas_keys.insert(key);
-
-        let entry = if let Some(entry) = resident {
-            if first_use {
-                self.atlas_requested_bytes = self
-                    .atlas_requested_bytes
-                    .saturating_add(u64::from(entry.width).saturating_mul(u64::from(entry.height)));
-            }
-            Some(entry)
-        } else {
-            {
-                let stored = self
-                    .resources
-                    .outline(outline)
-                    .ok_or(RenderError::UnknownOutline { outline })?;
-                let tile_transform = DeviceTransform {
-                    e: px,
-                    f: py,
-                    ..*to_device
-                };
-                let span = self.clock.start();
-                let polylines = raster::flatten(&stored.segments, tile_transform);
-                let Some((x0, y0, x1, y1)) = raster::polyline_bounds(&polylines) else {
-                    return Ok(());
-                };
-                let left = x0.floor() as i32;
-                let top = y0.floor() as i32;
-                let width = (x1.ceil() as i32 - left).max(0) as u32;
-                let height = (y1.ceil() as i32 - top).max(0) as u32;
-                if width == 0 || height == 0 {
-                    return Ok(());
-                }
-                self.charge_tile(width, height)?;
-                let tile = raster::fill_mask(&polylines, rule, left, top, width, height);
-                self.clock.geometry(span);
-                if first_use {
-                    self.atlas_requested_bytes = self
-                        .atlas_requested_bytes
-                        .saturating_add(u64::from(width).saturating_mul(u64::from(height)));
-                }
-                let span = self.clock.start();
-                let inserted = self.atlas.insert(key, &tile);
-                self.clock.staging(span);
-                if inserted.is_none() {
-                    // Atlas full: this tile draws uncached, and the device repacks
-                    // the atlas after the frame. Same pixels either way — one
-                    // rasteriser feeds both paths.
-                    self.atlas_pressure = true;
-                    let dest = Point::new(ix + tile.left as f32, iy + tile.top as f32);
-                    return self.push_scratch_quad(&tile, dest, color, resolved.rect, style, mask);
-                }
-                inserted
-            }
-        };
-        // One count per distinct key that reached an entry, however it reached it. The
-        // atlas holds at least this many entries when the frame ends, and what it holds
-        // *beyond* this many is an earlier frame's — which is the only thing a repack
-        // reclaims, and so the only thing that can make one worth taking (ADR 0050).
-        if first_use && entry.is_some() {
-            self.atlas_entries_used = self.atlas_entries_used.saturating_add(1);
-        }
-        if let Some(entry) = entry {
-            let dest = Point::new(ix + entry.tile_left as f32, iy + entry.tile_top as f32);
-            let device_rect = Rect::new(
-                dest,
-                Point::new(dest.x + entry.width as f32, dest.y + entry.height as f32),
-            );
-            if device_rect.intersection(resolved.rect).is_empty() {
-                return Ok(());
-            }
-            self.push_quad_instance(
-                dest,
-                entry.width as f32,
-                entry.height as f32,
-                entry.x as f32,
-                entry.y as f32,
-                0.0, // source: atlas
-                color,
-                resolved.rect,
-                style,
-                mask,
-            );
-        }
-        Ok(())
     }
 
     /// The path lane: rasterise coverage for these polylines over the visible
@@ -1742,6 +1723,9 @@ impl Encoder<'_> {
         mask: Option<u32>,
         triangles: impl FnOnce(&mut Vec<crate::outline::WindingVertex>, [f32; 2], [f32; 4]),
     ) -> Result<(), RenderError> {
+        // A reservation is a shelf, and shelves are taken in encounter order (ADR 0034),
+        // so anything queued takes its place first (`parallel`).
+        self.drain_queue()?;
         let (left, top, width, height) = tile;
         let (sx, sy) =
             self.scratch
@@ -1771,13 +1755,15 @@ impl Encoder<'_> {
             resolved.rect,
             style,
             mask,
-        );
-        Ok(())
+        )
     }
 
     /// Pack into scratch, charging is the caller's; splits from `push_scratch_quad`
     /// so residue planning can pack without emitting a quad.
     fn pack_scratch(&mut self, tile: &raster::CoverageMask) -> Result<(u32, u32), RenderError> {
+        // The sheet is packed in encounter order and ADR 0034 made that order
+        // load-bearing, so anything queued takes its shelf first (`parallel`).
+        self.drain_queue()?;
         // Its own refusal, not the frame budget's: this one is about texture
         // capacity, and a message whose arithmetic contradicts itself costs the
         // reader the diagnosis (QUORRA_FEEDBACK.md §3 was exactly that report).
@@ -1812,8 +1798,7 @@ impl Encoder<'_> {
             clip,
             style,
             mask,
-        );
-        Ok(())
+        )
     }
 
     /// Charge one coverage tile, remembering how much of the sheet has been paid for
@@ -1825,7 +1810,13 @@ impl Encoder<'_> {
         self.charge(bytes)
     }
 
+    /// Spend against the frame's budget, refusing before anything is allocated.
+    ///
+    /// The queue drains first, because a refusal names the running total and a queued
+    /// mark has not added its own yet: charging out of encounter order would refuse the
+    /// same frames with a different number in the message (`parallel`).
     fn charge(&mut self, bytes: u64) -> Result<(), RenderError> {
+        self.drain_queue()?;
         let needed = self.spent.saturating_add(bytes);
         if needed > self.budget {
             return Err(RenderError::FrameBudgetExceeded {
@@ -1850,7 +1841,9 @@ impl Encoder<'_> {
         color: quorra_scene::Color,
         style: DrawStyle,
         mask: Option<u32>,
-    ) {
+    ) -> Result<(), RenderError> {
+        // Draw order is the scene's order, so anything queued draws first (`parallel`).
+        self.drain_queue()?;
         self.plan_mut()
             .mark([rect.min.x, rect.min.y, rect.max.x, rect.max.y]);
         let premultiplied = [
@@ -1866,6 +1859,7 @@ impl Encoder<'_> {
             self.rect_instances.extend_from_slice(&value.to_le_bytes());
         }
         self.note_batch(BatchKind::Rect, style, mask);
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)] // one instance layout, one writer
@@ -1881,7 +1875,9 @@ impl Encoder<'_> {
         clip: Rect,
         style: DrawStyle,
         mask: Option<u32>,
-    ) {
+    ) -> Result<(), RenderError> {
+        // Draw order is the scene's order, so anything queued draws first (`parallel`).
+        self.drain_queue()?;
         self.plan_mut()
             .mark([dest.x, dest.y, dest.x + width, dest.y + height]);
         let premultiplied = [
@@ -1912,6 +1908,7 @@ impl Encoder<'_> {
             self.quad_instances.extend_from_slice(&value.to_le_bytes());
         }
         self.note_batch(BatchKind::Quad, style, mask);
+        Ok(())
     }
 
     /// The plan currently under construction.
@@ -1931,7 +1928,17 @@ impl Encoder<'_> {
     /// which is a plausible-looking wrong page rather than an error. A `Draw` is the
     /// exception and marks as its instances are pushed: a batch is a range, and the
     /// rectangles are the instances'.
-    fn push_op(&mut self, op: Op) {
+    /// [`Encoder::append_op`] with the queue drained first: op order is draw order, so
+    /// a mark whose coverage is still pending belongs before whatever this op is
+    /// (`parallel`). A batch is the exception and goes straight to `append_op`, because
+    /// the instance it names has just been written by a commit that drained already.
+    fn push_op(&mut self, op: Op) -> Result<(), RenderError> {
+        self.drain_queue()?;
+        self.append_op(op);
+        Ok(())
+    }
+
+    fn append_op(&mut self, op: Op) {
         match &op {
             Op::Image(image) => self.plan_mut().mark(image.dest),
             Op::Shaded(shaded) => self.plan_mut().mark(shaded.dest),
@@ -2055,7 +2062,7 @@ impl Encoder<'_> {
             last.count += 1;
             return;
         }
-        self.push_op(Op::Draw(Batch {
+        self.append_op(Op::Draw(Batch {
             kind,
             first: index,
             count: 1,
@@ -2139,6 +2146,7 @@ mod tests {
             Some(16),
             Coverage::Cpu,
             false,
+            1,
         )
         .expect("within budget");
         assert_eq!(encoded.commands, 1);
@@ -2197,6 +2205,7 @@ mod tests {
             Some(16),
             Coverage::Cpu,
             false,
+            1,
         )
         .expect("drawable since M5");
         assert_eq!(encoded.root.ops.len(), 1);
@@ -2267,6 +2276,7 @@ mod tests {
             Some(16),
             Coverage::Cpu,
             false,
+            1,
         )
         .expect("within budget");
         assert!(matches!(
@@ -2307,6 +2317,7 @@ mod tests {
             Some(16),
             Coverage::Cpu,
             false,
+            1,
         )
         .expect("within budget");
         assert_eq!(encoded.rect_instances, reference.rect_instances);
@@ -2324,6 +2335,7 @@ mod tests {
             Some(16),
             Coverage::Cpu,
             false,
+            1,
         )
         .expect("within budget");
         assert_eq!(even_odd.rect_instances, encoded.rect_instances);
@@ -2352,6 +2364,7 @@ mod tests {
             Some(16),
             Coverage::Cpu,
             false,
+            1,
         )
         .expect("drawable");
         assert!(encoded.rect_instances.is_empty());
@@ -2373,6 +2386,7 @@ mod tests {
             Some(16),
             Coverage::Cpu,
             false,
+            1,
         ) {
             Err(RenderError::FrameBudgetExceeded { needed, budget }) => {
                 assert_eq!(needed, 96);
@@ -2397,6 +2411,7 @@ mod tests {
             Some(16),
             Coverage::Cpu,
             false,
+            1,
         )
         .expect("blank is legitimate");
         assert_eq!(encoded.commands, 0);

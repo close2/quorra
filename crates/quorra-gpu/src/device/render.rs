@@ -168,6 +168,7 @@ impl Device {
             self.glyph_quantum,
             self.coverage,
             self.instrument_encode,
+            self.encode_threads,
         )
     }
 

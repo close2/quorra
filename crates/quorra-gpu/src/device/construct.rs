@@ -289,6 +289,12 @@ impl Device {
             glyph_quantum: options.glyph_quantum,
             coverage: options.coverage,
             instrument_encode: options.instrument_encode,
+            // A request becomes a number here: zero means "one", and nothing above the
+            // machine's own parallelism can be honoured by the machine.
+            encode_threads: options
+                .encode_threads
+                .max(1)
+                .min(std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)),
             winding_texture: crate::winding::WindingTexture::default(),
             warmed_layer: None,
             // Rounded to a square grid and bounded, here rather than at the call site:
