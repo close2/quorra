@@ -334,7 +334,7 @@ fn an_unknown_ramp_refuses_even_out_of_sight() {
                 outline,
                 placement,
                 FillRule::NonZero,
-                shading,
+                shading.clone(),
                 None,
                 BlendMode::Normal,
                 Compose::SrcOver,

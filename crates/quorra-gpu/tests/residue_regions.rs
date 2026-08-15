@@ -220,7 +220,7 @@ fn the_counter_is_of_regions_and_not_of_the_commands_that_ask() {
                 mark,
                 at,
                 FillRule::NonZero,
-                paint,
+                paint.clone(),
                 Some(one),
                 BlendMode::Normal,
                 Compose::SrcOver,

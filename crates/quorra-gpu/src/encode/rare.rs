@@ -236,6 +236,11 @@ impl Encoder<'_> {
         match paint {
             // The two callers matched Solid off before calling.
             Paint::Solid(_) => unreachable!("shaded_geometry is called for non-solid paints only"),
+            // ADR 0053's paint is not lowered yet, and §5 forbids drawing it as
+            // something else in the meantime.
+            Paint::Function(function) => Err(RenderError::UnsupportedFunctionPaint {
+                instructions: function.program.len(),
+            }),
             Paint::Shading {
                 ramp,
                 kind,
