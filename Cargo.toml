@@ -17,6 +17,13 @@ repository = "https://github.com/example/quorra"
 # which would also prevent publishing these crates.
 quorra-scene = { path = "crates/quorra-scene", version = "0.1.0" }
 quorra-gpu = { path = "crates/quorra-gpu", version = "0.1.0" }
+# Development-only, and never published (`publish = false` in its own manifest): the
+# ISO 32000-2 §7.10.5 conformance corpus and the reference evaluator that is its oracle.
+# It is a crate rather than a test module because the wave that runs its programs on the
+# device lives in `quorra-gpu`, and an integration test cannot reach another crate's test
+# code. The explicit version is not optional here either: `deny.toml` sets
+# `wildcards = "deny"`, and a bare path dependency is a wildcard requirement.
+quorra-function-conformance = { path = "crates/quorra-function-conformance", version = "0.1.0" }
 
 # Error handling. Every error this library returns is typed and names what failed —
 # RENDER_LIBRARY.md §5 asks for "an `Err` that names what overflowed", which is a

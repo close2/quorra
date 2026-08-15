@@ -18,9 +18,9 @@ use std::sync::Arc;
 
 use quorra_gpu::Device;
 use quorra_scene::{
-    BlendMode, ClipId, Compose, GroupSpec, ImageId, ImageSpec, LineCap, LineJoin, MAX_GROUP_DEPTH,
-    MaskId, MaskKind, MeshId, MeshSpec, OutlineId, Paint, Point, RampId, ResourceId, SceneBuilder,
-    SceneError, Segment, ShadingKind, Stop, Stroke, Transfer,
+    BlendMode, ClipId, Compose, FnOp, FnRange, FunctionId, GroupSpec, ImageId, ImageSpec, LineCap,
+    LineJoin, MAX_GROUP_DEPTH, MaskId, MaskKind, MeshId, MeshSpec, OutlineId, Paint, Point, RampId,
+    ResourceId, SceneBuilder, SceneError, Segment, ShadingKind, Stop, Stroke, Transfer,
 };
 
 use crate::rng::Rng;
@@ -41,6 +41,7 @@ pub(crate) struct Pool {
     images: Vec<ImageId>,
     ramps: Vec<RampId>,
     meshes: Vec<MeshId>,
+    functions: Vec<FunctionId>,
     clips: Vec<ClipId>,
     masks: Vec<MaskId>,
     /// Uploaded and not yet released: releasing one must succeed.
@@ -208,7 +209,80 @@ fn random_outline(rng: &mut Rng) -> Vec<Segment> {
     segments
 }
 
-/// Fill the seed's pool from all four upload paths. Every refusal is typed and leaves
+/// A short §7.10.5 program: mostly nonsense, which is exactly the input
+/// `Device::upload_function` exists to refuse.
+///
+/// CLAUDE.md principle 3 asks for the *scene boundary* to be fuzzed from the first commit,
+/// and a compiled function program is the newest thing to arrive across it: it comes from
+/// another process's parser, it is a jump graph, and every one of the analyser's budgets is
+/// stated over document-derived arithmetic. Most of these are refused — a backward jump, a
+/// type two branches disagree about, an output count no `Range` matches — and the ones that
+/// are not get a generated shader compiled for them, which is the other half of what this
+/// fuzzes.
+///
+/// Bounded at eight instructions on purpose: an admitted program costs a shader compile per
+/// distinct program, and the point here is the boundary rather than the throughput.
+fn random_program(rng: &mut Rng) -> Vec<FnOp> {
+    let length = 1 + (rng.next() % 8) as usize;
+    (0..length).map(|_| random_op(rng)).collect()
+}
+
+/// One instruction, drawn from the whole of Table 42 plus the two jumps the caller's
+/// compiler emits for `if` and `ifelse`.
+#[allow(clippy::cast_possible_truncation)] // a jump target is a u32 by construction
+fn random_op(rng: &mut Rng) -> FnOp {
+    match rng.next() % 45 {
+        0 => FnOp::PushReal(rng.f32()),
+        1 => FnOp::PushInt(rng.i32()),
+        2 => FnOp::PushBool(rng.one_in(2)),
+        3 => FnOp::Abs,
+        4 => FnOp::Add,
+        5 => FnOp::Atan,
+        6 => FnOp::Ceiling,
+        7 => FnOp::Cos,
+        8 => FnOp::Cvi,
+        9 => FnOp::Cvr,
+        10 => FnOp::Div,
+        11 => FnOp::Exp,
+        12 => FnOp::Floor,
+        13 => FnOp::Idiv,
+        14 => FnOp::Ln,
+        15 => FnOp::Log,
+        16 => FnOp::Mod,
+        17 => FnOp::Mul,
+        18 => FnOp::Neg,
+        19 => FnOp::Round,
+        20 => FnOp::Sin,
+        21 => FnOp::Sqrt,
+        22 => FnOp::Sub,
+        23 => FnOp::Truncate,
+        24 => FnOp::And,
+        25 => FnOp::Bitshift,
+        26 => FnOp::Eq,
+        27 => FnOp::Ge,
+        28 => FnOp::Gt,
+        29 => FnOp::Le,
+        30 => FnOp::Lt,
+        31 => FnOp::Ne,
+        32 => FnOp::Not,
+        33 => FnOp::Or,
+        34 => FnOp::Xor,
+        35 => FnOp::Copy,
+        36 => FnOp::Dup,
+        37 => FnOp::Exch,
+        38 => FnOp::Index,
+        39 => FnOp::Pop,
+        40 => FnOp::Roll,
+        41 | 42 => FnOp::JumpUnless {
+            target: (rng.next() % 12) as u32,
+        },
+        _ => FnOp::Jump {
+            target: (rng.next() % 12) as u32,
+        },
+    }
+}
+
+/// Fill the seed's pool from all five upload paths. Every refusal is typed and leaves
 /// the device usable, which is what the rest of the seed then depends on.
 pub(crate) fn upload_resources(generator: &mut Gen, device: &mut Device) {
     for _ in 0..=(generator.rng.next() % 3) {
@@ -240,6 +314,15 @@ pub(crate) fn upload_resources(generator: &mut Gen, device: &mut Device) {
         };
         if let Ok(id) = device.upload_mesh(&mesh) {
             generator.pool.meshes.push(id);
+            generator.pool.live.push(id.into());
+        }
+    }
+    // One program at most, and only in some seeds: an admitted one costs a generated
+    // shader compile, and this file's job is the boundary rather than the throughput.
+    if generator.rng.one_in(3) {
+        let program = random_program(&mut generator.rng);
+        if let Ok(id) = device.upload_function(&program) {
+            generator.pool.functions.push(id);
             generator.pool.live.push(id.into());
         }
     }
@@ -279,13 +362,35 @@ fn shading(rng: &mut Rng) -> ShadingKind {
 /// it has not — the fallback keeps a seed that uploaded no shading resource drawing
 /// rather than refusing.
 fn paint(rng: &mut Rng, pool: &Pool) -> Paint {
-    let chosen = match rng.next() % 6 {
+    let chosen = match rng.next() % 7 {
         0 | 1 => pick(rng, &pool.ramps, RampId, pool.dangling).map(|ramp| Paint::Shading {
             ramp,
             kind: shading(rng),
             transform: rng.affine(),
         }),
         2 => pick(rng, &pool.meshes, MeshId, pool.dangling).map(Paint::Mesh),
+        // ADR 0053's paint. The `Range` is drawn independently of the program, so most of
+        // these are the §7.10.5.3 output-count refusal — which is a typed refusal of the
+        // *frame* and therefore as much of the boundary as a drawn one.
+        3 => pick(rng, &pool.functions, FunctionId, pool.dangling).map(|program| Paint::Function {
+            program,
+            domain: rng.rect(),
+            matrix: rng.affine(),
+            range: if rng.one_in(2) {
+                FnRange::Gray([rng.tame(), rng.tame()])
+            } else {
+                FnRange::Rgb([
+                    [rng.tame(), rng.tame()],
+                    [rng.tame(), rng.tame()],
+                    [rng.tame(), rng.tame()],
+                ])
+            },
+            background: if rng.one_in(2) {
+                None
+            } else {
+                Some(rng.color())
+            },
+        }),
         _ => None,
     };
     chosen.unwrap_or_else(|| Paint::Solid(rng.color()))

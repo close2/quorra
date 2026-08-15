@@ -1392,6 +1392,7 @@ version = "0.1.0"
 dependencies = [
  "png",
  "pollster",
+ "quorra-function-conformance",
  "quorra-scene",
  "thiserror 2.0.19",
  "wgpu",

@@ -37,190 +37,27 @@
 
 mod function_support;
 
+use function_support::compute::{Compute, Shading};
 use function_support::programs::{self, Witness};
 use function_support::reference;
-use quorra_gpu::function::{
-    Agreement, analyse, background_rgba, domain_bounds, generate, range_bounds,
-};
-use quorra_gpu::wgpu;
+use quorra_gpu::function::{Agreement, analyse, domain_bounds};
 use quorra_scene::Color;
 
-/// The harness that calls the generated function once per point.
+/// One program on the device at every sample point, through the shared compute harness.
 ///
-/// Its only job is to be uninteresting: one invocation per point, no interpolation, no
-/// attachment, no format conversion.
-const HARNESS: &str = r"
-@group(0) @binding(0) var<storage, read> points: array<vec2<f32>>;
-@group(0) @binding(1) var<storage, read_write> colours: array<vec4<f32>>;
-@group(0) @binding(2) var<uniform> bounds: array<vec4<f32>, 4>;
-
-@compute @workgroup_size(64)
-fn evaluate_points(@builtin(global_invocation_id) id: vec3<u32>) {
-    let index = id.x;
-    if (index >= arrayLength(&points)) { return; }
-    let point = points[index];
-    colours[index] = quorra_function_evaluate(
-        point.x, point.y, bounds[0], bounds[1].xyz, bounds[2].xyz, bounds[3]);
-}
-";
-
-/// A device, or the reason there is not one.
-fn device() -> Option<(wgpu::Device, wgpu::Queue, String)> {
-    let instance = quorra_gpu::create_instance();
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    }))
-    .ok()?;
-    let name = adapter.get_info().name;
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("quorra function tests"),
-        required_limits: adapter.limits(),
-        ..Default::default()
-    }))
-    .ok()?;
-    Some((device, queue, name))
-}
-
-/// The four `vec4<f32>` the emitted function's parameters are packed into, in the order the
-/// harness above unpacks them: the domain rectangle, the range's low and high bounds, and the
-/// background. The padding lanes exist because a uniform array's stride is 16 bytes.
-fn bounds_of(witness: &Witness) -> Vec<u8> {
-    let (low, high) = range_bounds(witness.range);
-    let domain = domain_bounds(witness.domain);
-    let background = background_rgba(witness.background);
-    let values: [f32; 16] = [
-        domain[0],
-        domain[1],
-        domain[2],
-        domain[3],
-        low[0],
-        low[1],
-        low[2],
-        0.0,
-        high[0],
-        high[1],
-        high[2],
-        0.0,
-        background[0],
-        background[1],
-        background[2],
-        background[3],
-    ];
-    values
-        .iter()
-        .flat_map(|value| value.to_le_bytes())
-        .collect()
-}
-
-/// Run one program on the device at every sample point.
-fn run(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    witness: &Witness,
-    points: &[(f32, f32)],
-) -> Vec<[f32; 4]> {
-    let analysis = analyse(&witness.program).expect("the witness should be admitted");
-    let shader = generate(&analysis, witness.range).expect("the range should be admitted");
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(witness.name),
-        source: wgpu::ShaderSource::Wgsl(format!("{}{HARNESS}", shader.module()).into()),
-    });
-
-    let point_bytes: Vec<u8> = points
-        .iter()
-        .flat_map(|(x, y)| [x.to_le_bytes(), y.to_le_bytes()])
-        .flatten()
-        .collect();
-    let bound_bytes = bounds_of(witness);
-    let output_bytes = (points.len() * 16) as u64;
-
-    let input = buffer(device, queue, &point_bytes, wgpu::BufferUsages::STORAGE);
-    let bounds = buffer(device, queue, &bound_bytes, wgpu::BufferUsages::UNIFORM);
-    let output = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("function colours"),
-        size: output_bytes,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("function readback"),
-        size: output_bytes,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(witness.name),
-        layout: None,
-        module: &module,
-        entry_point: Some("evaluate_points"),
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-        cache: None,
-    });
-    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: bounds.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &group, &[]);
-        pass.dispatch_workgroups(points.len().div_ceil(64) as u32, 1, 1);
-    }
-    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, output_bytes);
-    queue.submit([encoder.finish()]);
-
-    let slice = readback.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("the device should answer the map");
-    let mapped = slice.get_mapped_range().expect("the readback should map");
-    let colours = mapped
-        .chunks_exact(16)
-        .map(|chunk| {
-            let component = |index: usize| {
-                f32::from_le_bytes(chunk[index * 4..index * 4 + 4].try_into().unwrap())
-            };
-            [component(0), component(1), component(2), component(3)]
-        })
-        .collect();
-    drop(mapped);
-    readback.unmap();
-    colours
-}
-
-fn buffer(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    bytes: &[u8],
-    usage: wgpu::BufferUsages,
-) -> wgpu::Buffer {
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: bytes.len().max(16) as u64,
-        usage: usage | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&buffer, 0, bytes);
-    buffer
+/// The harness is `function_support::compute` rather than this file's own, because
+/// `function_conformance.rs` runs the same shape over the conformance corpus and two copies
+/// of a device harness are two things to keep in step.
+fn run(compute: &Compute, witness: &Witness, points: &[(f32, f32)]) -> Vec<[f32; 4]> {
+    compute.run(
+        &Shading {
+            program: &witness.program,
+            range: witness.range,
+            domain: domain_bounds(witness.domain),
+            background: witness.background,
+        },
+        points,
+    )
 }
 
 /// Every witness, on whatever adapter is here, against the host evaluation.
@@ -230,10 +67,11 @@ fn buffer(
 /// operator at all the two sides should land on the same bits.
 #[test]
 fn the_device_computes_what_the_host_computes() {
-    let Some((device, queue, adapter)) = device() else {
+    let Some(compute) = Compute::new() else {
         eprintln!("no adapter available; the device half of the function tests did not run");
         return;
     };
+    let adapter = &compute.adapter;
     let points = programs::sample_points();
     let mut checked = 0usize;
     // Counted, not assumed: a test whose strict branch never fires is a test that passed
@@ -242,7 +80,7 @@ fn the_device_computes_what_the_host_computes() {
 
     for witness in programs::all() {
         let analysis = analyse(&witness.program).unwrap();
-        let colours = run(&device, &queue, &witness, &points);
+        let colours = run(&compute, &witness, &points);
         assert_eq!(colours.len(), points.len(), "{}", witness.name);
 
         let bitwise = analysis.agreement() == Agreement::Bounded
@@ -307,17 +145,18 @@ fn uses_an_inexact_operator(program: &[quorra_scene::FnOp]) -> bool {
 /// coverage, and a background paints exactly itself there.
 #[test]
 fn the_domain_rule_survives_the_shader() {
-    let Some((device, queue, adapter)) = device() else {
+    let Some(compute) = Compute::new() else {
         eprintln!("no adapter available; the device half of the function tests did not run");
         return;
     };
+    let adapter = &compute.adapter;
     let inside = (0.25_f32, 0.5_f32);
     let outside = (0.75_f32, 0.5_f32);
     // What a shader that clamped into the domain would have produced at `outside`.
     let clamped = [0.5_f32, 0.5, 0.25, 1.0];
 
     let unpainted = programs::small_domain(None);
-    let got = run(&device, &queue, &unpainted, &[inside, outside]);
+    let got = run(&compute, &unpainted, &[inside, outside]);
     assert_eq!(
         got.first().copied(),
         Some([0.25, 0.5, 0.125, 1.0]),
@@ -328,7 +167,7 @@ fn the_domain_rule_survives_the_shader() {
 
     let background = Color::new(0.1, 0.2, 0.3, 1.0);
     let painted = programs::small_domain(Some(background));
-    let got = run(&device, &queue, &painted, &[inside, outside]);
+    let got = run(&compute, &painted, &[inside, outside]);
     assert_eq!(got.get(1).copied(), Some([0.1, 0.2, 0.3, 1.0]), "{adapter}");
     assert_ne!(got.get(1).copied(), Some(clamped));
 }
@@ -340,10 +179,11 @@ fn the_domain_rule_survives_the_shader() {
 fn the_specified_values_survive_the_shader() {
     use quorra_scene::FnOp;
 
-    let Some((device, queue, adapter)) = device() else {
+    let Some(compute) = Compute::new() else {
         eprintln!("no adapter available; the device half of the function tests did not run");
         return;
     };
+    let adapter = &compute.adapter;
 
     let cases: [(&'static str, Vec<FnOp>, f32); 4] = [
         // PLRM3: a tie goes to the greater of the two, so `-6.5 round` is `-6.0`. WGSL's own
@@ -378,7 +218,7 @@ fn the_specified_values_survive_the_shader() {
 
     for (name, program, expected) in cases {
         let witness = programs::witness(&program, programs::WIDE_GRAY);
-        let colours = run(&device, &queue, &witness, &[(0.5, 0.5)]);
+        let colours = run(&compute, &witness, &[(0.5, 0.5)]);
         assert_eq!(
             colours.first().map(|colour| colour[0]),
             Some(expected),
