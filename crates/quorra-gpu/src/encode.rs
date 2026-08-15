@@ -62,26 +62,27 @@ mod rare;
 mod rect;
 mod residue;
 mod scratch;
+mod stroke;
 
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashSet;
 
-use quorra_scene::{Affine, BlendMode, ClipId, Command, MaskId, OutlineId, Paint, Rect, Scene};
+use quorra_scene::{ClipId, Command, Rect, Scene};
 
 use clips::{ClipResolver, ResolvedClip, open_clip};
-use device_space::{compose, target_rect, tile_side};
+use device_space::{target_rect, tile_side};
 use encoded::finish;
 use instance::instance_reserve;
-use parallel::{Draw, Job};
+use parallel::Job;
 
 use crate::atlas::{AtlasStore, GlyphKey};
 use crate::census::Census;
 use crate::error::RenderError;
 use crate::instrument::EncodeClock;
 use crate::keyhash::FastSet;
-use crate::raster::{self, Rule};
+
 use crate::resources::ResourceStore;
 use crate::startup::Coverage;
 use crate::viewport::Viewport;
@@ -356,104 +357,6 @@ impl Encoder<'_> {
                 mask,
             } => self.encode_image(*image, *transform, *alpha, *filter, *clip, *blend, *mask),
             Command::Group { spec, commands } => self.encode_group(spec, commands),
-        }
-    }
-
-    /// The stroke arm: expansion via the path lane, non-Normal blends through an
-    /// implicit child (as in `encode_fill`).
-    #[allow(clippy::too_many_arguments)] // one command's fields, destructured once
-    fn encode_stroke(
-        &mut self,
-        index: usize,
-        outline: OutlineId,
-        transform: Affine,
-        stroke: quorra_scene::Stroke,
-        paint: Paint,
-        clip: Option<ClipId>,
-        blend: BlendMode,
-        mask: Option<MaskId>,
-    ) -> Result<(), RenderError> {
-        let mask = self.use_mask(mask)?;
-        let stored = self
-            .resources
-            .outline(outline)
-            .ok_or(RenderError::UnknownOutline { outline })?;
-        let to_device = compose(transform, self.viewport);
-        let resolved = self.resolve_clip(clip)?;
-        // Visibility before the blend wrap, so a stroke outside the target costs
-        // neither its expansion nor the implicit group §11.3.5 would put it in. The
-        // outline's hull grows by the stroke's own reach: the width is device-space
-        // (§4.5 resolved it per placement), a miter join may carry a corner half the
-        // width times the limit away from it (§8.4.3.5), and a cap extends half the
-        // width — which a limit of at least 1 already covers.
-        let reach = stroke.width * 0.5 * stroke.miter_limit;
-        if let Some((x0, y0, x1, y1)) = self.hulls.bounds(outline, &stored.segments, &to_device)
-            && self.culled((x0 - reach, y0 - reach, x1 + reach, y1 + reach), &resolved)
-        {
-            return Ok(());
-        }
-        if blend != BlendMode::Normal && self.style == DrawStyle::Over {
-            // §11.3.5 for a single element: an implicit one-element group (the same
-            // degeneracy argument as in `encode_fill` skips it under knockout).
-            let child = self.plan_child(|encoder| {
-                let plain = Command::Stroke {
-                    outline,
-                    transform,
-                    stroke,
-                    paint,
-                    clip,
-                    blend: BlendMode::Normal,
-                    mask: None,
-                };
-                encoder.command(index, &plain)
-            })?;
-            self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)))?;
-            return Ok(());
-        }
-        self.distinct_outlines.insert(outline.0);
-        self.segments = self.segments.saturating_add(stored.segments.len() as u64);
-        // A solid stroke is expansion and a fill, both of them pure functions of this
-        // command's own outline, so it takes the same seam a fill does (`parallel`).
-        if let Paint::Solid(color) = paint
-            && let Some(rect) = self.deferrable_bounds(&resolved)
-        {
-            // The hull grown by the stroke's own reach, which is the box the cull above
-            // already tested and so an upper bound on the expansion's device bounds.
-            let bound = self
-                .hulls
-                .bounds(outline, &stored.segments, &to_device)
-                .map_or(0, |(x0, y0, x1, y1)| {
-                    self.tile_bound((x0 - reach, y0 - reach, x1 + reach, y1 + reach), &resolved)
-                });
-            return self.enqueue(Job::sheet(
-                &stored.segments,
-                to_device,
-                Some(stroke),
-                Rule::NonZero,
-                rect,
-                bound,
-                Draw::new(color, resolved.rect, self.style, mask),
-            ));
-        }
-        // Flatten under the full transform, then expand: the width arrived
-        // resolved (§4.5), so our job is caps, joins and miters only.
-        let span = self.clock.start();
-        let polylines = raster::flatten(&stored.segments, to_device);
-        let stroked = raster::stroke_polylines(&polylines, stroke);
-        self.clock.geometry(span);
-        match paint {
-            Paint::Solid(color) => {
-                self.push_coverage(&stroked, Rule::NonZero, color, &resolved, mask)
-            }
-            // Every non-solid paint is one quad over the stroke's coverage: which one it
-            // is decided by `rare_paint`, and nothing about the difference reaches here.
-            Paint::Shading { .. } | Paint::Mesh(_) | Paint::Function { .. } => {
-                let Some(rare) = self.rare_paint(paint)? else {
-                    return Ok(());
-                };
-                let style = self.style;
-                self.push_rare_coverage(rare, &stroked, Rule::NonZero, &resolved, style, mask)
-            }
         }
     }
 
