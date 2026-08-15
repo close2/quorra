@@ -146,7 +146,7 @@ impl Device {
     }
 
     /// Bytes currently resident across all uploaded resources, against
-    /// [`Limits::max_resource_bytes`].
+    /// [`Limits::max_resource_bytes`](crate::device::Limits::max_resource_bytes).
     #[must_use]
     pub fn resource_bytes_in_use(&self) -> u64 {
         self.resources.in_use_bytes()
