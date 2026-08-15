@@ -72,6 +72,18 @@ we never edit their tree:
 Deliver the answers and let their corpus re-baseline absorb the twenty commits in one round.
 The draft's release-note section doubles as what the bump delivers.
 
+### 1b. The function paint, if they say yes
+
+ADR 0053 is **proposed**, the answer is in their tree, and nothing is built. If they take
+it, the order is: the static classification and its conformance test *first* (a program per
+dangerous operator refused, a program per safe operator exact), then the paint inside the
+compositor, then the generated-shader cache. The spike
+(`crates/quorra-gpu/examples/function_paint/`) is a bare full-viewport pass and is not a
+starting point for the lane — it is the evidence that the lane is worth having.
+
+Do not build the interpreter shape. It is 133 ms against 0.060, it costs 596 ms–4.5 s of
+cold compile against 6.3 ms, and at 4× it lost the device.
+
 ### 2. A page-sized coverage tile per clipped shape — **not** multi-sheet passes
 
 *(This was **item 5** while three finished items still stood above it, and ADR 0048 and
