@@ -31,8 +31,9 @@ use quorra_scene::{
 };
 
 use super::clips::ResolvedClip;
+use super::device_space::{apply, compose, transform_preserves_axes};
 use super::function::FunctionGeometry;
-use super::{ChildOp, DrawStyle, Encoder, Op, apply, compose, transform_preserves_axes};
+use super::{ChildOp, DrawStyle, Encoder, Op};
 use crate::error::RenderError;
 use crate::raster::{DeviceTransform, Polyline, Rule};
 
