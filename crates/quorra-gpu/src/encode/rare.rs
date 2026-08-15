@@ -181,7 +181,7 @@ impl Encoder<'_> {
                     None,
                 )
             })?;
-            self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)));
+            self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)))?;
             return Ok(());
         }
         if self.resources.image(image).is_none() {
@@ -260,8 +260,7 @@ impl Encoder<'_> {
             linear: filter == ImageFilter::Linear,
             style: self.style,
             mask,
-        })));
-        Ok(())
+        })))
     }
 
     /// The shading-space geometry of a non-solid paint. `None` means a singular
@@ -347,11 +346,11 @@ impl Encoder<'_> {
         resolved: &ResolvedClip,
         style: DrawStyle,
         mask: Option<u32>,
-    ) {
+    ) -> Result<(), RenderError> {
         let Some(placement) = self.rect_placement(rect, to_device, resolved, style, mask) else {
-            return;
+            return Ok(());
         };
-        self.push_op(paint.at(placement));
+        self.push_op(paint.at(placement))
     }
 
     /// A rare-case fill or stroke through a rasterised coverage tile in scratch.
@@ -368,8 +367,7 @@ impl Encoder<'_> {
         else {
             return Ok(());
         };
-        self.push_op(paint.at(placement));
-        Ok(())
+        self.push_op(paint.at(placement))
     }
 
     /// Where the quad goes for a rect-hinted shape: the shape's device rectangle, cut to

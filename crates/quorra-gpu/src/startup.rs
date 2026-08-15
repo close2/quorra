@@ -190,6 +190,34 @@ pub struct Options {
     /// [`Timings::encode`]: crate::frame::Timings::encode
     /// [`Timings::phases`]: crate::frame::Timings::phases
     pub instrument_encode: bool,
+    /// How many threads one frame's coverage rasterisation may use — **1 by default,
+    /// which is the walk this library has always run**.
+    ///
+    /// The caller measured a page where 59 % of the frame was the scanline rasteriser
+    /// turning three million path segments into fifty-eight thousand coverage tiles on
+    /// one thread (`pdf-viewer/doc/QUORRA_ENCODE_THREADS.md`). Coverage is a pure
+    /// function of one mark's own geometry, so it divides exactly; everything the
+    /// frame's order depends on — the budget, the sheet's shelves, the atlas, the
+    /// instance stream — stays on the calling thread, which is what makes the result
+    /// **byte-identical at any value of this field** (§4.6, and
+    /// `tests/encode_threads.rs` holds it to that).
+    ///
+    /// **Why the host names the number, rather than this library asking the machine.**
+    /// ADR 0023 recorded three reasons a renderer must not size a pool for itself, all
+    /// of them the caller's: their own `rayon` is already sized to the machine and a
+    /// second pool oversubscribes a page turn; their confined worker cannot spawn at all,
+    /// because the `/sys` read `glibc` sizes its arenas from is killed by their seccomp
+    /// filter; and a pool built at construction lands on their time-to-first-page. So
+    /// this is a permission, not a preference — a host that says nothing gets no threads,
+    /// and a host that says `n` gets at most `n`, held to
+    /// [`std::thread::available_parallelism`].
+    ///
+    /// **Nothing is built at construction and nothing outlives a frame.** The threads are
+    /// a [`std::thread::scope`] entered inside `Device::render` and left before it
+    /// returns, and a frame whose geometry is below a measured floor does not enter one
+    /// at all — so a small page pays nothing for a large page's lane
+    /// (`doc/notes-encode-threads.md` carries the floor and its measurement).
+    pub encode_threads: usize,
     /// How many samples the GPU lane takes per pixel, rounded down to a square and
     /// clamped to 4..=64 ([`DEFAULT_COVERAGE_SAMPLES`]).
     ///
@@ -211,6 +239,7 @@ impl Default for Options {
             coverage: Coverage::Cpu,
             coverage_samples: DEFAULT_COVERAGE_SAMPLES,
             instrument_encode: false,
+            encode_threads: 1,
         }
     }
 }

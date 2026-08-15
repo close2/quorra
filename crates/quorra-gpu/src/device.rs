@@ -105,6 +105,10 @@ pub struct Device {
     coverage: Coverage,
     /// Whether a frame subdivides its encode phase (ADR 0023).
     instrument_encode: bool,
+    /// How many threads a frame's geometry may use, as the host stated it
+    /// ([`Options::encode_threads`]). Clamped where the device is built, so the encoder
+    /// reads a number rather than a request.
+    encode_threads: usize,
     coverage_samples: u32,
     /// The GPU lane's winding target, kept across frames (ADR 0016's measurement).
     winding_texture: crate::winding::WindingTexture,
@@ -407,6 +411,12 @@ impl Device {
             glyph_quantum: options.glyph_quantum,
             coverage: options.coverage,
             instrument_encode: options.instrument_encode,
+            // A request becomes a number here: zero means "one", and nothing above the
+            // machine's own parallelism can be honoured by the machine.
+            encode_threads: options
+                .encode_threads
+                .max(1)
+                .min(thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)),
             winding_texture: crate::winding::WindingTexture::default(),
             warmed_layer: None,
             // Rounded to a square grid and bounded, here rather than at the call site:
@@ -862,6 +872,7 @@ impl Device {
             self.glyph_quantum,
             self.coverage,
             self.instrument_encode,
+            self.encode_threads,
         )
     }
 

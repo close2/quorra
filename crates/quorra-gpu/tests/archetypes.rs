@@ -196,13 +196,47 @@ const GIANT: Archetype = Archetype {
     blended_groups: 0,
 };
 
-const ARCHETYPES: [&Archetype; 6] = [
+/// A drawing: tens of thousands of small filled polygons, each its own outline, each
+/// carrying fifty-odd path segments, and no text, no image, no group and no clip
+/// anywhere on the page.
+///
+/// **The caller's own file, scaled down.** That page is 49.7 MB and one content stream:
+/// **58 009 commands — 58 003 fills, six strokes — over 3 011 879 path segments, 51.9 a
+/// fill**, and at its fit view a mark is about three device pixels across
+/// (`pdf-viewer/doc/QUORRA_ENCODE_THREADS.md` §1). It is a geological cross-section
+/// exported by Inkscape, and it is every drawing, map, plan and chart in a corpus.
+///
+/// What distinguishes it from [`GIANT`] — which also reuses exactly one outline — is the
+/// **ratio**: fifty-two segments flattened for a nine-pixel tile, where giant flattens
+/// eight for eighty. Encode on this shape is flattening and scanline work almost to the
+/// exclusion of everything else, which is the property no other archetype here had, and
+/// the reason a lane measured on the rest of this list would have been measured on the
+/// wrong page. 1 200 commands hold the ratio while leaving a debug build able to finish,
+/// which is the same bargain [`GIANT`] states.
+const DRAWING: Archetype = Archetype {
+    rect_clips: false,
+    name: "drawing",
+    commands: 1_200,
+    distinct: 1_200,
+    segments: 52,
+    side: 3.0,
+    strokes: 6,
+    images: 0,
+    image_side: 0,
+    clips: 0,
+    clipped: 0,
+    groups: 0,
+    blended_groups: 0,
+};
+
+const ARCHETYPES: [&Archetype; 7] = [
     &MEDIAN_PAGE,
     &DENSE_TEXT,
     &ARTWORK,
     &IMAGE_PAGE,
     &CLIP_MOUNTAIN,
     &GIANT,
+    &DRAWING,
 ];
 
 const WIDTH: u32 = 1191;
@@ -480,13 +514,24 @@ fn render(device: &mut Device, scene: &Scene) -> (Counters, Duration) {
 /// - **giant** — 1 500 commands, each its own outline and its own key: reuse of exactly
 ///   one, so the atlas answers nothing and every command rasterises. Against dense
 ///   text's 5.3 placements per outline, this is the other end of the corpus.
-const BASELINE: [(&str, [u32; 9]); 6] = [
+/// - **drawing** — the same "reuse of exactly one" as giant: 1 200 commands over 1 200
+///   outlines. **1 194 keys and 6 tiles** is the six strokes, which have no atlas at all
+///   — a stroke's coverage is its *expansion*, not its outline, so it goes to the sheet
+///   whatever its size — and the 1 194 fills, whose three-pixel tiles the atlas takes.
+///   The caller's page has exactly that split, six strokes among 58 009 commands.
+///   Otherwise the counters cannot tell this page from giant, and that is worth saying
+///   rather than hiding: what differs is the *segments* behind the numbers — 62 400
+///   against giant's 12 000, for a ninth of the tile area — and `Counters` has no field
+///   for it. So this row gates that the page still draws and still caches; what it
+///   exists for is the cost shape, which `examples/encode_threads.rs` measures.
+const BASELINE: [(&str, [u32; 9]); 7] = [
     ("median page", [12, 0, 9, 12, 0, 0, 0, 0, 0]),
     ("dense text", [4320, 0, 818, 2164, 1, 40, 0, 2, 0]),
     ("artwork", [684, 0, 300, 300, 1, 600, 3, 185, 0]),
     ("image page", [232, 0, 60, 158, 4, 0, 0, 0, 0]),
     ("clip mountain", [1200, 0, 200, 800, 1200, 0, 0, 0, 0]),
     ("giant", [1500, 0, 1500, 1500, 0, 0, 0, 0, 0]),
+    ("drawing", [1200, 0, 1200, 1194, 0, 6, 0, 0, 0]),
 ];
 
 fn signature(counters: &Counters) -> [u32; 9] {
