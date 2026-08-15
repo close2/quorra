@@ -1379,6 +1379,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "quorra-function-conformance"
+version = "0.1.0"
+dependencies = [
+ "quorra-scene",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "quorra-gpu"
 version = "0.1.0"
 dependencies = [
