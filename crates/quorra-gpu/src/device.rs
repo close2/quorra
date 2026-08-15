@@ -34,12 +34,15 @@
 //!   reads.
 //! - `bound` — what a frame draws into, and the contract each of the three targets
 //!   must satisfy before it does.
+//! - `damage` — ADR 0012's reading of a viewport's damage list, and which target can
+//!   honour one.
 //! - `rare` — the same for the image and shading quads, which the brief's §0 calls the
 //!   rare case.
 //! - `textures` — the textures a device makes, and the usages each one asks for.
 
 mod binds;
 mod bound;
+mod damage;
 mod ramp;
 mod rare;
 mod textures;
@@ -58,6 +61,7 @@ use quorra_scene::{
 };
 
 use self::bound::Bound;
+use self::damage::DamagePlan;
 use self::ramp::{RAMP_RESOLUTION, sample_ramp};
 
 use crate::atlas::AtlasStore;
@@ -68,7 +72,7 @@ use crate::frame::{Counters, EncodeSource, Frame, Payload, Raster, TimingProvena
 use crate::layers::{self, LayerPool};
 use crate::pipeline::PipelineStore;
 use crate::readback;
-use crate::report::{Report, ReportKind};
+use crate::report::Report;
 use crate::resources::ResourceStore;
 use crate::retained::{EncodeKey, RetainedScene};
 use crate::startup::{self, Coverage, Options, PreSteps, StartupTimings, WarmUp};
@@ -162,18 +166,6 @@ struct StartupSteps {
 
 /// One frame's per-pass durations and one-off costs.
 type FramePhases = Vec<(&'static str, Duration)>;
-
-/// How one frame treats the viewport's damage list (ADR 0012).
-enum DamagePlan {
-    /// Redraw everything: empty damage, or a target with no retained contents.
-    Full,
-    /// Render internally, scissored to `bbox`, and patch exactly `rects` onto the
-    /// caller's texture — both as `[x, y, width, height]` in target pixels.
-    Patch {
-        bbox: [u32; 4],
-        rects: Vec<[u32; 4]>,
-    },
-}
 
 /// Phase 2's product: the frame's buffers and textures, scheduled for upload.
 struct Upload {
@@ -1152,73 +1144,6 @@ impl Device {
             self.limits.max_target_size,
         )?;
         Ok((Payload::Raster(raster), started.elapsed()))
-    }
-
-    /// Decide how this frame treats the viewport's damage list (ADR 0012).
-    ///
-    /// A `Texture` target retains its contents under the caller's ownership, so a
-    /// valid damage list is honoured exactly there. A `Surface` texture's previous
-    /// contents are not guaranteed by the swapchain and a `Readback` frame starts
-    /// from a fresh texture — neither has anything to patch, so both redraw fully
-    /// and say so in a [`Report`].
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // snapped, clamped
-    fn plan_damage(
-        viewport: &Viewport<'_>,
-        into: &Target<'_>,
-        reports: &mut Vec<Report>,
-    ) -> Result<DamagePlan, RenderError> {
-        if viewport.damage.is_empty() {
-            return Ok(DamagePlan::Full);
-        }
-        for (index, rect) in viewport.damage.iter().enumerate() {
-            let finite = rect.min.x.is_finite()
-                && rect.min.y.is_finite()
-                && rect.max.x.is_finite()
-                && rect.max.y.is_finite();
-            if !finite || rect.min.x > rect.max.x || rect.min.y > rect.max.y {
-                return Err(RenderError::InvalidDamage { index });
-            }
-        }
-        let kind = match into {
-            Target::Texture(_) => None,
-            Target::Surface => Some("Surface"),
-            Target::Readback => Some("Readback"),
-        };
-        if let Some(kind) = kind {
-            reports.push(Report {
-                kind: ReportKind::DamageNotHonoured,
-                detail: format!(
-                    "a {kind} target has no retained contents to patch; the full {}x{} \
-                     target was redrawn",
-                    viewport.width, viewport.height
-                ),
-            });
-            return Ok(DamagePlan::Full);
-        }
-        // Snap outward to whole pixels, clamp to the target, drop what falls
-        // outside entirely.
-        let mut rects = Vec::with_capacity(viewport.damage.len());
-        let (mut bx0, mut by0, mut bx1, mut by1) = (u32::MAX, u32::MAX, 0_u32, 0_u32);
-        for rect in viewport.damage {
-            let x0 = rect.min.x.floor().max(0.0) as u32;
-            let y0 = rect.min.y.floor().max(0.0) as u32;
-            let x1 = (rect.max.x.ceil().max(0.0) as u32).min(viewport.width);
-            let y1 = (rect.max.y.ceil().max(0.0) as u32).min(viewport.height);
-            if x0 >= x1 || y0 >= y1 {
-                continue;
-            }
-            bx0 = bx0.min(x0);
-            by0 = by0.min(y0);
-            bx1 = bx1.max(x1);
-            by1 = by1.max(y1);
-            rects.push([x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)]);
-        }
-        let bbox = if rects.is_empty() {
-            [0, 0, 0, 0]
-        } else {
-            [bx0, by0, bx1.saturating_sub(bx0), by1.saturating_sub(by0)]
-        };
-        Ok(DamagePlan::Patch { bbox, rects })
     }
 
     fn validate_viewport(&self, viewport: &Viewport<'_>) -> Result<(), RenderError> {
