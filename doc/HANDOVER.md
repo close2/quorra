@@ -138,20 +138,25 @@ claim was also too broad, which is its own lesson and is now a trap below.)*
 
 ### Small debts, none blocking
 
-- **`device.rs` hosts ramp sampling** (`sample_ramp`, `ramp_color_at`, `RAMP_RESOLUTION`)
-  outside its stated responsibility — a candidate seam whenever that file is next open.
-  `device.rs` is 2 215 lines and `encode.rs` 2 389, which since ADR 0051's round are the
-  only two source files left far past the ~500-line smell; they were held out of that
-  round because other work had them open, not because they are irreducible.
-- **`tests/retained_frame.rs` is 1 139 lines** after ADR 0050. It is one responsibility and
-  says so, but splitting it wants a `tests/common/mod.rs` for the half-dozen fixtures three
-  test files now build separately.
+- **`encode.rs` is 2 406 lines**, and since ADR 0051's round and the `device.rs` split it is
+  the last source file far past the ~500-line smell. `device.rs` is now 235 lines over eleven
+  submodules, and **the ramp-sampling debt this list carried for several rounds is closed** —
+  `sample_ramp`, `ramp_color_at` and `RAMP_RESOLUTION` live in `device/ramp.rs`, which touches
+  no GPU handle. They still have no unit test: §7.10.4's half-open stitching rule is checked
+  only through a rendered frame, and they are now directly testable.
+- **`tests/retained_frame.rs` is 1 139 lines** and `tests/` has no `common/` module, so a
+  half-dozen fixtures are built separately by three test files.
 - **The 7 `cargo doc` warnings** are all "public documentation links to private item", in
-  `mask.rs`, `pipeline.rs` and `retained.rs`. They predate this round, and ADR 0051's
-  round confirmed none of them is new.
+  `mask.rs`, `pipeline.rs` and `retained.rs`. They predate ADR 0051's round and none is new.
 - **`SceneBuilder::image` refuses a bad image alpha with `SceneError::InvalidGroupAlpha`**
-  — a shared variant, visible since ADR 0051's round factored the check. Public API, so it
-  is a bump's business rather than a refactor's.
+  — a shared variant. Public API, so it is a bump's business rather than a refactor's.
+- **Three small things the `device.rs` split found and left**, each a few minutes for whoever
+  next opens the file: `take_pass_query` carries a doc opening line from when `PassQuery::new`
+  sat beside it (preserved verbatim by the move rule, and now wrong); `pipelines()` and
+  `pipeline_store()` are two accessors for one field with one `#[allow(dead_code)]`, and
+  `gpu()`/`queue()`/`wgpu()` three over the same handles; and **nothing checks a uniform's byte
+  offsets against the WGSL `Params` it mirrors** — wgpu catches size only, so a reordered field
+  pair of the same width would pass every gate in the tree.
 
 ## Instruments — how to measure without re-deriving it
 
