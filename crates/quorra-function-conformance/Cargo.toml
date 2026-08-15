@@ -1,0 +1,26 @@
+[package]
+name = "quorra-function-conformance"
+description = "The ISO 32000-2 §7.10.5 conformance corpus and the reference evaluator that is its oracle."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published: this crate is an instrument, and its only consumers are tests in this
+# workspace. It is a crate rather than a `#[cfg(test)]` module because the wave that
+# runs these programs on the device lives in `quorra-gpu`, and an integration test
+# cannot reach another crate's test code. A cargo feature on `quorra-scene` would have
+# hidden it behind a flag that CI could forget to set, which `doc/adr/0052` is about.
+publish = false
+
+# The vocabulary and the workspace's error crate, and nothing else. The corpus is data
+# about `FnOp`; the oracle is arithmetic. Neither needs a device, and this crate must
+# stay linkable from a test that has none.
+[dependencies]
+quorra-scene.workspace = true
+# Every error this crate returns is typed and names what it is, as the workspace's
+# stack table requires; `EvalError` keeps three kinds apart and each carries its text.
+thiserror.workspace = true
+
+[lints]
+workspace = true
