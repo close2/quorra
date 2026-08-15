@@ -51,6 +51,7 @@
 //! invariants are not stated beside it is write-only code (principle 4); each shader
 //! states its coverage definition and its determinism argument inline.
 
+mod function;
 mod layouts;
 mod spec;
 
@@ -60,10 +61,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::PipelineProblem;
+use crate::function::ProgramHash;
 use crate::startup::WarmUp;
+use function::FunctionKey;
 use layouts::Layouts;
-pub(crate) use spec::Kind;
 use spec::Spec;
+pub(crate) use spec::{Kind, Style};
 
 /// The format the warm-up thread compiles for: the readback and host-texture format,
 /// which every headless frame needs.
@@ -130,6 +133,13 @@ impl Modules {
     }
 }
 
+/// The store's mutable half, behind its one lock.
+///
+/// The three `function_*` maps are the generated shaders of ADR 0053, and they are a
+/// second table rather than more entries in the first because their key is a program's
+/// content hash rather than a [`Kind`]: what is compiled is a function of what a caller
+/// uploaded, so it cannot be enumerated at construction and is never in the warm set.
+/// `pipeline/function.rs` owns every operation on them.
 struct StoreState {
     layouts: Option<Layouts>,
     /// The parsed modules, or the refusal that stopped them — cached either way. A
@@ -138,6 +148,12 @@ struct StoreState {
     /// refusal is also what lets every later frame be refused in the same words.
     modules: Option<Result<Modules, PipelineProblem>>,
     pipelines: HashMap<(Kind, wgpu::TextureFormat), Arc<wgpu::RenderPipeline>>,
+    /// One parsed module per generated shader, shared by that shader's three styles.
+    function_modules: HashMap<ProgramHash, wgpu::ShaderModule>,
+    /// Which program each generated shader came from, so that a released program can find
+    /// every shader it generated.
+    function_shaders: HashMap<ProgramHash, ProgramHash>,
+    function_pipelines: HashMap<FunctionKey, Arc<wgpu::RenderPipeline>>,
     warm_up: WarmUp,
 }
 
@@ -211,6 +227,9 @@ impl PipelineStore {
                 layouts: None,
                 modules: None,
                 pipelines: HashMap::new(),
+                function_modules: HashMap::new(),
+                function_shaders: HashMap::new(),
+                function_pipelines: HashMap::new(),
                 warm_up: WarmUp::Running,
             }),
             warmed: Condvar::new(),
@@ -341,6 +360,11 @@ impl PipelineStore {
     /// The shading quad's bind-group layout.
     pub(crate) fn shading_layout(&self) -> wgpu::BindGroupLayout {
         self.layout(|layouts| &layouts.shading)
+    }
+
+    /// The function quad's bind-group layout (ADR 0053).
+    pub(crate) fn function_layout(&self) -> wgpu::BindGroupLayout {
+        self.layout(|layouts| &layouts.function)
     }
 
     /// The composite pass's bind-group layout.

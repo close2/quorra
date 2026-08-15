@@ -16,10 +16,17 @@ use quorra_scene::{FnOp, FnRange};
 /// the value lands in slot 2.
 #[test]
 fn the_two_inputs_occupy_the_first_two_slots() {
-    let analysis = analyse(programs::CONSTANT_GREY).unwrap();
+    // Written out rather than taken from `programs`: a witness has to leave as many values
+    // as its `Range` declares components (§7.10.5.3), so every named one consumes its
+    // inputs, and this test is about the slots they arrive in.
+    let analysis = analyse(&[FnOp::PushReal(0.25)]).unwrap();
     assert_eq!(analysis.max_depth(), 3);
     assert_eq!(analysis.values_left(), 3);
     assert_eq!(analysis.steps().len(), 1);
+    assert!(matches!(
+        analysis.steps().first(),
+        Some(Step::Literal { slot: 2, .. })
+    ));
 }
 
 /// The depth is the *greatest* the program reaches, not the depth it ends at — the shader
@@ -251,23 +258,40 @@ fn the_depth_budget_is_the_public_constant() {
 
 /// The `Range` is the shading's, not the program's, so it meets the program at
 /// [`Analysis::admits`] rather than inside the walk. One uploaded program, two answers.
+///
+/// **Both answers can be no**, and the second direction is ISO 32000-2 §7.10.5.3's own
+/// word: "it shall be an error for the number of remaining operands to *differ* from the
+/// number of output variables specified by Range". A program leaving two values matches
+/// neither a one-component range nor a three-component one.
 #[test]
 fn a_range_meets_the_program_at_admission() {
-    // Two values left: enough for `DeviceGray` and not for `DeviceRGB`.
     let analysis = analyse(&[FnOp::Pop, FnOp::PushReal(0.5)]).unwrap();
     assert_eq!(analysis.values_left(), 2);
-    assert!(analysis.admits(UNIT_GRAY).is_ok());
+    assert_eq!(
+        analysis.admits(UNIT_GRAY).unwrap_err(),
+        FunctionRefusal::OutputCount {
+            produced: 2,
+            required: 1,
+        }
+    );
     assert_eq!(
         analysis.admits(UNIT_RGB).unwrap_err(),
-        FunctionRefusal::InsufficientOutputs {
+        FunctionRefusal::OutputCount {
             produced: 2,
             required: 3,
         }
     );
 
+    // A program that leaves exactly one value is admitted under a one-component range and
+    // refused under a three-component one, which is the same rule saying yes.
+    let one = analyse(&[FnOp::Pop, FnOp::Pop, FnOp::PushReal(0.5)]).unwrap();
+    assert!(one.admits(UNIT_GRAY).is_ok());
+    assert!(one.admits(UNIT_RGB).is_err());
+
     let wide = analyse(programs::ARITHMETIC_ONLY).unwrap();
+    assert_eq!(wide.values_left(), 3);
     assert!(wide.admits(WIDE_RGB).is_ok());
-    assert!(wide.admits(WIDE_GRAY).is_ok());
+    assert!(wide.admits(WIDE_GRAY).is_err());
 }
 
 /// Table 38 requires `min <= max`, and WGSL's `clamp` returns the *high* bound for every input

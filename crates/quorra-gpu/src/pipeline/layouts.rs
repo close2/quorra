@@ -82,6 +82,7 @@ struct BindLayouts {
     textures: wgpu::BindGroupLayout,
     image: wgpu::BindGroupLayout,
     shading: wgpu::BindGroupLayout,
+    function: wgpu::BindGroupLayout,
     composite: wgpu::BindGroupLayout,
     reduce: wgpu::BindGroupLayout,
     blit: wgpu::BindGroupLayout,
@@ -98,6 +99,10 @@ pub(crate) struct Layouts {
     pub(crate) image: wgpu::BindGroupLayout,
     /// Shading quad: params, paint (ramp or mesh), scratch, soft mask.
     pub(crate) shading: wgpu::BindGroupLayout,
+    /// Function quad: params, scratch, soft mask — and **no paint texture**, which is the
+    /// whole of what a device-evaluated colour changes about a shading's bindings
+    /// (ADR 0053).
+    pub(crate) function: wgpu::BindGroupLayout,
     /// Composite pass: params, backdrop, src, soft mask, scratch.
     pub(crate) composite: wgpu::BindGroupLayout,
     /// Reduce pass: params (with the transfer table), src.
@@ -111,6 +116,7 @@ pub(crate) struct Layouts {
     pub(crate) lane_pipe: wgpu::PipelineLayout,
     pub(crate) image_pipe: wgpu::PipelineLayout,
     pub(crate) shading_pipe: wgpu::PipelineLayout,
+    pub(crate) function_pipe: wgpu::PipelineLayout,
     pub(crate) composite_pipe: wgpu::PipelineLayout,
     pub(crate) reduce_pipe: wgpu::PipelineLayout,
     pub(crate) blit_pipe: wgpu::PipelineLayout,
@@ -134,6 +140,7 @@ impl Layouts {
         let lane_pipe = pipe_layout("quorra lane", &[&layouts.globals, &layouts.textures]);
         let image_pipe = pipe_layout("quorra image", &[&layouts.image]);
         let shading_pipe = pipe_layout("quorra shading", &[&layouts.shading]);
+        let function_pipe = pipe_layout("quorra function", &[&layouts.function]);
         let composite_pipe = pipe_layout("quorra composite", &[&layouts.composite]);
         let reduce_pipe = pipe_layout("quorra reduce", &[&layouts.reduce]);
         let blit_pipe = pipe_layout("quorra blit", &[&layouts.blit]);
@@ -148,6 +155,7 @@ impl Layouts {
             textures: layouts.textures,
             image: layouts.image,
             shading: layouts.shading,
+            function: layouts.function,
             composite: layouts.composite,
             reduce: layouts.reduce,
             blit: layouts.blit,
@@ -156,6 +164,7 @@ impl Layouts {
             lane_pipe,
             image_pipe,
             shading_pipe,
+            function_pipe,
             composite_pipe,
             reduce_pipe,
             blit_pipe,
@@ -214,6 +223,17 @@ fn bind_layouts(device: &wgpu::Device) -> BindLayouts {
                 texture_entry(1),
                 texture_entry(2),
                 texture_entry(3),
+            ],
+        ),
+        // 208 bytes: the shading lane's numbers with the sweep's geometry replaced by
+        // §8.7.4.5.2's domain rectangle, §7.10.1's range bounds and the background —
+        // and one texture fewer, because the colour is computed rather than sampled.
+        function: make(
+            "quorra function",
+            &[
+                uniform_entry(0, 208, QUAD_UNIFORM),
+                texture_entry(1),
+                texture_entry(2),
             ],
         ),
         composite: make(

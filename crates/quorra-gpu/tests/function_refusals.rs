@@ -338,15 +338,37 @@ fn an_operand_of_no_decidable_type_is_refused() {
 
 /// A program can be perfectly good and still be refused for the shading that names it: the
 /// `Range` is not the program's, so neither is this refusal.
+///
+/// ISO 32000-2 §7.10.5.3 makes the count rule an equality — "it shall be an error for the
+/// number of remaining operands to differ" — so both directions are refused, and the
+/// surplus direction is the one a device could otherwise draw by quietly reading the top
+/// of the stack and discarding the rest.
 #[test]
-fn a_program_leaving_too_few_values_is_refused_at_admission() {
+fn a_program_whose_output_count_differs_is_refused_at_admission() {
     let analysis = analyse(programs::SQRT_ALONE).unwrap();
     assert!(analysis.admits(programs::UNIT_GRAY).is_ok());
     assert_eq!(
         analysis.admits(programs::UNIT_RGB).unwrap_err(),
-        FunctionRefusal::InsufficientOutputs {
+        FunctionRefusal::OutputCount {
             produced: 1,
             required: 3,
+        }
+    );
+
+    // The other direction: three values under a one-component Range.
+    let surplus = analyse(&[
+        FnOp::Pop,
+        FnOp::Pop,
+        FnOp::PushInt(1),
+        FnOp::PushInt(2),
+        FnOp::PushInt(3),
+    ])
+    .unwrap();
+    assert_eq!(
+        surplus.admits(programs::UNIT_GRAY).unwrap_err(),
+        FunctionRefusal::OutputCount {
+            produced: 3,
+            required: 1,
         }
     );
 }

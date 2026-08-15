@@ -1,8 +1,10 @@
 //! Shared fixtures for the §7.10.5 function tests.
 //!
-//! Two parts, and the split is the point: [`programs`] is *what* is evaluated and
+//! Three parts, and the first split is the point: [`programs`] is *what* is evaluated and
 //! [`reference`] is an evaluation written independently of the code under test, so a
 //! comparison between them is evidence rather than a tautology (ADR 0037's position).
+//! [`compute`] is how the device is asked — one pass, one invocation per point, and no
+//! pixel format between the shader and the assertion.
 
 #![allow(
     dead_code,
@@ -12,6 +14,7 @@
               crate; the alternative is one copy of the corpus per test file"
 )]
 
+pub mod compute;
 pub mod lowered;
 pub mod programs;
 pub mod reference;

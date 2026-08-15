@@ -46,4 +46,27 @@ pub enum ReportKind {
     ///
     /// [`Viewport::damage`]: crate::viewport::Viewport::damage
     DamageNotHonoured,
+    /// The frame painted with a §7.10.5 program that reads a value the operand stack has
+    /// not got, and this device supplies 0 there.
+    ///
+    /// **ISO 32000-2 defines nothing here.** PostScript raises `stackunderflow`;
+    /// §7.10.5 says nothing at all; the caller's own evaluator serves the value from
+    /// `unwrap_or(0.0)` and one of their two witnesses depends on it three times. So the
+    /// value is a *decision*, ADR 0053 requires that adopting it is never silent, and this
+    /// is that report.
+    ///
+    /// # What the report says, and what it deliberately does not
+    ///
+    /// It says **the program contains N such reads**, counted statically over every branch
+    /// — not that the frame's pixels relied on one. A pop inside an `ifelse` arm is
+    /// counted whether or not that arm ran, and making the count dynamic would need a
+    /// per-fragment counter, which is a per-fragment cost for a diagnostic.
+    ///
+    /// The wording follows the count rather than the other way round, because CLAUDE.md's
+    /// second instrumentation rule is exactly this mistake in its other direction: a
+    /// number that describes the lookups you made, reported as though it described the
+    /// ones you should have made. A caller reading this learns that the program's picture
+    /// *may* depend on an undefined value and where to look; it must not read it as proof
+    /// that a pixel did.
+    FunctionEmptyStackRead,
 }

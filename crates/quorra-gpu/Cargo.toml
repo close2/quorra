@@ -27,6 +27,10 @@ winit.workspace = true
 # independent host evaluation of the same program, which needs a pipeline this crate has no
 # reason to own — checking a shader is not the same job as compositing a frame.
 pollster.workspace = true
+# The ISO 32000-2 §7.10.5 conformance corpus and its reference evaluator, run on the device
+# by `tests/function_conformance.rs`. A dev-dependency and nothing else: the library must not
+# link a corpus, and the corpus must stay linkable from a test with no device.
+quorra-function-conformance.workspace = true
 
 [lints]
 workspace = true

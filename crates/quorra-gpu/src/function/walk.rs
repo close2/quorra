@@ -28,7 +28,10 @@ use super::analyse::{INPUTS, slot_index};
 use super::lowered::{Agreement, SlotType, Source, Step};
 use super::operators::{Binary, Unary};
 use super::refusal::FunctionRefusal;
-use super::typing::{binary_of, binary_result, check_operand_types, unary_of, unary_result};
+use super::typing::{
+    binary_of, binary_result, check_operand_types, comparison_is_decided_by_type, unary_of,
+    unary_result,
+};
 
 /// The provenance of a value that an inexact operator computed, kept so that a refusal or a
 /// classification can name the operator rather than the symptom.
@@ -406,6 +409,21 @@ impl<'a> Walk<'a> {
         let (right, right_cell) = self.pop();
         let (left, left_cell) = self.pop();
         check_operand_types(op, left_cell.ty, right_cell.ty)?;
+        // PLRM3's `eq`: "Simple objects are equal if their types and values are the same."
+        // A boolean against a number is decided by the types alone, and it has to be
+        // decided here rather than emitted, because on the operand stack `true` is the same
+        // `f32` as `1` and the comparison would answer the opposite of the clause.
+        //
+        // Nothing is amplified and nothing is tainted by it: the answer does not read
+        // either operand's value, so an inexact operator upstream of one cannot reach this.
+        if let Some(answer) = comparison_is_decided_by_type(op, left_cell.ty, right_cell.ty) {
+            let slot = self.push(Cell::of(SlotType::Boolean, None))?;
+            out.push(Step::Literal {
+                slot,
+                value: f32::from(answer),
+            });
+            return Ok(());
+        }
         let operands = earliest(left_cell.taint, right_cell.taint);
         self.amplify(pc, operands, op.amplifies(), op.table_42());
         let taint = Self::taint_after(pc, operands, op.is_inexact(), op.table_42());

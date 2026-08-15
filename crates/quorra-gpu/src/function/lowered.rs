@@ -102,6 +102,28 @@ pub enum Step {
     },
 }
 
+/// How many bytes a lowered program holds, counting the tree rather than estimating it.
+///
+/// A device charges an uploaded program against its resource budget, and CLAUDE.md
+/// principle 3 asks for a number derived from what is actually stored rather than from
+/// what a bound allows: a `Branch` holds two more lists and a `Permute` one, so a length
+/// in instructions is not a length in bytes. Recursion terminates because
+/// [`super::analyse`] refuses at [`MAX_BRANCH_NESTING`](super::MAX_BRANCH_NESTING).
+pub(crate) fn steps_bytes(steps: &[Step]) -> u64 {
+    let own = (steps.len() as u64).saturating_mul(size_of::<Step>() as u64);
+    steps.iter().fold(own, |total, step| match step {
+        Step::Permute { writes } => total.saturating_add(
+            (writes.len() as u64).saturating_mul(size_of::<(u32, Source)>() as u64),
+        ),
+        Step::Branch {
+            on_true, on_false, ..
+        } => total
+            .saturating_add(steps_bytes(on_true))
+            .saturating_add(steps_bytes(on_false)),
+        Step::Literal { .. } | Step::Unary { .. } | Step::Binary { .. } => total,
+    })
+}
+
 /// What the walk proved about the value in one operand-stack position.
 ///
 /// ISO 32000-2 §7.10.5.1 gives the calculator three types — "expressions involving only

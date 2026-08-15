@@ -1,4 +1,5 @@
-//! The rare-case lanes: an image, a ramp sweep, a mesh — one uniform-driven quad each.
+//! The rare-case lanes: an image, a ramp sweep, a mesh, a §7.10.5 program — one
+//! uniform-driven quad each.
 //!
 //! The brief's §0 premise is that most of a page is a few glyph outlines repeated and
 //! axis-aligned rectangles; ADR 0011 encodes what is left to match that premise rather
@@ -15,12 +16,22 @@
 //!
 //! What the ops mean to the device that draws them is `device.rs`'s half; what a
 //! command means to them is here.
+//!
+//! # The seam between a mark and its paint
+//!
+//! [`QuadPlacement`] is *where* a quad goes and what weights it; a paint is *what colour*
+//! it is. The four lanes above and the function lane of ADR 0053 differ only in the second,
+//! so the first is computed once, in [`Encoder::rect_placement`] and
+//! [`Encoder::coverage_placement`], and the two ops are built from it. That seam is the
+//! reason a device-evaluated colour needed no second copy of the tile arithmetic — the part
+//! where "the quad is exactly the tile" is load-bearing for the shader's texel lookup.
 
 use quorra_scene::{
     Affine, BlendMode, ClipId, ImageFilter, ImageId, MaskId, Paint, Point, Rect, ShadingKind,
 };
 
 use super::clips::ResolvedClip;
+use super::function::FunctionGeometry;
 use super::{ChildOp, DrawStyle, Encoder, Op, apply, compose, transform_preserves_axes};
 use crate::error::RenderError;
 use crate::raster::{DeviceTransform, Polyline, Rule};
@@ -105,6 +116,38 @@ pub(super) struct ShadedGeometry {
     geo0: [f32; 4],
     geo1: [f32; 4],
     inv: [f32; 6],
+}
+
+/// Where a rare-case quad goes, what weights it, and under which of ADR 0010's styles.
+///
+/// The half of a quad op that does not depend on the paint. Both lanes that draw one build
+/// it through the same two functions, so "the quad is exactly the tile" — which the
+/// shaders' texel arithmetic (`coverage.xy + p − dest.xy`) depends on — is one statement
+/// rather than one per lane.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QuadPlacement {
+    /// The quad drawn; when coverage comes from scratch, exactly the tile's bounds.
+    pub dest: [f32; 4],
+    /// The coverage tile's origin in scratch, or `None` for the analytic rectangle.
+    pub coverage_origin: Option<[f32; 2]>,
+    /// The analytic coverage rectangle (the shape itself), used when `coverage_origin`
+    /// is `None`.
+    pub coverage_rect: [f32; 4],
+    pub clip: [f32; 4],
+    pub style: DrawStyle,
+    pub mask: Option<u32>,
+}
+
+/// A paint that draws as one quad: the ramp sweeps and meshes of the shading lane, or a
+/// §7.10.5 program the device evaluates (ADR 0053).
+///
+/// One enum rather than two paths through the fill and stroke walks, so that `encode.rs`
+/// resolves a paint and places a quad without knowing which of the two it has — the
+/// difference is entirely in what is bound at draw time.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum RarePaint {
+    Shaded(ShadedGeometry),
+    Function(FunctionGeometry),
 }
 
 impl Encoder<'_> {
@@ -229,18 +272,11 @@ impl Encoder<'_> {
     /// deliberately absent here: a shading anchors to the scene through its own
     /// transform (§8.7.4.3), not to the path it fills.
     #[allow(clippy::cast_precision_loss)] // mesh anchors are device pixel indices
-    pub(super) fn shaded_geometry(
-        &mut self,
-        paint: Paint,
-    ) -> Result<Option<ShadedGeometry>, RenderError> {
+    pub(super) fn rare_paint(&mut self, paint: Paint) -> Result<Option<RarePaint>, RenderError> {
         match paint {
             // The two callers matched Solid off before calling.
-            Paint::Solid(_) => unreachable!("shaded_geometry is called for non-solid paints only"),
-            // ADR 0053's paint is not lowered yet, and §5 forbids drawing it as
-            // something else in the meantime.
-            Paint::Function { program, .. } => {
-                Err(RenderError::UnsupportedFunctionPaint { program })
-            }
+            Paint::Solid(_) => unreachable!("rare_paint is called for non-solid paints only"),
+            Paint::Function { .. } => Ok(self.function_geometry(paint)?.map(RarePaint::Function)),
             Paint::Shading {
                 ramp,
                 kind,
@@ -270,7 +306,7 @@ impl Encoder<'_> {
                         [start_radius, end_radius, 0.0, 0.0],
                     ),
                 };
-                Ok(Some(ShadedGeometry {
+                Ok(Some(RarePaint::Shaded(ShadedGeometry {
                     paint: PaintSource::Ramp(ramp.0),
                     kind_word,
                     extend_bits: u32::from(extend.0) | (u32::from(extend.1) << 1),
@@ -279,7 +315,7 @@ impl Encoder<'_> {
                     inv: [
                         inverse.a, inverse.b, inverse.c, inverse.d, inverse.e, inverse.f,
                     ],
-                }))
+                })))
             }
             Paint::Mesh(mesh) => {
                 let Some(stored) = self.resources.mesh(mesh) else {
@@ -288,31 +324,66 @@ impl Encoder<'_> {
                 self.used_meshes.insert(mesh.0);
                 // Meshes sample at absolute device pixels (integration note 5): no
                 // inverse needed, the anchor is the whole mapping.
-                Ok(Some(ShadedGeometry {
+                Ok(Some(RarePaint::Shaded(ShadedGeometry {
                     paint: PaintSource::Mesh(mesh.0),
                     kind_word: 2.0,
                     extend_bits: 0,
                     geo0: [stored.spec.left as f32, stored.spec.top as f32, 0.0, 0.0],
                     geo1: [0.0; 4],
                     inv: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-                }))
+                })))
             }
         }
     }
 
-    /// A shaded fill of a rect-hinted outline under an axis-preserving transform:
+    /// A rare-case fill of a rect-hinted outline under an axis-preserving transform:
     /// analytic coverage, no scratch tile (the shading twin of ADR 0007's fast
     /// path).
-    #[allow(clippy::cast_precision_loss)]
-    pub(super) fn push_shaded_rect(
+    pub(super) fn push_rare_rect(
         &mut self,
-        geometry: ShadedGeometry,
+        paint: RarePaint,
         rect: Rect,
         to_device: &DeviceTransform,
         resolved: &ResolvedClip,
         style: DrawStyle,
         mask: Option<u32>,
     ) {
+        let Some(placement) = self.rect_placement(rect, to_device, resolved, style, mask) else {
+            return;
+        };
+        self.push_op(paint.at(placement));
+    }
+
+    /// A rare-case fill or stroke through a rasterised coverage tile in scratch.
+    pub(super) fn push_rare_coverage(
+        &mut self,
+        paint: RarePaint,
+        polylines: &[Polyline],
+        rule: Rule,
+        resolved: &ResolvedClip,
+        style: DrawStyle,
+        mask: Option<u32>,
+    ) -> Result<(), RenderError> {
+        let Some(placement) = self.coverage_placement(polylines, rule, resolved, style, mask)?
+        else {
+            return Ok(());
+        };
+        self.push_op(paint.at(placement));
+        Ok(())
+    }
+
+    /// Where the quad goes for a rect-hinted shape: the shape's device rectangle, cut to
+    /// the clip and the target and expanded to pixel bounds, with the shape itself as the
+    /// analytic coverage. `None` is a mark that reaches no pixel.
+    #[allow(clippy::cast_precision_loss)] // target sizes are far below 2^24
+    fn rect_placement(
+        &mut self,
+        rect: Rect,
+        to_device: &DeviceTransform,
+        resolved: &ResolvedClip,
+        style: DrawStyle,
+        mask: Option<u32>,
+    ) -> Option<QuadPlacement> {
         let p0 = apply(to_device, rect.min);
         let p1 = apply(to_device, rect.max);
         let device_rect = Rect::new(
@@ -332,15 +403,9 @@ impl Encoder<'_> {
             .min(resolved.rect.max.y)
             .min(self.viewport.height as f32);
         if vx0 >= vx1 || vy0 >= vy1 {
-            return;
+            return None;
         }
-        self.push_op(Op::Shaded(Box::new(ShadedOp {
-            paint: geometry.paint,
-            inv: geometry.inv,
-            kind_word: geometry.kind_word,
-            extend_bits: geometry.extend_bits,
-            geo0: geometry.geo0,
-            geo1: geometry.geo1,
+        Some(QuadPlacement {
             dest: [vx0.floor(), vy0.floor(), vx1.ceil(), vy1.ceil()],
             coverage_origin: None,
             coverage_rect: [
@@ -357,33 +422,25 @@ impl Encoder<'_> {
             ],
             style,
             mask,
-        })));
+        })
     }
 
-    /// A shaded fill or stroke through a rasterised coverage tile in scratch.
+    /// Where the quad goes for a rasterised shape: exactly the coverage tile, which is
+    /// what both shaders' texel arithmetic (`coverage.xy + p − dest.xy`) depends on.
     #[allow(clippy::cast_precision_loss, clippy::arithmetic_side_effects)]
-    pub(super) fn push_shaded_coverage(
+    fn coverage_placement(
         &mut self,
-        geometry: ShadedGeometry,
         polylines: &[Polyline],
         rule: Rule,
         resolved: &ResolvedClip,
         style: DrawStyle,
         mask: Option<u32>,
-    ) -> Result<(), RenderError> {
+    ) -> Result<Option<QuadPlacement>, RenderError> {
         let Some(tile) = self.coverage_tile(polylines, rule, resolved)? else {
-            return Ok(());
+            return Ok(None);
         };
         let (sx, sy) = self.pack_scratch(&tile)?;
-        self.push_op(Op::Shaded(Box::new(ShadedOp {
-            paint: geometry.paint,
-            inv: geometry.inv,
-            kind_word: geometry.kind_word,
-            extend_bits: geometry.extend_bits,
-            geo0: geometry.geo0,
-            geo1: geometry.geo1,
-            // The quad is exactly the tile: the shader's texel arithmetic
-            // (`coverage.xy + p − dest.xy`) depends on it.
+        Ok(Some(QuadPlacement {
             dest: [
                 tile.left as f32,
                 tile.top as f32,
@@ -400,7 +457,29 @@ impl Encoder<'_> {
             ],
             style,
             mask,
-        })));
-        Ok(())
+        }))
+    }
+}
+
+impl RarePaint {
+    /// The op this paint becomes once the mark's placement is known.
+    fn at(self, placement: QuadPlacement) -> Op {
+        match self {
+            Self::Shaded(geometry) => Op::Shaded(Box::new(ShadedOp {
+                paint: geometry.paint,
+                inv: geometry.inv,
+                kind_word: geometry.kind_word,
+                extend_bits: geometry.extend_bits,
+                geo0: geometry.geo0,
+                geo1: geometry.geo1,
+                dest: placement.dest,
+                coverage_origin: placement.coverage_origin,
+                coverage_rect: placement.coverage_rect,
+                clip: placement.clip,
+                style: placement.style,
+                mask: placement.mask,
+            })),
+            Self::Function(geometry) => Op::Function(Box::new(geometry.at(placement))),
+        }
     }
 }

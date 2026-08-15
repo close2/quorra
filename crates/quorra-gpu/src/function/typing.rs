@@ -140,6 +140,19 @@ pub(super) fn check_operand_types(
     right: SlotType,
 ) -> Result<(), FunctionRefusal> {
     let (required, admitted): (&'static str, fn(SlotType) -> bool) = match op {
+        // `eq` and `ne` take `any₁ any₂` and are never a `typecheck` — a boolean and a
+        // number are simply never equal (see [`comparison_is_decided_by_type`]). What they
+        // cannot do is compare a value whose type two branches disagreed about: on the
+        // operand stack a boolean *is* 1.0 or 0.0, so the answer would be the numeric one
+        // down one path and the constant down the other.
+        Binary::Eq | Binary::Ne => {
+            if left == SlotType::Undecided || right == SlotType::Undecided {
+                return Err(FunctionRefusal::UndecidableOperandType {
+                    operator: op.table_42(),
+                });
+            }
+            return Ok(());
+        }
         // PLRM3: "Both operands of idiv must be integers"; the same for `mod` and for
         // `bitshift`'s value and shift.
         Binary::Idiv | Binary::Mod | Binary::Bitshift => {
@@ -175,6 +188,40 @@ pub(super) fn check_operand_types(
         }
     }
     Ok(())
+}
+
+/// The answer `eq` or `ne` has before either operand's *value* is looked at, or `None`
+/// where the comparison is a genuine one.
+///
+/// PLRM3's `eq` entry, which ISO 32000-2 §7.10.5.2 makes normative:
+///
+/// > Simple objects are equal if their types and values are the same.
+///
+/// A boolean and a number are of different types, so they are **never** equal however the
+/// two are represented — and on our operand stack `true` is the same `f32` as `1`, so the
+/// comparison the shader would otherwise emit answers `true` where the clause answers
+/// `false`. The types are static, so the answer is static: this returns `Some(false)` for
+/// `eq` and `Some(true)` for `ne`, and the walk emits a literal.
+///
+/// Only the boolean/number pair is decided here. An integer against a real is a genuine
+/// comparison — the entry's own next sentence is that "an integer and a real number are
+/// compared as real numbers" — and two values of one type are compared as usual.
+pub(super) fn comparison_is_decided_by_type(
+    op: Binary,
+    left: SlotType,
+    right: SlotType,
+) -> Option<bool> {
+    let numeric = |ty: SlotType| matches!(ty, SlotType::Integer | SlotType::Real);
+    let mismatched = (left == SlotType::Boolean && numeric(right))
+        || (right == SlotType::Boolean && numeric(left));
+    if !mismatched {
+        return None;
+    }
+    match op {
+        Binary::Eq => Some(false),
+        Binary::Ne => Some(true),
+        _ => None,
+    }
 }
 
 fn mismatch(

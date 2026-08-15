@@ -29,6 +29,8 @@
 //! - `child` — §11.3.6: a finished child composited onto its parent.
 //! - `blit` — pixels moved and not changed: the seed copy, the root, the damage patch.
 //! - `masks` — §11.5's soft masks, realised first and bound by everything after.
+//! - `function` — ADR 0053's quad: the one paint whose pipeline is generated per program
+//!   rather than taken from a fixed table.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -42,6 +44,7 @@ use crate::mask::Realised;
 mod blit;
 mod child;
 mod draw;
+mod function;
 mod masks;
 mod region;
 
@@ -173,7 +176,7 @@ impl Executor<'_> {
         let mut op_index = 0;
         while op_index < plan.ops.len() {
             match &plan.ops[op_index] {
-                Op::Draw(_) | Op::Image(_) | Op::Shaded(_) => {
+                Op::Draw(_) | Op::Image(_) | Op::Shaded(_) | Op::Function(_) => {
                     // A run of consecutive drawable ops becomes one pass.
                     let run_start = op_index;
                     while op_index < plan.ops.len() && !matches!(plan.ops[op_index], Op::Child(_)) {
