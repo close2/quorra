@@ -166,8 +166,8 @@ pub enum Agreement {
     /// evaluations stays a difference *of colour* — the currency ISO 32000-2 §10.7.3
     /// already measures a shading's accuracy in — rather than a difference of branch.
     ///
-    /// **What this does not claim.** It is not bitwise identity, and the variant's name in
-    /// ADR 0053 is stronger than the property. WGSL §15.7.5 lets an implementation
+    /// **What this does not claim.** It is not bitwise identity — which is why the variant
+    /// is `Bounded` and not `Exact`, ADR 0053's first name for it. WGSL §15.7.5 lets an implementation
     /// reassociate and fuse the arithmetic of the straight-line expression a generated
     /// shader hands it; §15.7.4.1 gives `div` 2.5 ULP where IEEE 754 gives the host correct
     /// rounding; and ADR 0006's store rounding still sits between the shader and the texel
@@ -175,11 +175,11 @@ pub enum Agreement {
     /// alone). The claim is that the disagreement stays *bounded and small*, which for a
     /// program with no amplifier in it is a property of the program rather than an
     /// observation about the two documents that happened to be measured.
-    Exact,
+    Bounded,
     /// An inexact operator's value reaches an amplifier, so the two evaluations may differ
     /// by a whole colour over whatever set of points the program itself decides. There is no
     /// bound to state, so none is offered.
-    Approximate {
+    Unbounded {
         /// The inexact operator, as Table 42 spells it.
         inexact: &'static str,
         /// Where it is, as an index into the program.

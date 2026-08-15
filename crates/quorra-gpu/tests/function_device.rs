@@ -225,7 +225,7 @@ fn buffer(
 
 /// Every witness, on whatever adapter is here, against the host evaluation.
 ///
-/// The two assertions differ by classification, which is the point: `Agreement::Exact` means
+/// The two assertions differ by classification, which is the point: `Agreement::Bounded` means
 /// no inexact operator's value reaches an amplifier, and for a program with *no* inexact
 /// operator at all the two sides should land on the same bits.
 #[test]
@@ -245,8 +245,8 @@ fn the_device_computes_what_the_host_computes() {
         let colours = run(&device, &queue, &witness, &points);
         assert_eq!(colours.len(), points.len(), "{}", witness.name);
 
-        let bitwise =
-            analysis.agreement() == Agreement::Exact && !uses_an_inexact_operator(&witness.program);
+        let bitwise = analysis.agreement() == Agreement::Bounded
+            && !uses_an_inexact_operator(&witness.program);
         if bitwise {
             compared_bitwise += 1;
         }

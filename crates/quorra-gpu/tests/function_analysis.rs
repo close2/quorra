@@ -120,7 +120,7 @@ fn a_program_without_an_inexact_operator_is_exact() {
         ("integer ops", programs::INTEGER_OPS),
     ] {
         let analysis = analyse(program).unwrap();
-        assert_eq!(analysis.agreement(), Agreement::Exact, "{name}");
+        assert_eq!(analysis.agreement(), Agreement::Bounded, "{name}");
     }
 }
 
@@ -134,7 +134,7 @@ fn an_inexact_operator_that_reaches_no_amplifier_is_exact() {
         ("ln, log, atan", programs::TRANSCENDENTAL_B),
     ] {
         let analysis = analyse(program).unwrap();
-        assert_eq!(analysis.agreement(), Agreement::Exact, "{name}");
+        assert_eq!(analysis.agreement(), Agreement::Bounded, "{name}");
     }
 }
 
@@ -145,7 +145,7 @@ fn an_inexact_operator_reaching_a_comparison_is_approximate() {
     let analysis = analyse(programs::SQRT_INTO_COMPARISON).unwrap();
     assert_eq!(
         analysis.agreement(),
-        Agreement::Approximate {
+        Agreement::Unbounded {
             inexact: "sqrt",
             inexact_at: 1,
             amplifier: "ge",
@@ -170,7 +170,7 @@ fn a_rounding_operator_amplifies_like_a_comparison() {
         let analysis = analyse(&[FnOp::Pop, FnOp::Sqrt, op]).unwrap();
         assert_eq!(
             analysis.agreement(),
-            Agreement::Approximate {
+            Agreement::Unbounded {
                 inexact: "sqrt",
                 inexact_at: 1,
                 amplifier: operator,
@@ -196,7 +196,7 @@ fn the_classification_names_the_earliest_pair() {
     let analysis = analyse(program).unwrap();
     assert_eq!(
         analysis.agreement(),
-        Agreement::Approximate {
+        Agreement::Unbounded {
             inexact: "sqrt",
             inexact_at: 1,
             amplifier: "ge",

@@ -1,6 +1,7 @@
 # 0053 — A paint the device evaluates, and the operators that forbid it
 
-Date: 2026-08-15. Status: **proposed** — the answer is sent, nothing is built.
+Date: 2026-08-15. Status: **accepted, with one amendment** — the answer is sent and the
+lane is being built. The amendment is at the end and it weakens a claim this ADR made.
 
 The caller asked for it in `pdf-viewer/doc/QUORRA_FUNCTION_PAINT.md`; our answer is
 `pdf-viewer/doc/QUORRA_FUNCTION_PAINT_ANSWER.md`. This ADR is the decision behind that
@@ -125,3 +126,34 @@ number here rests on two documents, and their §5.3 already says function shadin
 and catastrophic rather than common. If the accepted set turns out to be small enough that
 the refusal path is the common path, the win is smaller than 0.060 ms suggests and this is
 worth re-costing before it is built.
+
+
+---
+
+## Amendment, 2026-08-15 — `Exact` was the wrong name, and the caller was told the wrong thing
+
+The decision stands; **one word in it does not.** §3 above says a program reaching only the
+exactly-agreeing operators keeps an oracle relationship that is *"not bounded, exact"*, and
+the classification was named `Agreement::Exact` after it. Two agents reached the same
+objection independently while implementing it, and they are right.
+
+**Bit-exactness is not available even for `add`, `sub` and `mul`.** WGSL §15.7.5 permits an
+implementation to **reassociate and fuse** floating-point operations, and the straight-line
+expression tree a generated shader hands the compiler is exactly the shape that invites it;
+§15.7.4's "correctly rounded" is weaker than IEEE 754's because WGSL specifies no rounding
+mode; and ADR 0006's store rounding still sits between the shader and the texel — the spike
+measured 246 044 texels off by one from that step alone.
+
+What the classification *does* say, and what the spike's zero-differing-pixels result is
+evidence for, is that **the disagreement stays a difference of colour rather than a
+difference of branch** — the currency §10.7.3 already measures a shading's accuracy in. That
+is a property of the program. Bit equality was an observation about two documents on one
+driver on one day, and this ADR promoted it to a guarantee it cannot hold.
+
+So the variants are now **`Agreement::Bounded`** and **`Agreement::Unbounded`**, and
+`pdf-viewer/doc/QUORRA_FUNCTION_PAINT_ANSWER.md` §4 needs the same correction carried to it:
+we told the caller their corpus gate could stay exact for accepted programs, and what we can
+actually offer is a bound in the currency their own ADR 0339 already works in.
+
+The lesson is the one CLAUDE.md states about derived claims: the measurement was real, the
+name generalised it, and a name is what a reader carries away.

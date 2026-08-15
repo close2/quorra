@@ -159,7 +159,7 @@ impl<'a> Walk<'a> {
             return;
         }
         if let Some(taint) = taint {
-            self.approximate = Some(Agreement::Approximate {
+            self.approximate = Some(Agreement::Unbounded {
                 inexact: taint.operator,
                 inexact_at: taint.at,
                 amplifier,

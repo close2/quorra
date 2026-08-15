@@ -203,7 +203,7 @@ pub fn analyse(program: &[FnOp]) -> Result<Analysis, FunctionRefusal> {
         max_depth: slot_index(walk.max_depth),
         slot_types: walk.stack.iter().map(|cell| cell.ty).collect(),
         values_left: slot_index(walk.stack.len()),
-        agreement: walk.approximate.unwrap_or(Agreement::Exact),
+        agreement: walk.approximate.unwrap_or(Agreement::Bounded),
         empty_stack_pops: walk.empty_stack_pops,
         program_length: program.len(),
         hash: super::hash::hash(program),
