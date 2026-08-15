@@ -41,6 +41,7 @@ row, since a number without one is not evidence.
 | artwork — the corpus's p99 clip shape — steady | 43.3 ms, geometry 35.4 of it | `surface_measure`, RADV at the real display, 2026-08-14 — **before ADR 0049**, and not re-run on the display since |
 | — the same page's encode, before → after ADR 0049 | geometry **37.8 → 28.9 ms**, encode 46.3 → 37.2 | `examples/residue_clip.rs`, headless RADV into a texture, three alternating rounds, minima, load 3.8–4.8, 2026-08-15 |
 | first frames, presenting | pipeline compiles: **none**, eight of eight | same; ADR 0043 |
+| a path-heavy page's encode geometry, 1 thread → 24 | **309.0 → 46.9 ms** (encode 406.8 → 132.2) | `examples/encode_threads.rs`, llvmpipe, minima of five round-robin, load 17.6, ADR 0054 |
 | the caller's corpus at scale 1 | **931** agree / 23 differ / 2 refused / 18 not comparable | their tree, one copy, 2026-08-15 |
 | the caller's corpus at scale 4 | **936** / 10 / 5 / 23 | same copy, same hour |
 
@@ -108,6 +109,10 @@ on the GPU.
   knockout group over a function paint (the pipeline pair exists and is selected, no test
   draws one), and a generated compile timed on a quiet machine — the spike's 6.3 ms is
   still the only figure, and this machine reached load 66 during the round.
+- **`recording` is now the largest phase of a path-heavy encode** — 132 ms of encode with
+  geometry at 47 after ADR 0054 divided it. ADR 0023's "revisit when" is closer than it
+  was, and the caller's `QUORRA_ENCODE_THREADS.md` §4 excluded recording from its ask
+  deliberately.
 - **§11.2's census** still has not run against a real corpus in the form M5 asked for; the
   path lane's design stands on the shapes `doc/corpus-profile.md` measured instead, and
   ADR 0008 names the lever if the census ever overturns it.

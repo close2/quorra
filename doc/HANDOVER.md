@@ -19,7 +19,9 @@ atlas stops re-encoding itself every frame), ADR 0051 (three files split along t
 ADR 0052 (the readback gate counts instead of timing), and one clause defect: a blended
 stroke inside a knockout group was blended where §11.4.6 replaces.
 
-**Local is ahead of that by the function-paint round** (ADR 0053), which is not pushed.
+**Local is ahead of that by two rounds, neither pushed**: the function paint (ADR 0053) and
+the 2026-08-15 second round — ADR 0054's parallel geometry phase, the `device.rs` split
+(2 283 lines → 235 over eleven submodules), and type 4's knockout and retained-frame tests.
 
 **One thing the release round owes the caller and they have not done yet.** Their corpus
 ratchet lists the pages that differ from their oracle by name, and ADR 0049 moved
@@ -280,6 +282,12 @@ piece spent outside. 2 684 pixels of a 2.9-million-pixel probe, the worst by 185
 Any change that wants to compute coverage once and cut it up afterwards has to check this
 first — the probe is `a_tile_is_the_crop_of_the_region_that_contains_it`, and it took
 ninety seconds to write and settled the design of a whole round (ADR 0049).
+
+**A determinism fixture that does not overlap is not a determinism fixture.** ADR 0054's
+first thread-count gate used a 15-pixel lattice where no two marks touched, and it **passed
+with an ordering drain removed**. At 6 pixels for a 44-pixel mark it fails. The same round's
+atlas defect — a duplicate insert, `bytes_uploaded` off by exactly 64 — was found by the
+gate rather than by reading, which is what a fixture that actually contends buys you.
 
 **A cache's "would this help?" test must be asked in the units the cache allocates in.**
 ADR 0024 gated the atlas repack on `bytes requested <= bytes available`, and the packer
