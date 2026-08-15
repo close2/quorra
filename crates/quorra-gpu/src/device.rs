@@ -20,32 +20,39 @@
 //! `surface.rs` tier 2's lifecycle, `readback.rs` tier 1's price, [`crate::error`]
 //! the refusals.
 //!
-//! # This file, and the modules under it
+//! # This file, and the eleven modules under it
 //!
-//! Each part is named for its one thing, and each is private: a caller writes
-//! `quorra_gpu::device::Device`, and the layout below is ours to change (ADR 0051).
-//! The names below are not links for the same reason — a private module is not in the
-//! published documentation, so this list is the only place the structure survives into
-//! it.
+//! What is left in *this* file is the device itself: the handles it holds for its
+//! life, what it will admit ([`Limits`]), and the accessors that hand those out.
+//! Everything a device *does* is one of the parts below, listed in the order a device
+//! lives rather than in the order they are declared.
 //!
-//! - `ramp` — a colour ramp sampled to texels, which is arithmetic rather than a
-//!   device (ADR 0011).
-//! - `binds` — the bind group and the uniform bytes each of the compositor's passes
-//!   reads.
-//! - `bound` — what a frame draws into, and the contract each of the three targets
-//!   must satisfy before it does.
+//! Each part is private, which is ADR 0051's rule: a caller writes
+//! `quorra_gpu::device::Device` and nothing else, so this layout stays ours to change.
+//! The names are not links for the same reason — a private module is not in the
+//! published documentation, and this list is the only place the structure survives
+//! into it.
+//!
+//! - `construct` — what a device costs to exist and when it is ready: adapter
+//!   selection, device creation, the warm-up, and dropping the thread that runs it.
+//! - `resident` — a resource uploaded once and resident until released, in both the
+//!   forms it has: the validated copy, and the texture a frame draws from.
+//! - `ramp` — what one of those forms contains: a colour ramp sampled to texels, which
+//!   is arithmetic rather than a device (ADR 0011).
+//! - `render` — one frame, from the call to the [`Frame`](crate::frame::Frame): the
+//!   phase order, and the order the refusals are taken in.
 //! - `damage` — ADR 0012's reading of a viewport's damage list, and which target can
 //!   honour one.
-//! - `rare` — the same for the image and shading quads, which the brief's §0 calls the
-//!   rare case.
-//! - `record` — phase 3: the route a frame's content takes to the target, recorded
-//!   into one submission.
-//! - `render` — one frame, from the call to the `Frame`: the phase order, and the
-//!   order the refusals are taken in.
-//! - `resident` — a resource uploaded once and resident until released, in both the
-//!   forms it has.
+//! - `bound` — what a frame draws into, and the contract each of the three targets
+//!   must satisfy before it does.
 //! - `staging` — phase 2: the buffers and textures one frame stages before anything is
 //!   recorded.
+//! - `record` — phase 3: the route a frame's content takes to the target, recorded
+//!   into one submission.
+//! - `binds` — the bind group and the uniform bytes each of the compositor's passes
+//!   reads.
+//! - `rare` — the same for the image and shading quads, which the brief's §0 calls the
+//!   rare case.
 //! - `textures` — the textures a device makes, and the usages each one asks for.
 
 mod binds;
