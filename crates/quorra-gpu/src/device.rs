@@ -30,8 +30,10 @@
 //!
 //! - `ramp` — a colour ramp sampled to texels, which is arithmetic rather than a
 //!   device (ADR 0011).
+//! - `textures` — the textures a device makes, and the usages each one asks for.
 
 mod ramp;
+mod textures;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1647,30 +1649,6 @@ impl Device {
         )
     }
 
-    /// A frame-internal texture: layer, mask, or ping-pong scratch.
-    pub(crate) fn create_internal_texture(
-        &self,
-        label: &str,
-        width: u32,
-        height: u32,
-        format: wgpu::TextureFormat,
-    ) -> wgpu::Texture {
-        self.gpu.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        })
-    }
-
     /// The admitted analysis of a resident §7.10.5 program, for the lane that draws it.
     ///
     /// The frame reads it rather than re-deriving it: everything static about a program
@@ -1936,51 +1914,6 @@ impl Device {
         Ok(bytes)
     }
 
-    /// One straight-alpha RGBA8 texture, uploaded whole.
-    fn rgba_texture(
-        &self,
-        label: &str,
-        width: u32,
-        height: u32,
-        data: &[u8],
-    ) -> (wgpu::Texture, wgpu::TextureView) {
-        let texture = self.gpu.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width.saturating_mul(4)),
-                rows_per_image: None,
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        (texture, view)
-    }
-
     /// The image quad's uniform + bind group for one `ImageOp` (ISO 32000-2
     /// §8.9.5; layout mirrored in `image.wgsl`'s `Params`).
     #[allow(clippy::arithmetic_side_effects)] // fixed-layout offsets in a 144-byte array
@@ -2164,50 +2097,6 @@ impl Device {
         });
         self.queue.write_buffer(&uniform, 0, bytes);
         uniform
-    }
-
-    /// The 1×1 stand-in for absent coverage sources and masks: **white**, so an
-    /// absent soft mask admits everything.
-    fn ensure_dummy(&mut self) -> wgpu::TextureView {
-        if self.dummy_texture.is_none() {
-            let texture = self.gpu.create_texture(&wgpu::TextureDescriptor {
-                label: Some("quorra dummy white"),
-                size: wgpu::Extent3d {
-                    width: 1,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &[255],
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(1),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d {
-                    width: 1,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-            );
-            self.dummy_texture = Some(texture.create_view(&wgpu::TextureViewDescriptor::default()));
-        }
-        // Just created above when absent.
-        #[allow(clippy::expect_used)]
-        self.dummy_texture.clone().expect("created above")
     }
 }
 
