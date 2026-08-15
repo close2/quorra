@@ -51,6 +51,7 @@ mod readback;
 pub mod report;
 mod resources;
 pub mod retained;
+mod shaders;
 pub mod startup;
 mod surface;
 pub mod target;

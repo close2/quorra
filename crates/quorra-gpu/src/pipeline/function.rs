@@ -57,7 +57,7 @@ use crate::function::{Analysis, ProgramHash, generate};
 /// The fixed half of every generated shader: the quad, the coverage, the clip and the
 /// soft mask. Appended to what [`generate`] emits, which supplies the operator library and
 /// `quorra_function_evaluate`.
-const LANE: &str = include_str!("../shaders/function_lane.wgsl");
+const LANE: &str = crate::shaders::FUNCTION_LANE;
 
 /// What one compiled function pipeline is keyed by.
 ///

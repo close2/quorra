@@ -55,6 +55,48 @@ pub(crate) struct FunctionOp {
     pub placement: QuadPlacement,
 }
 
+#[cfg(test)]
+impl FunctionOp {
+    /// One op assembled from its parts, for the uniform-layout gate in
+    /// `crate::compose::function`.
+    ///
+    /// That module writes this op into `function_lane.wgsl`'s `Params` and its test
+    /// reads every field back at the offset the shader puts it, but it cannot build an
+    /// op: [`QuadPlacement`] is `encode`'s own and is re-exported to nobody. An inherent
+    /// constructor reaches through the private module the type sits in, where a `use`
+    /// cannot, which is why this is a method rather than a fixture beside the test.
+    ///
+    /// `quad` is the placement's four uniform-carried numbers, in the order the shader
+    /// reads them: the destination rectangle, the coverage tile's scratch origin if it
+    /// has one, the analytic coverage rectangle, and the clip. The two the uniform does
+    /// *not* carry are fixed here — a placement's style chooses a pipeline and its mask
+    /// chooses a texture, and neither reaches a byte of `Params`.
+    pub(crate) fn from_parts(
+        inv: [f32; 6],
+        domain: [f32; 4],
+        range: FnRange,
+        background: [f32; 4],
+        quad: ([f32; 4], Option<[f32; 2]>, [f32; 4], [f32; 4]),
+    ) -> Self {
+        let (dest, coverage_origin, coverage_rect, clip) = quad;
+        Self {
+            program: 0,
+            range,
+            inv,
+            domain,
+            background,
+            placement: QuadPlacement {
+                dest,
+                coverage_origin,
+                coverage_rect,
+                clip,
+                style: DrawStyle::Over,
+                mask: None,
+            },
+        }
+    }
+}
+
 /// The shading-space half of a function paint, resolved once per command — the twin of
 /// `ShadedGeometry`, and separate from it for the reason the module comment gives.
 #[derive(Debug, Clone, Copy)]

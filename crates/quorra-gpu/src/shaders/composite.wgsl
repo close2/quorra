@@ -29,8 +29,10 @@ struct Params {
     compose: u32,
     // Device-space clip rectangle for the composited group (min.xy, max.xy).
     clip: vec4f,
-    // Clip-residue mask placement: region min in .xy, scratch texel origin in .zw.
-    // Region empty (min >= max in `clip_residue_rect`) means no residue.
+    // Clip-residue mask placement: the scratch texel origin in .zw. `.xy` is unread and
+    // is written as zero — the region's own corner is `residue_rect.xy`, which is where
+    // `residue_value` takes it from. An empty `residue_rect` (min >= max) means no
+    // residue at all.
     residue: vec4f,
     residue_rect: vec4f,
     // Where this pass's attachment, the child it reads and the backdrop copy it reads sit

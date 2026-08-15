@@ -119,3 +119,51 @@ pub(crate) fn transparent_value(plan: &MaskPlan) -> f32 {
     };
     f32::from(plan.table[usize::from(derived)]) / 255.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MaskPlacement;
+    use crate::shaders;
+    use crate::shaders::layout::{Lane, check};
+
+    /// The placement is written once and read by six shaders, two of which declare it
+    /// as a struct of their own — so both declarations are checked. The three numbers
+    /// go into two `vec4f` rather than a `vec2`-`vec2`-`f32`, and which half of the
+    /// second one `outside` sits in is exactly the kind of thing a uniform of the right
+    /// total size can get wrong.
+    #[test]
+    fn the_placement_is_both_lanes_mask_place() {
+        let placement = MaskPlacement {
+            origin: [1.0, 2.0],
+            size: [3.0, 4.0],
+            outside: 0.5,
+        };
+        for source in [shaders::RECT, shaders::COVERAGE] {
+            check(
+                source,
+                "MaskPlace",
+                &placement.bytes(),
+                &[
+                    ("rect", Lane::Vec4([1.0, 2.0, 3.0, 4.0])),
+                    ("outside", Lane::Vec4([0.5, 0.0, 0.0, 0.0])),
+                ],
+            );
+        }
+    }
+
+    /// §11.5's default state — a scene that names no mask is masked by nothing — as the
+    /// shaders receive it: no area, so every sample is outside, and 1 out there.
+    #[test]
+    fn an_absent_mask_admits_everything() {
+        let bytes = MaskPlacement::ABSENT.bytes();
+        check(
+            shaders::COVERAGE,
+            "MaskPlace",
+            &bytes,
+            &[
+                ("rect", Lane::Vec4([0.0, 0.0, 0.0, 0.0])),
+                ("outside", Lane::Vec4([1.0, 0.0, 0.0, 0.0])),
+            ],
+        );
+    }
+}

@@ -111,7 +111,6 @@ impl Buffers {
 }
 
 /// The 48-byte uniform one winding draw reads.
-#[allow(clippy::cast_precision_loss)] // sheet extents are far below f32's exact range
 fn globals_bind_group(
     gpu: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -121,9 +120,34 @@ fn globals_bind_group(
     channel: usize,
     pane: &Pane,
 ) -> wgpu::BindGroup {
+    let buffer = create_buffer(
+        gpu,
+        queue,
+        "quorra winding globals",
+        &to_bytes(&globals_lanes(sheet, offset, channel, pane)),
+        wgpu::BufferUsages::UNIFORM,
+    );
+    gpu.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("quorra winding globals"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: buffer.as_entire_binding(),
+        }],
+    })
+}
+
+/// The twelve `f32` lanes of `winding.wgsl`'s `Globals`, in its order.
+///
+/// Written as one flat array rather than field by field, which works only because every
+/// field of that struct happens to start where the previous one ends — the `vec4f`
+/// channel mask lands on 16 of its own accord. Move it and the array would need padding
+/// the shader's own alignment would insert; `tests` below is what says it still does not.
+#[allow(clippy::cast_precision_loss)] // sheet extents are far below f32's exact range
+fn globals_lanes(sheet: &Sheet, offset: [f32; 2], channel: usize, pane: &Pane) -> [f32; 12] {
     let mut mask = [0.0_f32; 4];
     mask[channel.min(3)] = 1.0;
-    let data = [
+    [
         sheet.width.max(1) as f32,
         sheet.height.max(1) as f32,
         offset[0],
@@ -136,22 +160,7 @@ fn globals_bind_group(
         pane.origin[1] as f32,
         pane.size[0].max(1) as f32,
         pane.size[1].max(1) as f32,
-    ];
-    let buffer = create_buffer(
-        gpu,
-        queue,
-        "quorra winding globals",
-        &to_bytes(&data),
-        wgpu::BufferUsages::UNIFORM,
-    );
-    gpu.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("quorra winding globals"),
-        layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
-    })
+    ]
 }
 
 /// A buffer with `data` in it. Zero-length data still makes a one-element buffer:
@@ -189,4 +198,47 @@ fn to_bytes(values: &[f32]) -> Vec<u8> {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Pane, Sheet, globals_lanes, to_bytes};
+    use crate::shaders;
+    use crate::shaders::layout::{Lane, check};
+
+    /// The one uniform in the crate written as a flat float array rather than at named
+    /// offsets, checked against the struct whose alignment it is relying on.
+    ///
+    /// `pane_origin` is the number ADR 0027 shipped without in one of its three places
+    /// and drew nothing at all for every band after the first; a *fourth* place that
+    /// could put it somewhere else is the array above, and this is what watches it.
+    #[test]
+    fn the_winding_globals_are_the_sheets_globals() {
+        let sheet = Sheet {
+            width: 11,
+            height: 12,
+            ..Sheet::default()
+        };
+        let pane = Pane {
+            origin: [21, 22],
+            size: [23, 24],
+            first_tile: 0,
+            tile_count: 0,
+            vertex_runs: Vec::new(),
+        };
+        // Channel 2 of the four an ordered-grid pass accumulates into (ADR 0016).
+        let bytes = to_bytes(&globals_lanes(&sheet, [0.25, -0.25], 2, &pane));
+        check(
+            shaders::WINDING,
+            "Globals",
+            &bytes,
+            &[
+                ("sheet_size", Lane::Vec2([11.0, 12.0])),
+                ("sample_offset", Lane::Vec2([0.25, -0.25])),
+                ("channel", Lane::Vec4([0.0, 0.0, 1.0, 0.0])),
+                ("pane_origin", Lane::Vec2([21.0, 22.0])),
+                ("pane_size", Lane::Vec2([23.0, 24.0])),
+            ],
+        );
+    }
 }

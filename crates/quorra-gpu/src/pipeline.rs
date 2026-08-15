@@ -62,6 +62,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::PipelineProblem;
 use crate::function::ProgramHash;
+use crate::shaders;
 use crate::startup::WarmUp;
 use function::FunctionKey;
 use layouts::Layouts;
@@ -121,14 +122,14 @@ impl Modules {
             }
         };
         Ok(Self {
-            rect: module("quorra rect", include_str!("shaders/rect.wgsl"))?,
-            cover: module("quorra coverage", include_str!("shaders/coverage.wgsl"))?,
-            image: module("quorra image", include_str!("shaders/image.wgsl"))?,
-            shading: module("quorra shading", include_str!("shaders/shading.wgsl"))?,
-            composite: module("quorra composite", include_str!("shaders/composite.wgsl"))?,
-            reduce: module("quorra reduce", include_str!("shaders/reduce.wgsl"))?,
-            blit: module("quorra blit", include_str!("shaders/blit.wgsl"))?,
-            winding: module("quorra winding", include_str!("shaders/winding.wgsl"))?,
+            rect: module("quorra rect", shaders::RECT)?,
+            cover: module("quorra coverage", shaders::COVERAGE)?,
+            image: module("quorra image", shaders::IMAGE)?,
+            shading: module("quorra shading", shaders::SHADING)?,
+            composite: module("quorra composite", shaders::COMPOSITE)?,
+            reduce: module("quorra reduce", shaders::REDUCE)?,
+            blit: module("quorra blit", shaders::BLIT)?,
+            winding: module("quorra winding", shaders::WINDING)?,
         })
     }
 }

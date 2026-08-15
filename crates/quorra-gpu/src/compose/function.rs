@@ -175,3 +175,72 @@ fn uniform_bytes(op: &FunctionOp, region: Region, mask: MaskPlacement) -> [u8; U
     bytes[176..208].copy_from_slice(&mask.bytes());
     bytes
 }
+
+#[cfg(test)]
+mod tests {
+    use quorra_scene::FnRange;
+
+    use super::{FunctionOp, MaskPlacement, Region, uniform_bytes};
+    use crate::shaders;
+    use crate::shaders::layout::{Lane, check};
+
+    /// The generated lane's uniform against the fixed half of the shader it is appended
+    /// to (ADR 0053).
+    ///
+    /// The module comment above says the 208 that `wgpu` checks is the size, and that a
+    /// disagreement about it is a validation error; this is the other half of that
+    /// sentence — where inside the 208 each number goes, which `wgpu` never looks at.
+    /// `range_low` and `range_high` are the pair at risk: two `vec4f` of the same width
+    /// holding §7.10.1's `Range` bounds, whose exchange would clamp every output to the
+    /// wrong end of its interval and still draw.
+    #[test]
+    fn the_function_uniform_is_the_lanes_params() {
+        let op = FunctionOp::from_parts(
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            [11.0, 12.0, 13.0, 14.0],
+            FnRange::Rgb([[0.1, 0.7], [0.2, 0.8], [0.3, 0.9]]),
+            [0.25, 0.5, 0.75, 1.0],
+            (
+                [21.0, 22.0, 23.0, 24.0],
+                Some([41.0, 42.0]),
+                [51.0, 52.0, 53.0, 54.0],
+                [31.0, 32.0, 33.0, 34.0],
+            ),
+        );
+        let region = Region {
+            x: 71,
+            y: 72,
+            width: 73,
+            height: 74,
+        };
+        let mask = MaskPlacement {
+            origin: [61.0, 62.0],
+            size: [63.0, 64.0],
+            outside: 0.75,
+        };
+        check(
+            shaders::FUNCTION_LANE,
+            "Params",
+            &uniform_bytes(&op, region, mask),
+            &[
+                ("inv0", Lane::Vec4([1.0, 2.0, 3.0, 4.0])),
+                // §8.3.3's e and f; the lane needs no third and fourth number here.
+                ("inv1", Lane::Vec4([5.0, 6.0, 0.0, 0.0])),
+                ("domain", Lane::Vec4([11.0, 12.0, 13.0, 14.0])),
+                // §7.10.1's `Range`, low bounds then high, one lane per component and
+                // the fourth unused — a `DeviceRGB` program emits three.
+                ("range_low", Lane::Vec4([0.1, 0.2, 0.3, 0.0])),
+                ("range_high", Lane::Vec4([0.7, 0.8, 0.9, 0.0])),
+                ("background", Lane::Vec4([0.25, 0.5, 0.75, 1.0])),
+                ("dest", Lane::Vec4([21.0, 22.0, 23.0, 24.0])),
+                ("coverage", Lane::Vec4([41.0, 42.0, 1.0, 0.0])),
+                ("coverage_rect", Lane::Vec4([51.0, 52.0, 53.0, 54.0])),
+                ("clip", Lane::Vec4([31.0, 32.0, 33.0, 34.0])),
+                ("target_size", Lane::Vec2([73.0, 74.0])),
+                ("origin", Lane::Vec2([71.0, 72.0])),
+                ("mask_rect", Lane::Vec4([61.0, 62.0, 63.0, 64.0])),
+                ("mask_outside", Lane::Vec4([0.75, 0.0, 0.0, 0.0])),
+            ],
+        );
+    }
+}
