@@ -36,16 +36,54 @@
 //! [`ShadedOp`]) rather than a fourth instance stream — the brief's §0 premise is
 //! that most of a page is glyphs and rectangles, and the encoding matches it.
 //!
-//! Five of the walk's subsystems are their own concerns and their own modules:
-//! [`clips`] turns a chain of [`ClipId`]s into a rectangle and a residue (ADR 0007,
-//! ADR 0030), [`residue`] keeps a chain's residue region so that it is rasterised once
-//! rather than once per mark (ADR 0049), [`scratch`] is the frame's coverage sheet with
-//! the shelf packing that fills it (ADR 0021, ADR 0034), [`rare`] is the image and
-//! shading lanes — the quads the brief's §0 calls the rare case (ADR 0011) — and
-//! [`hull`] is the memo that bounds a placement by translating its neighbour's box
-//! rather than transforming the outline again (ADR 0045), and [`parallel`] is the seam
-//! that lets a run of marks rasterise off this thread when the host asked for that. What
-//! is left here is the walk itself and the two lanes it exists for.
+//! # This file, and the sixteen modules under it
+//!
+//! What is left in *this* file is the walk itself: the encoder's working state, the one
+//! pass over the scene's commands, the dispatch that sends each to its arm, and the two
+//! things every arm goes through — the clip resolver and the frame budget.
+//!
+//! Each part is private, which is ADR 0051's rule read for a module that is already
+//! private to the crate: nothing outside `encode` can name one, so this layout stays
+//! ours to change. The names below are not links for the same reason — a private module
+//! is not in the published documentation, and this list is the only place the structure
+//! survives into it.
+//!
+//! **One arm per command**, in the order the dispatch takes them:
+//!
+//! - `rect` — ADR 0007's analytic lane, and the device rectangle both commands that
+//!   reach it are held to.
+//! - `fill` — which of three lanes draws a fill, and the description all three are
+//!   handed.
+//! - `stroke` — a width §4.5 resolved before it reached us, expanded into a fill, plus
+//!   the reach that expansion adds to every visibility test.
+//! - `rare` — the image and shading lanes: the quads the brief's §0 calls the rare case
+//!   (ADR 0011).
+//! - `layer` — a child layer: the group that becomes one, and the composite that puts
+//!   it back (ISO 32000-2 §11.4.5).
+//!
+//! **What an arm draws through:**
+//!
+//! - `device_space` — where a scene coordinate lands, and whether it lands on the
+//!   target at all.
+//! - `clips` — a chain of clip ids as a rectangle and a residue (ADR 0007, ADR 0030).
+//! - `residue` — a chain's residue region, kept so that it is rasterised once rather
+//!   than once per mark (ADR 0049).
+//! - `coverage` — where a mark's coverage comes from, and the conditions that choose
+//!   between the two ways of making one.
+//! - `scratch` — the frame's coverage sheet, and the shelf packing that fills it
+//!   (ADR 0021, ADR 0034).
+//! - `hull` — the memo that bounds a placement by translating its neighbour's box
+//!   rather than transforming the outline again (ADR 0045).
+//! - `parallel` — the seam that lets a run of marks rasterise off this thread when the
+//!   host asked for that (ADR 0054).
+//! - `function` — the quad a §7.10.5 program paints, and the reports an empty operand
+//!   stack owes (ADR 0053).
+//!
+//! **What the walk writes into, and what it hands back:**
+//!
+//! - `instance` — one mark's instance bytes, and the run of consecutive marks it joins.
+//! - `plan` — the ops one layer draws, in order, and the box that has to hold them.
+//! - `encoded` — what one walk hands back, and what the walk cost.
 
 mod clips;
 mod coverage;
@@ -72,7 +110,7 @@ use std::collections::HashSet;
 use quorra_scene::{ClipId, Command, Rect, Scene};
 
 use clips::{ClipResolver, ResolvedClip, open_clip};
-use device_space::{target_rect, tile_side};
+use device_space::target_rect;
 use encoded::finish;
 use instance::instance_reserve;
 use parallel::Job;
@@ -82,7 +120,6 @@ use crate::census::Census;
 use crate::error::RenderError;
 use crate::instrument::EncodeClock;
 use crate::keyhash::FastSet;
-
 use crate::resources::ResourceStore;
 use crate::startup::Coverage;
 use crate::viewport::Viewport;

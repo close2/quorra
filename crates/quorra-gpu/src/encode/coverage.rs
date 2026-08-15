@@ -22,7 +22,8 @@
 use quorra_scene::{Point, Rect};
 
 use super::clips::ResolvedClip;
-use super::{DrawStyle, Encoder, tile_side};
+use super::device_space::tile_side;
+use super::{DrawStyle, Encoder};
 use crate::atlas::CacheProspect;
 use crate::error::RenderError;
 use crate::raster::{self, Polyline, Rule};
