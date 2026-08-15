@@ -38,6 +38,7 @@ pub mod device;
 mod encode;
 pub mod error;
 pub mod frame;
+pub mod function;
 mod instrument;
 mod keyhash;
 mod layers;
