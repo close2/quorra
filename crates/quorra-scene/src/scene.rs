@@ -56,7 +56,7 @@ mod builder;
 mod command;
 mod cost;
 mod frames;
-mod validate;
+pub(crate) mod validate;
 
 #[cfg(test)]
 mod fixtures;

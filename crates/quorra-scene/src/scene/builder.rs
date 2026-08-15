@@ -110,7 +110,7 @@ impl SceneBuilder {
         mask: Option<MaskId>,
     ) -> Result<(), SceneError> {
         Self::check_transform(transform)?;
-        Self::check_paint(&paint)?;
+        Self::check_paint(paint)?;
         self.check_clip(clip)?;
         self.check_mask(mask)?;
         Self::check_staged_compose(compose, blend)?;
@@ -149,7 +149,7 @@ impl SceneBuilder {
     ) -> Result<(), SceneError> {
         Self::check_transform(transform)?;
         Self::check_stroke(stroke)?;
-        Self::check_paint(&paint)?;
+        Self::check_paint(paint)?;
         self.check_clip(clip)?;
         self.check_mask(mask)?;
         self.push(Command::Stroke {

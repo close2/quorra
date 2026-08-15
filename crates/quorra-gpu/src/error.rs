@@ -335,12 +335,12 @@ pub enum RenderError {
     /// something plausible: §5 of the brief wants the caller to fall back to the raster
     /// it builds today, and a hole and a sentence beat a plausible lie.
     #[error(
-        "the scene paints with a §7.10.5 function of {instructions} instructions, which \
-         this device cannot yet generate a shader for"
+        "the scene paints with §7.10.5 program {program:?}, which this device cannot yet \
+         generate a shader for"
     )]
     UnsupportedFunctionPaint {
-        /// How many instructions the refused program held.
-        instructions: usize,
+        /// The program the paint named.
+        program: quorra_scene::FunctionId,
     },
     /// A pipeline this frame needs could not be built. The frame is refused rather
     /// than drawn without the pass that pipeline was for — a page missing its blit is

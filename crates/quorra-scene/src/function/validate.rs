@@ -1,34 +1,32 @@
-//! What a function paint may not contain, and it is refused loudly.
+//! What a compiled program may not be, and it is refused loudly.
 //!
-//! `doc/RENDER_LIBRARY.md` §4.7 is the rule and this is its application to
-//! [`FunctionPaint`]: every condition below is checked at the scene boundary, before any
-//! device sees the paint, and each failure is a [`SceneError`] variant naming the number
-//! that failed. Nothing is clamped, repaired, or left for a shader generator to discover
-//! — §5 wants a limit discoverable *before* the frame as well as an `Err` at it, and this
-//! is the cheaper of the two places to answer.
+//! This is the **structural** half of admitting a §7.10.5 program: is the instruction
+//! list a thing that can be executed at all. It runs at `Device::upload_function`, not at
+//! the scene boundary, and that placement is the point — a program is an uploaded
+//! resource, so a caller learns its program is unsupported *before it has built a scene*,
+//! which is §5's "discoverable before the frame" satisfied properly rather than by
+//! accident.
 //!
-//! It lives beside the type rather than in `scene::validate` because what it checks is
-//! the *program's* well-formedness, which is this module's responsibility and not the
-//! scene's; [`SceneBuilder`](crate::scene::SceneBuilder) calls in from there, in its own
-//! boundary order, so "what a scene may not contain" still has one entry point.
+//! It lives here, in `quorra-scene`, because the checks are about the vocabulary this
+//! crate defines and because a caller may want the answer without a device in hand. It is
+//! public API for that reason.
 //!
 //! # What is deliberately **not** checked here
 //!
-//! Stack depth, the static classification of the operators two adapters do not agree on
-//! (ADR 0053 §3), and the resolution of `copy`/`index`/`roll` counts are all device-side
-//! analysis: they answer "can *this* device draw it", they need a walk that models the
-//! stack, and a scene is device-independent by construction (ADR 0001). A program that
-//! passes every check here may still be refused by `quorra-gpu`, and that is the intended
+//! The *semantic* half — stack depth, the static classification of the operators two
+//! adapters do not agree on (ADR 0053 §3), the resolution of `copy`/`index`/`roll`
+//! counts, and a [`FnOp::JumpUnless`] whose condition is not a boolean — is `quorra-gpu`'s
+//! analyser. All four need a walk that models the stack and its types; this one needs
+//! only the list. A program that passes here may still be refused there, and that is the
 //! division rather than a gap.
+//!
+//! The paint that *references* a program — its domain, matrix, range and background — is
+//! checked at the scene boundary instead, with the other §4.7 refusals.
 
-use std::sync::Arc;
-
-use super::{FnOp, FnRange, FunctionPaint};
+use super::FnOp;
 use crate::error::SceneError;
-use crate::geom::Affine;
-use crate::scene::MAX_COORDINATE;
 
-/// The most instructions a [`FunctionPaint::program`] may hold.
+/// The most instructions an uploaded §7.10.5 program may hold.
 ///
 /// ISO 32000-2 bounds a type 4 function's length nowhere, so this is a deliberate choice
 /// of ours with its cost written down rather than a number read out of a clause.
@@ -44,102 +42,22 @@ use crate::scene::MAX_COORDINATE;
 /// (ADR 0053 §1 — the interpreter shape lost the device outright at 482 instructions
 /// times 32 million fragments, and that is a refusal that must happen before the frame).
 ///
-/// It also bounds the memory a scene can be made to hold from one paint:
-/// 8 192 × 8 bytes is 64 KiB of program, and [`Scene::cost`](crate::scene::Scene::cost)
-/// reports what a scene actually retains.
+/// It also bounds what one upload can be made to hold: 8 192 × 8 bytes is 64 KiB.
 pub const MAX_PROGRAM_LENGTH: usize = 8_192;
 
-impl FunctionPaint {
-    /// Whether this paint is well-formed data, or which condition it broke.
-    ///
-    /// The conditions are checked in the order a reader meets them — the domain the
-    /// program is evaluated over, the matrix that reaches it, the range its results are
-    /// clipped into, then the program itself — and each is one function below.
-    ///
-    /// # Errors
-    ///
-    /// Refuses a non-finite, inverted or unboundedly large `domain`; a non-finite,
-    /// unboundedly large or non-invertible `matrix`; a non-finite or inverted `range`
-    /// pair; an empty program; a program longer than [`MAX_PROGRAM_LENGTH`]; and a jump
-    /// whose target is out of range or is not strictly forward. Each error carries the
-    /// value that failed and, where there is one, the limit it exceeded.
-    pub fn check(&self) -> Result<(), SceneError> {
-        check_domain(self.domain)?;
-        check_matrix(self.matrix)?;
-        check_range(self.range)?;
-        check_program(&self.program)?;
-        Ok(())
-    }
-}
-
-/// §8.7.4.5.2's `Domain` rectangle, in the order §4.7 states a rectangle's conditions:
-/// finite, ordered, and inside [`MAX_COORDINATE`].
+/// Whether a compiled program is structurally executable, or which condition it broke.
 ///
-/// An *empty* domain — `x_min` equal to `x_max` — is accepted, the same way an empty
-/// [`Rect`](crate::geom::Rect) is. It is a degenerate rectangle, not a malformed one, and
-/// what a degenerate rectangle covers is §10.7.4's question rather than this boundary's
-/// (Table 77's `BBox` note makes the same point for a zero-height bounding box).
-fn check_domain(domain: [f32; 4]) -> Result<(), SceneError> {
-    if !domain.iter().all(|v| v.is_finite()) {
-        return Err(SceneError::NonFiniteFunctionDomain(domain));
-    }
-    if domain[0] > domain[1] || domain[2] > domain[3] {
-        return Err(SceneError::UnorderedFunctionDomain(domain));
-    }
-    let magnitude = domain.iter().fold(0.0_f32, |acc, v| acc.max(v.abs()));
-    if magnitude > MAX_COORDINATE {
-        return Err(SceneError::FunctionDomainTooLarge {
-            domain,
-            limit: MAX_COORDINATE,
-        });
-    }
-    Ok(())
-}
-
-/// §8.7.4.5.2's `Matrix`, under the scene's transform conditions plus one of its own.
+/// The three conditions, in the order a reader meets them: it produces something, it is
+/// within the stated bound, and every jump moves strictly forward into the list.
 ///
-/// The extra condition is invertibility, and it is load-bearing rather than tidy: the
-/// matrix maps the shading's own space *into* the scene, and a fragment shader has to go
-/// the other way to know which point of the domain it is standing on. A singular matrix
-/// collapses the domain onto a line or a point, so there is no such position to compute —
-/// and [`Affine::invert`] returning `None` is what says so, with no identity fallback,
-/// because a substituted identity is the plausible-looking wrong answer §4.7 forbids.
-fn check_matrix(matrix: Affine) -> Result<(), SceneError> {
-    if !matrix.is_finite() {
-        return Err(SceneError::NonFiniteTransform(matrix));
-    }
-    if matrix.max_coefficient() > MAX_COORDINATE {
-        return Err(SceneError::TransformTooLarge {
-            transform: matrix,
-            limit: MAX_COORDINATE,
-        });
-    }
-    if matrix.invert().is_none() {
-        return Err(SceneError::SingularFunctionMatrix(matrix));
-    }
-    Ok(())
-}
-
-/// §7.10.1's `Range`: a clip, so each pair is finite and ordered — and nothing more, for
-/// the reason [`FnRange`] states.
-fn check_range(range: FnRange) -> Result<(), SceneError> {
-    for pair in range.pairs() {
-        if !pair[0].is_finite() || !pair[1].is_finite() {
-            return Err(SceneError::NonFiniteFunctionRange(range));
-        }
-        if pair[0] > pair[1] {
-            return Err(SceneError::UnorderedFunctionRange(range));
-        }
-    }
-    Ok(())
-}
-
-/// The program: bounded, non-empty, and jumping only forwards.
+/// # Errors
 ///
-/// The length is checked before the walk, so an unchecked number never sizes anything —
-/// and after it, every index fits `u32` by construction, which is why the jump errors can
-/// name their position without a fallible conversion.
-fn check_program(program: &Arc<[FnOp]>) -> Result<(), SceneError> {
+/// - [`SceneError::EmptyFunctionProgram`] — no instructions, so no output value.
+/// - [`SceneError::FunctionProgramTooLong`] — past [`MAX_PROGRAM_LENGTH`], which the
+///   error names.
+/// - [`SceneError::BackwardFunctionJump`] — a jump to itself or backwards.
+/// - [`SceneError::FunctionJumpOutOfRange`] — a jump past the end of the list.
+pub fn check_program(program: &[FnOp]) -> Result<(), SceneError> {
     if program.is_empty() {
         // §7.10.1: a function is a transformation that produces output values. An empty
         // program produces none, and the empty-stack rule (ADR 0053) would turn that into
@@ -190,151 +108,24 @@ fn check_jump(at: u32, target: u32, length: u32) -> Result<(), SceneError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PROGRAM_LENGTH, check_domain, check_matrix, check_program, check_range};
+    use super::{MAX_PROGRAM_LENGTH, check_program};
     use crate::error::SceneError;
-    use crate::function::{FnOp, FnRange, FunctionPaint};
-    use crate::geom::Affine;
-    use std::sync::Arc;
-
-    /// The smallest thing a §8.7.4.5.2 shading can say: a `DeviceGray` function over the
-    /// unit square that is constant. Both of the caller's witnesses declare
-    /// `/Domain [0 1 0 1]`, so this is their shape with the program removed.
-    fn gray_paint(program: &[FnOp]) -> FunctionPaint {
-        FunctionPaint {
-            program: Arc::from(program),
-            domain: [0.0, 1.0, 0.0, 1.0],
-            matrix: Affine::IDENTITY,
-            range: FnRange::Gray([0.0, 1.0]),
-        }
-    }
+    use crate::function::FnOp;
 
     /// The positive case, stated first so that every refusal below differs from it in
-    /// exactly one way.
+    /// exactly one way: the shape an `ifelse` lowers to, with both jumps forward.
     #[test]
-    fn a_well_formed_function_paint_is_accepted() {
-        gray_paint(&[FnOp::PushReal(0.5)])
-            .check()
-            .expect("a constant grey over the unit square is well-formed");
-    }
-
-    /// A three-component range is the other admitted shape, and it is accepted with the
-    /// forward jumps an `ifelse` lowers to.
-    #[test]
-    fn a_device_rgb_program_with_forward_jumps_is_accepted() {
-        let paint = FunctionPaint {
-            range: FnRange::Rgb([[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]]),
-            program: Arc::from(
-                [
-                    FnOp::PushBool(true),
-                    FnOp::JumpUnless { target: 4 },
-                    FnOp::PushReal(1.0),
-                    FnOp::Jump { target: 5 },
-                    FnOp::PushReal(0.0),
-                    FnOp::Dup,
-                    FnOp::Dup,
-                ]
-                .as_slice(),
-            ),
-            ..gray_paint(&[FnOp::PushReal(0.0)])
-        };
-        paint.check().expect("forward jumps are the whole contract");
-    }
-
-    /// §4.7: a domain is a rectangle, and a rectangle's three conditions are finite,
-    /// ordered and bounded — each refused by the variant that names it.
-    #[test]
-    fn a_malformed_domain_is_refused_at_the_boundary() {
-        assert!(matches!(
-            check_domain([0.0, f32::NAN, 0.0, 1.0]),
-            Err(SceneError::NonFiniteFunctionDomain(_))
-        ));
-        assert!(matches!(
-            check_domain([0.0, f32::INFINITY, 0.0, 1.0]),
-            Err(SceneError::NonFiniteFunctionDomain(_))
-        ));
-        assert!(matches!(
-            check_domain([1.0, 0.0, 0.0, 1.0]),
-            Err(SceneError::UnorderedFunctionDomain(_))
-        ));
-        assert!(matches!(
-            check_domain([0.0, 1.0, 1.0, 0.0]),
-            Err(SceneError::UnorderedFunctionDomain(_))
-        ));
-        assert!(matches!(
-            check_domain([0.0, 2e9, 0.0, 1.0]),
-            Err(SceneError::FunctionDomainTooLarge { .. })
-        ));
-    }
-
-    /// An empty domain clips every input to one value, which is a constant colour and a
-    /// legitimate thing to ask for — the same reading that makes an empty rectangle and a
-    /// blank scene legitimate (§5).
-    #[test]
-    fn an_empty_domain_is_accepted_as_a_constant() {
-        check_domain([0.5, 0.5, 0.5, 0.5]).expect("a degenerate domain is not a malformed one");
-    }
-
-    /// The matrix is a transform under the scene's own two conditions, plus the one this
-    /// paint adds: the device inverts it per fragment, so a matrix with no inverse names
-    /// no point of the domain to evaluate.
-    #[test]
-    fn a_matrix_the_device_cannot_invert_is_refused() {
-        assert!(matches!(
-            check_matrix(Affine {
-                e: f32::NAN,
-                ..Affine::IDENTITY
-            }),
-            Err(SceneError::NonFiniteTransform(_))
-        ));
-        assert!(matches!(
-            check_matrix(Affine::translate(2e9, 0.0)),
-            Err(SceneError::TransformTooLarge { .. })
-        ));
-        assert!(matches!(
-            check_matrix(Affine::scale(0.0, 1.0)),
-            Err(SceneError::SingularFunctionMatrix(_))
-        ));
-        // Not merely a zero scale: any linear part of zero determinant collapses the
-        // domain onto a line.
-        assert!(matches!(
-            check_matrix(Affine {
-                a: 2.0,
-                b: 4.0,
-                c: 1.0,
-                d: 2.0,
-                e: 0.0,
-                f: 0.0
-            }),
-            Err(SceneError::SingularFunctionMatrix(_))
-        ));
-    }
-
-    /// §7.10.1 clips outputs to the range, so each pair must be a clip: finite, and with
-    /// its minimum first.
-    #[test]
-    fn a_malformed_range_pair_is_refused_at_the_boundary() {
-        assert!(matches!(
-            check_range(FnRange::Gray([0.0, f32::NAN])),
-            Err(SceneError::NonFiniteFunctionRange(_))
-        ));
-        assert!(matches!(
-            check_range(FnRange::Gray([1.0, 0.0])),
-            Err(SceneError::UnorderedFunctionRange(_))
-        ));
-        // The third component is as much a component as the first: a check that stopped
-        // at the first pair would pass this.
-        assert!(matches!(
-            check_range(FnRange::Rgb([[0.0, 1.0], [0.0, 1.0], [1.0, 0.0]])),
-            Err(SceneError::UnorderedFunctionRange(_))
-        ));
-    }
-
-    /// A range wider than the colour space is **not** refused: §8.7.4.5.2's Table 78
-    /// adjusts an out-of-range component to the nearest valid value afterwards, so a
-    /// conforming document may declare one and rely on that.
-    #[test]
-    fn a_range_outside_the_unit_interval_is_accepted() {
-        check_range(FnRange::Gray([-2.0, 7.5])).expect("a range is a clip, not a colour claim");
+    fn a_program_whose_jumps_go_forward_is_accepted() {
+        let program = [
+            FnOp::PushBool(true),
+            FnOp::JumpUnless { target: 4 },
+            FnOp::PushReal(1.0),
+            FnOp::Jump { target: 5 },
+            FnOp::PushReal(0.0),
+            FnOp::Dup,
+            FnOp::Dup,
+        ];
+        check_program(&program).expect("forward jumps are the whole contract");
     }
 
     /// An empty program leaves no output value. The empty-stack rule would turn that into
@@ -342,25 +133,25 @@ mod tests {
     #[test]
     fn an_empty_program_is_refused_at_the_boundary() {
         assert!(matches!(
-            gray_paint(&[]).check(),
+            check_program(&[]),
             Err(SceneError::EmptyFunctionProgram)
         ));
     }
 
-    /// The bound exists so that a refusal is cheap and a scene's memory is bounded; it
+    /// The bound exists so that a refusal is cheap and an upload's memory is bounded; it
     /// names itself, per §5's "an `Err` that names what overflowed".
     #[test]
     fn a_program_past_the_stated_bound_is_refused_with_its_limit() {
         let too_long = vec![FnOp::Pop; MAX_PROGRAM_LENGTH + 1];
         assert!(matches!(
-            check_program(&Arc::from(too_long.as_slice())),
+            check_program(&too_long),
             Err(SceneError::FunctionProgramTooLong {
                 length,
                 limit: MAX_PROGRAM_LENGTH,
             }) if length == MAX_PROGRAM_LENGTH + 1
         ));
         let at_the_bound = vec![FnOp::Pop; MAX_PROGRAM_LENGTH];
-        check_program(&Arc::from(at_the_bound.as_slice())).expect("the bound itself is admitted");
+        check_program(&at_the_bound).expect("the bound itself is admitted");
     }
 
     /// The property the whole design rests on: a jump that does not move strictly forward
@@ -370,7 +161,7 @@ mod tests {
         let jump_back = FnOp::Jump { target: 0 };
         let program = [FnOp::PushReal(0.0), FnOp::PushReal(0.0), jump_back];
         assert!(matches!(
-            check_program(&Arc::from(program.as_slice())),
+            check_program(&program),
             Err(SceneError::BackwardFunctionJump { at: 2, target: 0 })
         ));
     }
@@ -381,7 +172,7 @@ mod tests {
     fn a_self_jump_is_refused_at_the_boundary() {
         let program = [FnOp::PushBool(true), FnOp::JumpUnless { target: 1 }];
         assert!(matches!(
-            check_program(&Arc::from(program.as_slice())),
+            check_program(&program),
             Err(SceneError::BackwardFunctionJump { at: 1, target: 1 })
         ));
     }
@@ -392,7 +183,7 @@ mod tests {
     fn a_jump_past_the_end_of_the_program_is_refused() {
         let program = [FnOp::PushBool(true), FnOp::JumpUnless { target: 9 }];
         assert!(matches!(
-            check_program(&Arc::from(program.as_slice())),
+            check_program(&program),
             Err(SceneError::FunctionJumpOutOfRange {
                 at: 1,
                 target: 9,
@@ -410,24 +201,7 @@ mod tests {
             FnOp::JumpUnless { target: 3 },
             FnOp::PushReal(1.0),
         ];
-        check_program(&Arc::from(program.as_slice()))
+        check_program(&program)
             .expect("falling off the end is how a trailing conditional finishes");
-    }
-
-    /// Order matters at the boundary as much as the conditions do: a paint broken in two
-    /// ways reports the one a reader meets first, so the message is about the outermost
-    /// defect rather than whichever check happened to run.
-    #[test]
-    fn the_first_condition_a_reader_meets_is_the_one_reported() {
-        let paint = FunctionPaint {
-            domain: [1.0, 0.0, 0.0, 1.0],
-            matrix: Affine::scale(0.0, 0.0),
-            range: FnRange::Gray([1.0, 0.0]),
-            program: Arc::from([].as_slice()),
-        };
-        assert!(matches!(
-            paint.check(),
-            Err(SceneError::UnorderedFunctionDomain(_))
-        ));
     }
 }

@@ -729,7 +729,7 @@ impl Encoder<'_> {
                 *outline,
                 *transform,
                 *rule,
-                paint.clone(),
+                *paint,
                 *clip,
                 *blend,
                 *compose_mode,
@@ -744,14 +744,7 @@ impl Encoder<'_> {
                 blend,
                 mask,
             } => self.encode_stroke(
-                index,
-                *outline,
-                *transform,
-                *stroke,
-                paint.clone(),
-                *clip,
-                *blend,
-                *mask,
+                index, *outline, *transform, *stroke, *paint, *clip, *blend, *mask,
             ),
             Command::Image {
                 image,
@@ -926,9 +919,9 @@ impl Encoder<'_> {
             }
             // ADR 0053's paint is not lowered yet, and §5 forbids drawing it as
             // something else in the meantime.
-            Paint::Function(function) => Err(RenderError::UnsupportedFunctionPaint {
-                instructions: function.program.len(),
-            }),
+            Paint::Function { program, .. } => {
+                Err(RenderError::UnsupportedFunctionPaint { program })
+            }
             Paint::Shading { .. } | Paint::Mesh(_) => {
                 let Some(geometry) = self.shaded_geometry(paint)? else {
                     return Ok(());

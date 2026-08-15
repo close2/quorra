@@ -552,7 +552,9 @@ impl Device {
             ResourceId::Mesh(MeshId(raw)) => {
                 self.mesh_textures.remove(&raw);
             }
-            ResourceId::Outline(_) => {}
+            // An outline has no device-resident twin, and a §7.10.5 program has no
+            // upload path on this device yet — `resources.release` refused it above.
+            ResourceId::Outline(_) | ResourceId::Function(_) => {}
         }
         Ok(())
     }

@@ -155,32 +155,25 @@ pub enum SceneError {
     /// A stroke violated [`Stroke::is_valid`] — a non-positive or non-finite width
     /// (widths arrive resolved and positive, §4.5), or a miter limit below 1.
     InvalidStroke(Stroke),
-    /// A [`FunctionPaint`](crate::function::FunctionPaint)'s §8.7.4.5.2 `Domain` had a
-    /// NaN or infinite bound.
-    NonFiniteFunctionDomain([f32; 4]),
-    /// A function paint's `Domain` had a minimum above its maximum on some axis. Not
-    /// repaired by swapping, for [`SceneError::UnorderedRect`]'s reason.
-    UnorderedFunctionDomain([f32; 4]),
-    /// A function paint's `Domain` bound exceeded
-    /// [`MAX_COORDINATE`](crate::scene::MAX_COORDINATE) in magnitude.
-    FunctionDomainTooLarge {
-        /// The offending domain, as `[x_min, x_max, y_min, y_max]`.
-        domain: [f32; 4],
-        /// The limit it exceeded.
-        limit: f32,
-    },
-    /// A function paint's §8.7.4.5.2 `Matrix` has no inverse, so no fragment can be
-    /// mapped back into the domain the program is evaluated over.
+    /// A [`Paint::Function`](crate::paint::Paint::Function)'s §8.7.4.5.2 `Matrix` has no
+    /// inverse, so no fragment can be mapped back into the domain the program is
+    /// evaluated over.
+    ///
+    /// The paint's *domain* is refused by the rectangle variants above — a domain is a
+    /// rectangle, and §4.7 says one thing about rectangles.
     SingularFunctionMatrix(Affine),
     /// A component of a function paint's §7.10.1 `Range` was NaN or infinite. A range is
     /// a clip, and a clip against NaN admits nothing and reports nothing.
     NonFiniteFunctionRange(FnRange),
-    /// A function paint's `Range` had a component minimum above its maximum.
+    /// A function paint's `Range` had a component minimum above its maximum. Clamping
+    /// into `[max, min]` returns the upper bound for every input — a flat colour that
+    /// looks drawn — so it is refused rather than swapped.
     UnorderedFunctionRange(FnRange),
-    /// A function paint carried no instructions, so it produces no output value — and
-    /// ADR 0053's empty-stack rule would turn that into a plausible black.
+    /// A §7.10.5 program carried no instructions, so it produces no output value — and
+    /// ADR 0053's empty-stack rule would turn that into a plausible black. Raised at
+    /// `Device::upload_function`, not at the scene boundary.
     EmptyFunctionProgram,
-    /// A function paint's program exceeded
+    /// An uploaded program exceeded
     /// [`MAX_PROGRAM_LENGTH`](crate::function::MAX_PROGRAM_LENGTH), whose doc states what
     /// the bound costs and why it is ours to choose.
     FunctionProgramTooLong {
@@ -308,16 +301,6 @@ impl fmt::Display for SceneError {
                      limit at least 1: {s:?}"
                 )
             }
-            Self::NonFiniteFunctionDomain(domain) => {
-                write!(f, "function domain has a non-finite bound: {domain:?}")
-            }
-            Self::UnorderedFunctionDomain(domain) => {
-                write!(f, "function domain min exceeds max: {domain:?}")
-            }
-            Self::FunctionDomainTooLarge { domain, limit } => write!(
-                f,
-                "function domain bound exceeds the limit of {limit}: {domain:?}"
-            ),
             Self::SingularFunctionMatrix(matrix) => write!(
                 f,
                 "function matrix has no inverse, so no fragment maps back into the \

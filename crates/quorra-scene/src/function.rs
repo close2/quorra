@@ -1,12 +1,20 @@
 //! A colour that is a small program: ISO 32000-2 §7.10.5's type 4 function, compiled.
 //!
 //! One responsibility: the vocabulary a §8.7.4.5.2 type 1 (function-based) shading is
-//! written in, and the paint that carries it. Nothing here evaluates a program and
-//! nothing here generates a shader — [`FunctionPaint::check`] is the boundary's question
-//! ("is this well-formed data at all"), and the device-side analysis that follows it (stack
-//! depth, the static classification of the operators that cannot be trusted across
-//! adapters, the resolution of `copy`/`index`/`roll` counts) belongs to `quorra-gpu`,
-//! where ADR 0053 puts it.
+//! written in. Nothing here evaluates a program and nothing here generates a shader.
+//!
+//! # Where the two halves of "is this acceptable?" are asked
+//!
+//! A program is an uploaded resource ([`FunctionId`](crate::ids::FunctionId)), so the
+//! questions about it are asked at `Device::upload_function`, before any frame exists —
+//! [`check_program`] is the structural half a device runs first, and the analysis that
+//! follows it (stack depth, the static classification of the operators two adapters do
+//! not agree on, the resolution of `copy`/`index`/`roll` counts) is `quorra-gpu`'s, where
+//! ADR 0053 puts it.
+//!
+//! What the *scene* boundary checks is the paint that references the program — its
+//! domain, matrix, range and background — and that lives with the other §4.7 refusals in
+//! `scene::validate`, because those are the scene's numbers rather than the function's.
 //!
 //! # Why this exists at all
 //!
@@ -27,7 +35,7 @@
 //!
 //! We never see PostScript source. §7.10.5.1 admits `{ … }` procedures only as the
 //! operands of `if` and `ifelse`, and the caller lowers both to the two jump
-//! instructions below before we see them, so a [`FunctionPaint::program`] is **flat**.
+//! instructions below before we see them, so an uploaded program is **flat**.
 //! Jumps are forward-only, and that is checked rather than trusted: it is the single
 //! property that makes a program's length a bound on its own execution, which is what a
 //! fragment shader without a loop needs.
@@ -69,7 +77,7 @@
 
 mod validate;
 
-pub use validate::MAX_PROGRAM_LENGTH;
+pub use validate::{MAX_PROGRAM_LENGTH, check_program};
 
 /// One instruction of a compiled ISO 32000-2 §7.10.5 type 4 (PostScript calculator)
 /// function.
@@ -220,71 +228,27 @@ pub enum FnOp {
 
     /// Pop a boolean; when it is false, continue at `target`. Forward only.
     JumpUnless {
-        /// Index into [`FunctionPaint::program`], strictly greater than this
-        /// instruction's own and at most the program's length — where the length itself
-        /// means "stop", which is how a trailing `if` lowers.
+        /// Index into the program, strictly greater than this instruction's own and at
+        /// most the program's length — where the length itself means "stop", which is how
+        /// a trailing `if` lowers.
         target: u32,
     },
     /// Continue at `target`. Forward only.
     Jump {
-        /// Index into [`FunctionPaint::program`], under the same rule as
-        /// [`FnOp::JumpUnless`]'s.
+        /// Index into the program, under the same rule as [`FnOp::JumpUnless`]'s.
         target: u32,
     },
 }
 
-/// ISO 32000-2 §8.7.4.5.2's type 1 shading: a colour that is a function of position.
-///
-/// Held behind an `Arc` in [`Paint::Function`](crate::paint::Paint::Function) because a
-/// program is shared: one page-wide shading painted through many marks is one program,
-/// one upload and — the number that decides the design — one generated shader.
-///
-/// # What a device does with it, in order
-///
-/// 1. Map the fragment's position back through [`FunctionPaint::matrix`] into the
-///    shading's own space. That the matrix is invertible is checked here, not there;
-///    see [`FunctionPaint::check`].
-/// 2. Decide whether that position is inside [`FunctionPaint::domain`]. §8.7.4.5.2 is
-///    explicit that the domain rectangle is a *region*, not a clamp on the position:
-///
-///    > Points within the shading's bounding box (`BBox`) that fall outside this
-///    > transformed domain rectangle shall be painted with the shading's background
-///    > colour (`Background`); if the shading dictionary has no `Background` entry, such
-///    > points shall be left unpainted.
-///
-///    This paint carries no background colour, so a device outside the domain rectangle
-///    paints nothing there. `doc/notes-function-scene.md` records this as the one open
-///    contract question: a caller with a `/Background` has no way to say so yet.
-/// 3. Run the program at that position, and clip each result into
-///    [`FunctionPaint::range`]. §7.10.1's second clip is not optional:
-///
-///    > Input values passed to the function shall be clipped to the domain, and output
-///    > values produced by the function shall be clipped to the range.
-///
-/// The clipping and the discard are the generator's to emit; what this crate owns is that
-/// the numbers they work against are well-formed.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FunctionPaint {
-    /// The compiled program. Flat, with forward-only jumps, so its length bounds its
-    /// own execution.
-    pub program: std::sync::Arc<[FnOp]>,
-    /// §8.7.4.5.2's `Domain`, as `[x_min, x_max, y_min, y_max]`.
-    pub domain: [f32; 4],
-    /// §8.7.4.5.2's `Matrix`: the shading's own space → scene space. Deliberately not
-    /// the command's transform, for the reason `Paint::Shading::transform` already
-    /// states.
-    pub matrix: crate::geom::Affine,
-    /// §7.10's `Range`, which also *is* the number of output components.
-    pub range: FnRange,
-}
-
-/// §7.10's `Range` for a function paint: `[min, max]` per output component, and the
+/// §7.10.1's `Range` for a function paint: `[min, max]` per output component, and the
 /// component count with it.
 ///
 /// One type rather than a `[f32; 6]` plus an `outputs: u32`, because those two can
 /// disagree and this cannot. `DeviceCMYK` is deliberately absent: colour conversion is
 /// settled upstream (§4.5), and CLAUDE.md's stack table forbids a colour-management
-/// crate here.
+/// crate here. `DeviceGray` is admitted because replicating one component into three is
+/// not a colour *space* transform — it is one line of the generated shader, and it keeps
+/// what the document declared.
 ///
 /// # Why the pairs are not required to be `[0, 1]`
 ///
@@ -321,5 +285,21 @@ impl FnRange {
     #[must_use]
     pub fn components(&self) -> usize {
         self.pairs().len()
+    }
+
+    /// Whether every pair is a clip a device can apply: finite, and with its minimum
+    /// first.
+    ///
+    /// §7.10.1 makes the range a clip on the function's outputs — "output values produced
+    /// by the function shall be clipped to the range" — and Table 38 states it as
+    /// `[min₀ max₀ …]`. An inverted pair is not a narrower clip but a broken one: clamping
+    /// into `[max, min]` returns the upper bound for every input, which is a flat colour
+    /// that looks drawn. Refused rather than swapped, for
+    /// [`SceneError::UnorderedRect`](crate::error::SceneError::UnorderedRect)'s reason.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.pairs()
+            .iter()
+            .all(|pair| pair[0].is_finite() && pair[1].is_finite() && pair[0] <= pair[1])
     }
 }

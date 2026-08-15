@@ -35,8 +35,8 @@
 //! [`Paint::Function`] is the exception to the module's first contract line, and
 //! deliberately: it is the one paint whose colour is *not* resolved upstream, because
 //! resolving it upstream is what costs the caller 1 142.8 ms of scene building on a page
-//! whose whole content is one §8.7.4.5.2 type 1 shading. What travels is the compiled
-//! §7.10.5 program, not a sampled grid; ADR 0053 is the decision and
+//! whose whole content is one §8.7.4.5.2 type 1 shading. What travels is a handle to a
+//! compiled §7.10.5 program, not a sampled grid; ADR 0053 is the decision and
 //! [`crate::function`] the vocabulary.
 
 use crate::scene::MAX_COORDINATE;
@@ -151,11 +151,12 @@ impl ShadingKind {
 
 /// How a fill or stroke is painted.
 ///
-/// `Clone` rather than `Copy` since [`Paint::Function`] arrived: a program is shared
-/// between every mark that paints with it, which is the §2.2 economy applied to the one
-/// paint whose payload is unbounded — and a shared program is also one generated shader
-/// rather than one per placement (ADR 0053).
-#[derive(Debug, Clone, PartialEq)]
+/// Every heavy paint is a resource identifier plus the geometry that places it, and
+/// [`Paint::Function`] is deliberately the same shape as [`Paint::Shading`]: the program
+/// is uploaded once (§2.2's economy, and ADR 0053's shader cache keys on it), while the
+/// domain, matrix, range and background belong to the *shading* — two shadings may share
+/// one program under different matrices.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Paint {
     /// A single uniform colour.
     Solid(Color),
@@ -173,26 +174,84 @@ pub enum Paint {
     /// §8.7.4.5.5–.7, pre-rasterised by the caller and shared between its backends
     /// (integration note 5): sampled at absolute device pixels.
     Mesh(crate::ids::MeshId),
-    /// §8.7.4.5.2: a colour the device evaluates per fragment (ADR 0053).
-    Function(std::sync::Arc<crate::function::FunctionPaint>),
+    /// §8.7.4.5.2's type 1 shading: a colour the device evaluates per fragment
+    /// (ADR 0053).
+    ///
+    /// # What a device does with it, in order
+    ///
+    /// 1. Map the fragment's position back through `matrix` into the shading's own space.
+    ///    That the matrix is invertible is checked at the scene boundary, not there.
+    /// 2. Decide whether that position is inside `domain`. §8.7.4.5.2 is explicit that the
+    ///    domain rectangle is a *region*, not a clamp on the position:
+    ///
+    ///    > Points within the shading's bounding box (`BBox`) that fall outside this
+    ///    > transformed domain rectangle shall be painted with the shading's background
+    ///    > colour (`Background`); if the shading dictionary has no `Background` entry,
+    ///    > such points shall be left unpainted.
+    ///
+    ///    So outside the domain the device emits `background`, or — when it is `None` —
+    ///    **nothing at all**: alpha zero, no coverage. Never the nearest edge's colour;
+    ///    that is the plausible wrong page §5 has a name for.
+    /// 3. Inside it, run the program and clip each output into its `range` pair. That
+    ///    clip is §7.10.1's, and it is not optional:
+    ///
+    ///    > Input values passed to the function shall be clipped to the domain, and output
+    ///    > values produced by the function shall be clipped to the range.
+    ///
+    ///    The two clauses do not conflict: §7.10.1 governs an invocation of the function,
+    ///    §8.7.4.5.2 governs where a type 1 shading invokes it.
+    Function {
+        /// The uploaded program.
+        program: crate::ids::FunctionId,
+        /// §8.7.4.5.2's `Domain`, in the shading's own space. A [`Rect`](crate::geom::Rect)
+        /// rather than four floats, so the ordering convention is enforced by the type
+        /// rather than documented beside it.
+        domain: crate::geom::Rect,
+        /// §8.7.4.5.2's `Matrix`: shading space → scene space. Deliberately **not** the
+        /// command's transform, for the reason [`Paint::Shading`]'s `transform` states.
+        matrix: crate::geom::Affine,
+        /// §7.10.1's `Range`, and the component count with it.
+        range: crate::function::FnRange,
+        /// §8.7.4.5.2's `Background`, resolved to a device colour upstream. `None` leaves
+        /// points outside the domain rectangle unpainted, which is what the clause says
+        /// happens when a shading dictionary has no `Background` entry.
+        ///
+        /// Table 77 restricts the entry further — "The background colour shall be applied
+        /// only when the shading is used as part of a shading pattern, not when painted
+        /// directly with the `sh` operator" — and that distinction is one only the caller
+        /// can see, so it arrives already applied: `None` from an `sh`, whatever the
+        /// pattern declared otherwise.
+        background: Option<Color>,
+    },
 }
 
 impl Paint {
     /// Whether the paint's values are valid at the scene boundary.
     ///
-    /// [`Paint::Function`] is the one arm whose answer is not a range test, so it is the
-    /// one arm that also has a version saying *which* condition failed:
-    /// [`FunctionPaint::check`](crate::function::FunctionPaint::check), which this
-    /// delegates to so the definition of a valid function paint is written once.
+    /// The [`Paint::Function`] arm answers about the *paint* — its domain, matrix, range
+    /// and background. Whether the program it names is one a device can execute is asked
+    /// at upload instead ([`check_program`](crate::function::check_program)), because a
+    /// program is a resource and a scene holds only its identifier.
     #[must_use]
-    pub fn is_valid(&self) -> bool {
+    pub fn is_valid(self) -> bool {
         match self {
             Self::Solid(color) => color.is_valid(),
             Self::Shading {
                 kind, transform, ..
             } => kind.is_valid() && transform.is_finite(),
             Self::Mesh(_) => true,
-            Self::Function(function) => function.check().is_ok(),
+            // The rule is written once, where the boundary applies it, so that the
+            // predicate and the named refusal cannot drift apart.
+            Self::Function {
+                domain,
+                matrix,
+                range,
+                background,
+                ..
+            } => crate::scene::validate::function::check_function_paint(
+                domain, matrix, range, background,
+            )
+            .is_ok(),
         }
     }
 }
