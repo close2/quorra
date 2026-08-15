@@ -42,6 +42,8 @@ row, since a number without one is not evidence.
 | — the same page's encode, before → after ADR 0049 | geometry **37.8 → 28.9 ms**, encode 46.3 → 37.2 | `examples/residue_clip.rs`, headless RADV into a texture, three alternating rounds, minima, load 3.8–4.8, 2026-08-15 |
 | first frames, presenting | pipeline compiles: **none**, eight of eight | same; ADR 0043 |
 | a path-heavy page's encode geometry, 1 thread → 24 | **309.0 → 46.9 ms** (encode 406.8 → 132.2) | `examples/encode_threads.rs`, llvmpipe, minima of five round-robin, load 17.6, ADR 0054 |
+| a generated function shader's compile, at the 482-instruction witness's length | **8.25 ms** RADV, 6.88 ms llvmpipe | `examples/function_compile.rs`, minima of 12 round-robin rounds × 3 alternating runs per adapter, load 5.1–8.6, 2026-08-15 |
+| — the floor a *one*-instruction program still pays | 2.67 / 2.04 ms | same; that is `function_lane.wgsl` parsed and built, not the program |
 | the caller's corpus at scale 1 | **931** agree / 23 differ / 2 refused / 18 not comparable | their tree, one copy, 2026-08-15 |
 | the caller's corpus at scale 4 | **936** / 10 / 5 / 23 | same copy, same hour |
 
@@ -105,10 +107,29 @@ on the GPU.
   processor to **0.060 ms** on RADV in the spike. 385 tests pass on **both** adapters; the
   125-case conformance corpus runs on the device against an independently written
   reference evaluator, and both its gate and the lane's are verified able to fail.
-  What is still open: their answer on the two contract questions ADR 0053 §3.2 names, a
-  knockout group over a function paint (the pipeline pair exists and is selected, no test
-  draws one), and a generated compile timed on a quiet machine — the spike's 6.3 ms is
-  still the only figure, and this machine reached load 66 during the round.
+  The knockout group, the retained replay and the compile duration are all now measured or
+  gated (2026-08-15): §11.4.6's replacement is checked in the pixels over a function paint
+  with an ordinary group as its control, a function op replays byte-identically, and a
+  generated shader's compile is **8.25 ms on RADV** for a program of the witness's length —
+  above a **2.0–2.7 ms floor a one-instruction program pays too**, which is the fixed
+  `function_lane.wgsl` and not anything generated. What is still open: their answer on the
+  two contract questions ADR 0053 §3.2 names, and three gaps in the lane's coverage — a clip
+  and a soft mask over this paint are never anything but 1 anywhere in the tree, no function
+  test runs `Coverage::Gpu`, and ADR 0025's `DestOut`/`Plus` stages are selected but never
+  drawn.
+- **A ramp's subdomain boundary disagrees with §7.10.4** (found 2026-08-15, not yet fixed).
+  The clause's subdomains are closed on the left, so a bound belongs to the subfunction that
+  starts there; `ramp_color_at` gives it to the earlier one. One texel of 4 096 whenever a
+  boundary lands on the sampling grid, and always for a coincident stop pair at 0 or 1. The
+  fix is one comparison and it moves bytes, so it owes a corpus round — `HANDOVER.md` item 3.
+  It was found by the first unit tests that function has ever had, which is the argument for
+  the tests rather than for the frame that could not see it.
+- **The crate's uniform layouts are gated rather than reviewed.** `src/shaders/layout.rs`
+  derives every field's offset from the shader source by WGSL §14.4.4 and §14.4.6 and checks
+  all nine host writers field-for-field; it opens no device, so it is adapter-independent,
+  and it was verified able to fail from both the host and the shader side. Before it, wgpu
+  checked total size only — a reordered pair of same-width fields would have passed every
+  gate in the tree and drawn a plausible wrong picture.
 - **`recording` is now the largest phase of a path-heavy encode** — 132 ms of encode with
   geometry at 47 after ADR 0054 divided it. ADR 0023's "revisit when" is closer than it
   was, and the caller's `QUORRA_ENCODE_THREADS.md` §4 excluded recording from its ask

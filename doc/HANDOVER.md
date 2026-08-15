@@ -19,9 +19,21 @@ atlas stops re-encoding itself every frame), ADR 0051 (three files split along t
 ADR 0052 (the readback gate counts instead of timing), and one clause defect: a blended
 stroke inside a knockout group was blended where §11.4.6 replaces.
 
-**Local is ahead of that by two rounds, neither pushed**: the function paint (ADR 0053) and
-the 2026-08-15 second round — ADR 0054's parallel geometry phase, the `device.rs` split
-(2 283 lines → 235 over eleven submodules), and type 4's knockout and retained-frame tests.
+**Local is ahead of that by three rounds**: the function paint (ADR 0053); the 2026-08-15
+second round — ADR 0054's parallel geometry phase, the `device.rs` split (2 283 lines → 235
+over eleven submodules), and type 4's knockout and retained-frame tests; and the debt round
+below. Whether the first two reached the remote could not be checked from the `AI` user,
+which has no key for `git@github.com:close2/quorra.git`; `origin/main` in this checkout
+points at the second round's tip, which is evidence and not proof.
+
+**The 2026-08-15 debt round** closed the small debts this file listed, in three worktrees at
+once: a generated function shader's compile cost measured here (`examples/function_compile.rs`),
+the workspace's eleven rustdoc warnings fixed *and gated*, a uniform's byte offsets checked
+against the WGSL struct they mirror (`src/shaders/layout.rs`), `device.rs`'s three leftovers
+closed, six clause-derived unit tests on `device/ramp.rs`, and `tests/` reorganised —
+`retained_frame.rs`'s 1 139 lines into five files along its own seams, plus `tests/common/`.
+It moved no pixel and needed no corpus run. **It also found one clause defect that does move
+pixels** — item 3 below.
 
 **One thing the release round owes the caller and they have not done yet.** Their corpus
 ratchet lists the pages that differ from their oracle by name, and ADR 0049 moved
@@ -50,9 +62,11 @@ ADR 0023 had answered it.
 
 ## What to do next, in this order
 
-Two items, and the ordering reason is one sentence: **the caller conversation is the older
-problem and costs an afternoon, while the tiling seam is the only work left with
-milliseconds in it and wants its own measurement before its own design.**
+Three items, and the ordering reason is one sentence: **the caller conversation is the older
+problem and costs an afternoon, the tiling seam is the only work left with milliseconds in
+it and wants its own measurement before its own design, and the ramp's boundary is a clause
+we read wrong — cheap to fix, and it moves bytes, so it costs a corpus round rather than an
+edit.**
 
 ### 1. The adoption round with the caller — cheap, and overdue
 
@@ -89,12 +103,26 @@ its §3: `Agreement::Exact` was renamed `Bounded` because WGSL permits reassocia
 fusion, so bit-exactness was never ours to promise. The caller's answer document carries the
 same correction.
 
-Left, in `doc/notes-function-wiring.md` §4.5 and §6: no test draws a knockout group over a
-function paint (the pipeline pair compiles and `Style::of` selects it); no retained-frame
-test; **no generated-compile duration of our own** — the spike's 6.3 ms stands alone and
-this machine hit load 66 during the round, so the test asserts the property (one compile,
-then none) instead; and `gt`/`ge`/`lt`/`le` compare a boolean numerically where PLRM3 raises
-`typecheck`, left deliberately because it is ADR 0053 §3.2's open question with the caller.
+Three of the four things this item listed are done. `tests/function_knockout.rs` draws
+§11.4.6's replacement over a function paint and measures it in the pixels against an ordinary
+group as control, with both of its gates verified able to fail by forcing the defect each
+names; `tests/function_retained.rs` replays a function op byte-identically and holds the
+release path, which is where principle 6 has teeth in this lane; and **the compile now has a
+number of ours** — `examples/function_compile.rs`, 8.25 ms on RADV and 6.88 on llvmpipe for a
+482-instruction program at the witness's length, minima of twelve round-robin rounds over
+three alternating runs per adapter at load 5.1–8.6. The spike's 6.3 ms holds. The finding
+worth carrying: **a one-instruction program still costs 2.0–2.7 ms**, which is
+`function_lane.wgsl` parsed and built rather than anything generated — so the fixed half is
+where to look if this ever needs to be cheaper, and the cost is mildly superlinear above it
+(~10 → ~17 µs per instruction, the same shape on two independent compilers).
+`doc/notes-function-wiring.md` §4.6–§4.8 carry all three.
+
+What is left is `gt`/`ge`/`lt`/`le` comparing a boolean numerically where PLRM3 raises
+`typecheck`, which is ADR 0053 §3.2's open question with the caller and theirs to answer;
+and three gaps §4.5 now names, each found by reading rather than by a failure: **a clip and a
+soft mask over this paint are never anything but 1** anywhere in the tree (the other two
+factors of `base_weight` are unobserved), **no function test runs `Coverage::Gpu`**, and
+ADR 0025's `DestOut`/`Plus` stages are compiled and selected but never drawn.
 
 Do not build the interpreter shape. It is 133 ms against 0.060, it costs 596 ms–4.5 s of
 cold compile against 6.3 ms, and at 4× it lost the device.
@@ -138,27 +166,68 @@ re-encodes on every frame — has been **removed rather than moved**. ADR 0050 d
 it was never this seam: the glyph atlas has nothing to do with residue-clip tiling. The
 claim was also too broad, which is its own lesson and is now a trap below.)*
 
+### 3. A ramp's subdomain boundary belongs to the subfunction that starts there
+
+Found on 2026-08-15 by the first unit tests `device/ramp.rs` has ever had, which is the
+argument for writing them: the function had been exercised only through a rendered frame, and
+a rendered frame could not see this.
+
+§7.10.4's subdomains are **closed on the left**, so a bound belongs to the subfunction
+starting there, and a coincident stop pair should take the *later* stop's colour at exactly
+that point. `ramp_color_at` reaches the earlier stop's interval first (`t <= stop.offset`
+with `u == 1`) and returns the earlier colour; the `span <= 0.0` branch that was meant to
+implement the clause is **unreachable for a validated ramp**. It is reachable in output: a
+boundary whose offset lands on the sampling grid puts one texel of 4 096 on the wrong side
+(verified — offset `2048/4095` gives texel 2048 red where the clause says blue), and a
+coincident pair at 0 or 1 always does.
+
+**The fix is a `<` for a `<=`.** It was deliberately not taken in the debt round, because it
+moves bytes and "the corpus is part of a change, not a check after it" — so it wants a round
+with the corpus in it, which is an hour rather than a minute. `device/ramp.rs`'s comments
+carry the reasoning and the test asserts the two sides of the boundary while saying in its
+own comment why the bound itself is not asserted.
+
 ### Small debts, none blocking
 
-- **`encode.rs` is 2 406 lines**, and since ADR 0051's round and the `device.rs` split it is
-  the last source file far past the ~500-line smell. `device.rs` is now 235 lines over eleven
-  submodules, and **the ramp-sampling debt this list carried for several rounds is closed** —
-  `sample_ramp`, `ramp_color_at` and `RAMP_RESOLUTION` live in `device/ramp.rs`, which touches
-  no GPU handle. They still have no unit test: §7.10.4's half-open stitching rule is checked
-  only through a rendered frame, and they are now directly testable.
-- **`tests/retained_frame.rs` is 1 139 lines** and `tests/` has no `common/` module, so a
-  half-dozen fixtures are built separately by three test files.
-- **The 7 `cargo doc` warnings** are all "public documentation links to private item", in
-  `mask.rs`, `pipeline.rs` and `retained.rs`. They predate ADR 0051's round and none is new.
+- **`encode.rs` is 2 421 lines**, and it is now the only source file far past the ~500-line
+  smell: `device.rs` is 235 lines over eleven submodules, and the debt round below closed the
+  rest. Splitting it is the next structural round, and it wants to happen *before* the
+  recording and tiling work rather than under it.
 - **`SceneBuilder::image` refuses a bad image alpha with `SceneError::InvalidGroupAlpha`**
   — a shared variant. Public API, so it is a bump's business rather than a refactor's.
-- **Three small things the `device.rs` split found and left**, each a few minutes for whoever
-  next opens the file: `take_pass_query` carries a doc opening line from when `PassQuery::new`
-  sat beside it (preserved verbatim by the move rule, and now wrong); `pipelines()` and
-  `pipeline_store()` are two accessors for one field with one `#[allow(dead_code)]`, and
-  `gpu()`/`queue()`/`wgpu()` three over the same handles; and **nothing checks a uniform's byte
-  offsets against the WGSL `Params` it mirrors** — wgpu catches size only, so a reordered field
-  pair of the same width would pass every gate in the tree.
+- **`tests/shader_copies.rs` keeps its own `include_str!` list of the shader files**, which
+  since the layout gate is the second such list beside `src/shaders.rs`. An integration test
+  cannot reach a private module, so closing it means deciding whether that list is public.
+- **What the test reorganisation deliberately did not unify.** The two-argument `render`,
+  `alpha`, `pixel` and `deviation_from_the_clause` each index a raster through their own
+  file's `SIZE`, so one home for them is one home for `SIZE` — and `SIZE` means 64 in six
+  files and something else in four others, which is a decision about what those probes are
+  rather than a refactor. **`alpha` is the reason to be careful**: its text is identical in
+  `coverage_lanes.rs` and `mask_regions.rs` and the `SIZE` it reads is *not*.
+  `deviation_from_the_clause` is §11.4.6's arithmetic written out three times, two identical
+  and the third in `function_knockout.rs`; giving it one home is a round that must touch that
+  file too. Two smaller ones left where they were: `m1.rs`'s `max_byte_diff` doc credits the
+  function with PNG artefacts its *caller* writes, and `m1.rs` and `m3.rs` each state their
+  own derivation of `UNORM_TOLERANCE = 2`, which is why the constant was not merged.
+- **Three gaps in the function lane**, named in `doc/notes-function-wiring.md` §4.5 and found
+  by reading rather than by a failure: a clip and a soft mask over a function paint are never
+  anything but 1 anywhere in the tree, no function test runs `Coverage::Gpu`, and ADR 0025's
+  `DestOut`/`Plus` stages are compiled and selected but never drawn.
+
+**Closed by the 2026-08-15 debt round**, listed once so nobody re-proposes them: the rustdoc
+warnings (all eleven in the workspace, and `cargo doc --workspace --no-deps` under
+`RUSTDOCFLAGS=-D warnings` is a CI step now, which is why seven could accumulate unseen);
+`take_pass_query`'s stale opening line; the duplicate accessors (`pipeline_store()` and
+`gpu()`/`queue()` deleted, with the `#[allow(dead_code)]`); the uniform byte-offset check,
+which is `src/shaders/layout.rs` deriving each field's offset from the shader source by
+WGSL §14.4.4 and §14.4.6 and covering all nine host writers, verified able to fail from both
+sides (a host struct's `vec2f` pair exchanged, and two fields exchanged in `blit.wgsl`);
+`device/ramp.rs`'s missing unit tests, six of them, each expectation derived from its clause;
+and both test-suite debts — `retained_frame.rs` is five files along its own comment's seams
+(`retained_replay`, `retained_atlas`, `retained_invalidation`, `retained_refusals`,
+`retained_handle` — the fifth responsibility was in the file and *not* in its comment), with
+`tests/common/` holding the fixtures that had copies. 403 tests before and after, the same
+names.
 
 ## Instruments — how to measure without re-deriving it
 
@@ -181,6 +250,12 @@ claim was also too broad, which is its own lesson and is now a trap below.)*
   `tests/archetypes.rs` before believing any of it** — that is what says the harness encoded
   §6.2's page. Delete the harness with the round; `Cargo.toml`'s note on `criterion` is the
   standing decision that a benchmark harness does not live in this tree.
+- **What a generated shader costs to compile**: `examples/function_compile.rs` — a §7.10.5
+  program's shader, timed by the program's length. It reads a **direct span** that
+  `PipelineStore::function_pipeline` already brackets rather than a subtraction, its own
+  `CARGO_TARGET_DIR`, round 0 reported apart, minima of round-robin rounds with the load
+  average beside them. Every sample must be a program **no process has compiled**, because
+  RADV's on-disk cache keys on SPIR-V — the trap that cost the spike a round.
 - **A page of curve-clipped marks**: `examples/residue_clip.rs` — the artwork archetype,
   headless into a texture, `instrument_encode` on, minima of twenty steady frames with the
   first reported apart and the load average printed beside them. It prints
@@ -315,6 +390,19 @@ reserved keyword in `blit.wgsl` panicked the warm-up thread inside wgpu, and eve
 that calls `wait_until_warm` then waited on a `Condvar` with no notifier left alive — an
 infinite hang with no output at all. If you ever see a silent hang again, suspect the same
 shape: a `Condvar` whose only notifier can leave without notifying.
+
+**A clippy run that says "Finished" may not have looked at your file.** Eight edited test
+files in the shared `/home/AI/cargo-target/quorra`, and `RUSTFLAGS=-D warnings cargo clippy
+--workspace --all-targets` reported clean while five of them held an unused import — which
+failed the moment the files were `touch`ed. Before believing a green gate on a fresh edit,
+check that cargo printed `Checking <crate>` and not only `Finished`. Clippy *does* lint
+integration tests; that was verified by planting a lint and watching it fail, which is the
+right way to settle "did the gate look at this?" in either direction.
+
+**A pipeline's exit status is the last command's.** `cargo test --workspace 2>&1 | tail -80`
+exits 0 when cargo fails, because `tail` succeeded, and the tail of a passing run and of a
+failing one both end in doctests. Redirect to a file and read cargo's own status, or set
+`pipefail`; a status read through a pipe is not evidence that a suite passed.
 
 **The shared cargo target dir is not yours alone.** Sibling agents in other worktrees build
 the same crate and example names into `/home/AI/cargo-target/quorra`, and
