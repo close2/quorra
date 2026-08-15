@@ -38,6 +38,8 @@
 //!   honour one.
 //! - `rare` — the same for the image and shading quads, which the brief's §0 calls the
 //!   rare case.
+//! - `record` — phase 3: the route a frame's content takes to the target, recorded
+//!   into one submission.
 //! - `staging` — phase 2: the buffers and textures one frame stages before anything is
 //!   recorded.
 //! - `textures` — the textures a device makes, and the usages each one asks for.
@@ -47,6 +49,7 @@ mod bound;
 mod damage;
 mod ramp;
 mod rare;
+mod record;
 mod staging;
 mod textures;
 
@@ -66,14 +69,12 @@ use quorra_scene::{
 use self::bound::Bound;
 use self::damage::DamagePlan;
 use self::ramp::{RAMP_RESOLUTION, sample_ramp};
-use self::staging::Upload;
 
 use crate::atlas::AtlasStore;
-use crate::compose::{self, Executor, PassLoad, Region};
 use crate::encode::{self, Encoded};
 use crate::error::{DeviceError, RenderError};
 use crate::frame::{Counters, EncodeSource, Frame, Payload, Raster, TimingProvenance, Timings};
-use crate::layers::{self, LayerPool};
+use crate::layers;
 use crate::pipeline::PipelineStore;
 use crate::readback;
 use crate::report::Report;
@@ -167,9 +168,6 @@ struct StartupSteps {
     adapter_selection: Duration,
     device_creation: Duration,
 }
-
-/// One frame's per-pass durations and one-off costs.
-type FramePhases = Vec<(&'static str, Duration)>;
 
 impl Device {
     /// A headless device: no window, no surface. The form the caller's test suite and
@@ -1004,111 +1002,6 @@ impl Device {
             self.atlas.reset();
         }
         repack
-    }
-
-    /// Phase 3: the whole device side of one frame — mask realisation, layers,
-    /// composites, the flat fast path, timestamps — recorded and submitted.
-    fn run_frame(
-        &mut self,
-        encoded: &Encoded,
-        bound: &Bound<'_>,
-        upload: Upload,
-        query: Option<&PassQuery>,
-        damage: &DamagePlan,
-    ) -> Result<(Duration, FramePhases, u32), RenderError> {
-        let width = bound.texture().width();
-        let height = bound.texture().height();
-        let mut recorder = self
-            .gpu
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("quorra frame"),
-            });
-        let flat = Executor::is_flat(encoded);
-        let patch = match damage {
-            DamagePlan::Patch { bbox, rects } if !rects.is_empty() => Some((*bbox, rects)),
-            _ => None,
-        };
-        let dummy_view = self.ensure_dummy();
-        let mask_count = encoded.mask_plans.len();
-        // Taken, not borrowed: it belongs to the first frame of its size and to no other.
-        let warmed = match self.warmed_layer.take() {
-            Some((w, h, pair)) if (w, h) == (width, height) => Some(pair),
-            _ => None,
-        };
-        let mut executor = Executor {
-            device: self,
-            encoded,
-            width,
-            height,
-            // Empty unless a host called `warm_for` for this size, which puts one pair
-            // in it: a plan's pair is otherwise created on its first acquire, so a flat
-            // frame creates none at all (ADR 0020).
-            pool: LayerPool::warmed(warmed),
-            masks: (0..mask_count).map(|_| None).collect(),
-            rect_buffer: upload.rect_instances,
-            quad_buffer: upload.quad_instances,
-            lane_binds: HashMap::new(),
-            scratch_view: upload.scratch_view.as_ref().map(|(_, view)| view.clone()),
-            dummy_view,
-            atlas_view: self.atlas_texture.as_ref().map(|(_, view)| view.clone()),
-            first_pass_stamped: false,
-            query,
-            phases: Vec::new(),
-            scissor: patch.map(|(bbox, _)| bbox),
-            region: Region::whole(width, height),
-        };
-        let target_view = bound
-            .texture()
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let target_format = bound.texture().format();
-        if let Some((_, rects)) = patch {
-            // The patched path (ADR 0012): render the frame into the root pair,
-            // every pass scissored to the damage bounding box, then replace exactly
-            // the damage rectangles on the caller's retained texture.
-            executor.realise_masks(&mut recorder)?;
-            let root = executor.render_plan(&mut recorder, 0, None)?;
-            executor.patch_to_target(
-                &mut recorder,
-                &root.view(),
-                root.region(),
-                &target_view,
-                target_format,
-                rects,
-            )?;
-        } else if matches!(damage, DamagePlan::Patch { .. }) {
-            // Every damage rect fell outside the target: nothing visible changed,
-            // and honouring the list exactly means touching no pixel at all.
-        } else if flat {
-            // is_flat checked: a flat root holds drawable ops only.
-            let root_ops = compose::run_ops(&encoded.root.ops);
-            executor.draw_pass(
-                &mut recorder,
-                &target_view,
-                target_format,
-                PassLoad::Clear,
-                &root_ops,
-            )?;
-        } else {
-            executor.realise_masks(&mut recorder)?;
-            let root = executor.render_plan(&mut recorder, 0, None)?;
-            executor.blit_to_target(
-                &mut recorder,
-                &root.view(),
-                root.region(),
-                &target_view,
-                target_format,
-            )?;
-        }
-        executor.end_stamp(&mut recorder, &target_view);
-        let layer_textures = u32::try_from(executor.pool.peak()).unwrap_or(u32::MAX);
-        let phases = std::mem::take(&mut executor.phases);
-        drop(executor);
-        if let Some(q) = query {
-            recorder.resolve_query_set(&q.set, 0..2, &q.resolve, 0);
-            recorder.copy_buffer_to_buffer(&q.resolve, 0, &q.map, 0, 16);
-        }
-        let execute_wall = compose::submit_and_wait(self, recorder)?;
-        Ok((execute_wall, phases, layer_textures))
     }
 
     /// Phase 4: resolve. Only `Readback` pays anything here (§6.1: this is the cost
