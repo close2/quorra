@@ -38,6 +38,8 @@
 //!   honour one.
 //! - `rare` — the same for the image and shading quads, which the brief's §0 calls the
 //!   rare case.
+//! - `staging` — phase 2: the buffers and textures one frame stages before anything is
+//!   recorded.
 //! - `textures` — the textures a device makes, and the usages each one asks for.
 
 mod binds;
@@ -45,6 +47,7 @@ mod bound;
 mod damage;
 mod ramp;
 mod rare;
+mod staging;
 mod textures;
 
 use std::collections::HashMap;
@@ -63,6 +66,7 @@ use quorra_scene::{
 use self::bound::Bound;
 use self::damage::DamagePlan;
 use self::ramp::{RAMP_RESOLUTION, sample_ramp};
+use self::staging::Upload;
 
 use crate::atlas::AtlasStore;
 use crate::compose::{self, Executor, PassLoad, Region};
@@ -166,18 +170,6 @@ struct StartupSteps {
 
 /// One frame's per-pass durations and one-off costs.
 type FramePhases = Vec<(&'static str, Duration)>;
-
-/// Phase 2's product: the frame's buffers and textures, scheduled for upload.
-struct Upload {
-    /// `None` for a lane with nothing to draw — wgpu is never handed a zero-length
-    /// buffer (§5: the `debug_layers` lesson).
-    rect_instances: Option<wgpu::Buffer>,
-    quad_instances: Option<wgpu::Buffer>,
-    /// The frame's scratch coverage texture, kept alive until the submit.
-    scratch_view: Option<(wgpu::Texture, wgpu::TextureView)>,
-    bytes: u64,
-    time: Duration,
-}
 
 impl Device {
     /// A headless device: no window, no surface. The form the caller's test suite and
@@ -1192,202 +1184,6 @@ impl Device {
             }),
             Target::Surface => Err(RenderError::ZeroSizeTarget { target: "Surface" }),
             Target::Texture(_) => Err(RenderError::ZeroSizeTarget { target: "Texture" }),
-        }
-    }
-
-    /// Phase 2: create the frame's buffers and textures, sized by phase 1's counts,
-    /// and schedule their uploads.
-    ///
-    /// # Errors
-    ///
-    /// Whatever the GPU coverage lane refuses: its sheet is a texture like any other
-    /// and is bounded by the adapter's dimension.
-    fn upload(&mut self, encoded: &Encoded) -> Result<Upload, RenderError> {
-        let started = Instant::now();
-        // The globals are per plan now (ADR 0036) and made where the pass is recorded,
-        // so nothing is charged here for them.
-        let mut bytes = 0_u64;
-        let make_instances = |gpu: &wgpu::Device, queue: &wgpu::Queue, label, data: &[u8]| {
-            if data.is_empty() {
-                None
-            } else {
-                let buffer = gpu.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(label),
-                    size: data.len() as u64,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                queue.write_buffer(&buffer, 0, data);
-                Some(buffer)
-            }
-        };
-        let rect_instances = make_instances(
-            &self.gpu,
-            &self.queue,
-            "quorra rect instances",
-            &encoded.rect_instances,
-        );
-        let quad_instances = make_instances(
-            &self.gpu,
-            &self.queue,
-            "quorra quad instances",
-            &encoded.quad_instances,
-        );
-        bytes = bytes
-            .saturating_add(encoded.rect_instances.len() as u64)
-            .saturating_add(encoded.quad_instances.len() as u64);
-
-        let scratch_view = self.upload_scratch(encoded, &mut bytes)?;
-        self.flush_atlas_tiles(&mut bytes);
-
-        Ok(Upload {
-            rect_instances,
-            quad_instances,
-            scratch_view,
-            bytes,
-            time: started.elapsed(),
-        })
-    }
-
-    /// The frame's scratch coverage sheet: the CPU lane's bytes uploaded, the GPU
-    /// lane's tiles drawn, into one texture.
-    ///
-    /// One sheet with two producers is the whole of the GPU lane's integration (ADR
-    /// 0016): downstream, a coverage quad names a rectangle of *this* texture and has
-    /// no idea which lane put the bytes there. The upload goes first because the draw
-    /// loads what it finds — a tile the GPU draws covers only its own rectangle, so
-    /// the CPU lane's bytes elsewhere on the sheet survive it.
-    ///
-    /// **Borrowed, not taken.** Both of these used to be moved out of the `Encoded`,
-    /// which is what a frame that owns its encode can afford; a retained encode is
-    /// replayed by later frames, so the sheet it names has to survive its first upload
-    /// (ADR 0048, and ADR 0045's invalidation list named this as the one plumbing
-    /// change the design needs).
-    fn upload_scratch(
-        &mut self,
-        encoded: &Encoded,
-        bytes: &mut u64,
-    ) -> Result<Option<(wgpu::Texture, wgpu::TextureView)>, RenderError> {
-        let Some(scratch) = encoded.scratch.as_ref() else {
-            return Ok(None);
-        };
-        let winding = &encoded.winding;
-        let mut usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
-        if !winding.is_empty() {
-            // COPY_SRC with it, so a test can read the sheet back and hold the two
-            // lanes to a stated difference rather than to a hope.
-            usage |= wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
-        }
-        let texture = self.gpu.create_texture(&wgpu::TextureDescriptor {
-            label: Some("quorra scratch coverage"),
-            size: wgpu::Extent3d {
-                width: scratch.width,
-                height: scratch.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage,
-            view_formats: &[],
-        });
-        if !scratch.data.is_empty() {
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &scratch.data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(scratch.width),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d {
-                    width: scratch.width,
-                    height: scratch.height,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        *bytes = bytes.saturating_add(scratch.data.len() as u64);
-        if !winding.is_empty() {
-            *bytes = bytes.saturating_add(winding.device_bytes());
-            crate::winding::render_into(
-                &self.gpu,
-                &self.queue,
-                &self.pipelines,
-                &mut self.winding_texture,
-                &view,
-                winding,
-                self.coverage_samples,
-                if scratch.data.is_empty() {
-                    crate::winding::SheetUse::LaneAlone
-                } else {
-                    crate::winding::SheetUse::BesideCpuBytes
-                },
-                self.limits.max_target_size,
-            )?;
-        }
-        Ok(Some((texture, view)))
-    }
-
-    /// New glyph tiles into the persistent atlas texture (created on first need —
-    /// the startup path never pays for it, §7).
-    fn flush_atlas_tiles(&mut self, bytes: &mut u64) {
-        let pending = self.atlas.take_pending();
-        if pending.is_empty() {
-            return;
-        }
-        let (atlas_w, atlas_h) = self.atlas.dimensions();
-        let (texture, _) = self.atlas_texture.get_or_insert_with(|| {
-            let texture = self.gpu.create_texture(&wgpu::TextureDescriptor {
-                label: Some("quorra glyph atlas"),
-                size: wgpu::Extent3d {
-                    width: atlas_w,
-                    height: atlas_h,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            (texture, view)
-        });
-        for tile in pending {
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: tile.x,
-                        y: tile.y,
-                        z: 0,
-                    },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &tile.pixels,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(tile.width),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d {
-                    width: tile.width,
-                    height: tile.height,
-                    depth_or_array_layers: 1,
-                },
-            );
-            *bytes =
-                bytes.saturating_add(u64::from(tile.width).saturating_mul(u64::from(tile.height)));
         }
     }
 
