@@ -46,6 +46,7 @@ row, since a number without one is not evidence.
 | — the floor a *one*-instruction program still pays | 2.67 / 2.04 ms | same; that is `function_lane.wgsl` parsed and built, not the program |
 | the caller's corpus at scale 1 | **931** agree / 23 differ / 2 refused / 18 not comparable | their tree, one copy, 2026-08-15 |
 | the caller's corpus at scale 4 | **936** / 10 / 5 / 23 | same copy, same hour |
+| — the same lane re-run a day later, against an unchanged quorra | 936 / **11 / 4** / 23 | a second copy, 2026-08-15 (ADR 0055): their tree moved a page from *refused* to *differs*, which is why a count in an older document is never a baseline |
 
 **The whole matrix, base against the merged round, in one copy of their tree within one
 hour** — which is the only form `HANDOVER.md` accepts. Base is `6ed67f0`, the commit before
@@ -117,13 +118,14 @@ on the GPU.
   and a soft mask over this paint are never anything but 1 anywhere in the tree, no function
   test runs `Coverage::Gpu`, and ADR 0025's `DestOut`/`Plus` stages are selected but never
   drawn.
-- **A ramp's subdomain boundary disagrees with §7.10.4** (found 2026-08-15, not yet fixed).
-  The clause's subdomains are closed on the left, so a bound belongs to the subfunction that
-  starts there; `ramp_color_at` gives it to the earlier one. One texel of 4 096 whenever a
-  boundary lands on the sampling grid, and always for a coincident stop pair at 0 or 1. The
-  fix is one comparison and it moves bytes, so it owes a corpus round — `HANDOVER.md` item 3.
-  It was found by the first unit tests that function has ever had, which is the argument for
-  the tests rather than for the frame that could not see it.
+- **A ramp's subdomain boundary now follows §7.10.4** (ADR 0055, 2026-08-15). A bound belongs
+  to the subfunction that starts there, except at the clause's own two exceptions, which
+  point opposite ways: the last interval is closed on the right, and where `Domain0 =
+  Bounds0` the first is closed on both sides. The corpus moved one page line of 956 —
+  `issue10572.pdf` at scale 4, toward the oracle — with no verdict and no refusal moved. It
+  was found by the first unit tests that function has ever had, and half of the first
+  statement of it was wrong: the fix was checked against the clause text rather than against
+  the pattern the clause's opening sentence suggested.
 - **The crate's uniform layouts are gated rather than reviewed.** `src/shaders/layout.rs`
   derives every field's offset from the shader source by WGSL §14.4.4 and §14.4.6 and checks
   all nine host writers field-for-field; it opens no device, so it is adapter-independent,

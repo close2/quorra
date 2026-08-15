@@ -62,11 +62,11 @@ ADR 0023 had answered it.
 
 ## What to do next, in this order
 
-Three items, and the ordering reason is one sentence: **the caller conversation is the older
-problem and costs an afternoon, the tiling seam is the only work left with milliseconds in
-it and wants its own measurement before its own design, and the ramp's boundary is a clause
-we read wrong — cheap to fix, and it moves bytes, so it costs a corpus round rather than an
-edit.**
+Two items, and the ordering reason is one sentence: **the caller conversation is the older
+problem and costs an afternoon, while the tiling seam is the only work left with
+milliseconds in it and wants its own measurement before its own design.** A third item — the
+ramp's subdomain boundary — closed as ADR 0055 and is kept below for one round because of
+how it closed.
 
 ### 1. The adoption round with the caller — cheap, and overdue
 
@@ -166,33 +166,50 @@ re-encodes on every frame — has been **removed rather than moved**. ADR 0050 d
 it was never this seam: the glyph atlas has nothing to do with residue-clip tiling. The
 claim was also too broad, which is its own lesson and is now a trap below.)*
 
-### 3. A ramp's subdomain boundary belongs to the subfunction that starts there
+### 3. A ramp's subdomain boundary — **closed, ADR 0055**
 
-Found on 2026-08-15 by the first unit tests `device/ramp.rs` has ever had, which is the
-argument for writing them: the function had been exercised only through a rendered frame, and
-a rendered frame could not see this.
+Kept here for one round because of *how* it closed, not that it did. §7.10.4's subdomains
+are "half-open intervals, closed on the left and open on the right", so `ramp_color_at` now
+compares with `<` and a bound belongs to the subfunction that starts there.
 
-§7.10.4's subdomains are **closed on the left**, so a bound belongs to the subfunction
-starting there, and a coincident stop pair should take the *later* stop's colour at exactly
-that point. `ramp_color_at` reaches the earlier stop's interval first (`t <= stop.offset`
-with `u == 1`) and returns the earlier colour; the `span <= 0.0` branch that was meant to
-implement the clause is **unreachable for a validated ramp**. It is reachable in output: a
-boundary whose offset lands on the sampling grid puts one texel of 4 096 on the wrong side
-(verified — offset `2048/4095` gives texel 2048 red where the clause says blue), and a
-coincident pair at 0 or 1 always does.
+**The item as this file first stated it was half wrong, and reading the clause instead of
+extending its pattern is what caught that.** The clause states *two exceptions*, and they
+point in opposite directions: the last interval is always closed on the right, so a
+coincident pair at offset 1 takes the later colour — but where `Domain0 = Bounds0` the first
+interval is closed on **both** sides and the second opens on the left, so a coincident pair
+at offset 0 takes the **earlier** colour, and `t <= first.offset` was already right. Only the
+interior bound and the last offset were wrong. That the assertion at a ramp's *first* offset
+still passes under the old code is the evidence, in the pixels, that the exception at 0 is
+real rather than inferred.
 
-**The fix is a `<` for a `<=`.** It was deliberately not taken in the debt round, because it
-moves bytes and "the corpus is part of a change, not a check after it" — so it wants a round
-with the corpus in it, which is an hour rather than a minute. `device/ramp.rs`'s comments
-carry the reasoning and the test asserts the two sides of the boundary while saying in its
-own comment why the bound itself is not asserted.
+The corpus, base against change in one copy of their tree within one hour, both lanes, both
+scales: **no verdict and no refusal moves, and exactly one page line of 956 changes** —
+`issue10572.pdf` at scale 4, mean 0.1332 → 0.1036 and SSIM 0.99497 → 0.99602, toward the
+oracle, worst tile unchanged. A throwaway probe (run, read, deleted) counted **411 corpus
+ramps, 2 with a coincident bound, 2 bounds landing on the sampling grid**, both in that one
+page's 48-stop ramp — which is what makes the scale-1 null result a measurement rather than
+an absence.
+
+One more instance of the "same copy, same hour" trap came free: the scale-4 base read
+936/11/4/23 (CPU) and 937/10/4/23 (GPU) against the 936/10/5/23 `PLAN.md` carried, because
+their tree moved a page from *refused* to *differs* under us. Nothing regressed.
 
 ### Small debts, none blocking
 
-- **`encode.rs` is 2 421 lines**, and it is now the only source file far past the ~500-line
-  smell: `device.rs` is 235 lines over eleven submodules, and the debt round below closed the
-  rest. Splitting it is the next structural round, and it wants to happen *before* the
-  recording and tiling work rather than under it.
+- **`encode/parallel.rs` at 532 lines is now the only source file past the ~500-line smell.**
+  `encode.rs` is 435 lines over eleven new modules (`doc/notes-encode-split.md`), `device.rs`
+  is 235 over eleven, and the dispatch now has one module per command arm — `rect`, `fill`,
+  `stroke`, `rare`, `layer` — which is the shape the next lane should be added in.
+  `parallel.rs` was left because ADR 0054 had landed in it two commits earlier.
+- **Four things the `encode.rs` split found and left**, in `doc/notes-encode-split.md` §5:
+  `push_op`'s doc comment is two openings for one function — the same defect this file's
+  traps record from `take_pass_query`, now in `encode/plan.rs`; `CULL_MARGIN`'s comment cites
+  `Encoder::push_glyph`, which ADR 0054 deleted; **`fill_solid` repeats `encode_fill`'s
+  `HashMap` lookup of the outline**, once per solid fill on the hottest walk in the tree
+  (4 320 of them on the dense-text archetype), and fixing it needs a lifetime that fights
+  `&mut self`; and `command`'s `#[allow(clippy::only_used_in_recursion)]` no longer fires and
+  is a one-line deletion. `visible_tile` and `coverage_tile` are now adjacent, and their ten
+  lines of identical arithmetic are visible in one screen for the first time.
 - **`SceneBuilder::image` refuses a bad image alpha with `SceneError::InvalidGroupAlpha`**
   — a shared variant. Public API, so it is a bump's business rather than a refactor's.
 - **`tests/shader_copies.rs` keeps its own `include_str!` list of the shader files**, which
