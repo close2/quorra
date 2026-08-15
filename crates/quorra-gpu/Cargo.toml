@@ -22,6 +22,11 @@ pollster.workspace = true
 png.workspace = true
 # The surface-path smoke test's window; see the workspace manifest.
 winit.workspace = true
+# Already a dependency of the library; repeated here so that `tests/function_device.rs` can
+# drive a raw `wgpu` compute pass of its own. That test runs the *generated* WGSL against an
+# independent host evaluation of the same program, which needs a pipeline this crate has no
+# reason to own — checking a shader is not the same job as compositing a frame.
+pollster.workspace = true
 
 [lints]
 workspace = true

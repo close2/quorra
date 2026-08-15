@@ -49,6 +49,20 @@ pub struct RampId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MeshId(pub u32);
 
+/// A compiled ISO 32000-2 §7.10.5 program uploaded to a device, for the type 1 shadings of
+/// §8.7.4.5.2.
+///
+/// The upload is where the program is *admitted*: `quorra_gpu::function::analyse` walks it
+/// there and refuses it by name before any frame is built, so a caller learns its program is
+/// unsupported while it can still fall back, rather than mid-page. It is also where the
+/// shader's content hash is computed, once, which is what `doc/adr/0053` caches by.
+///
+/// It is deliberately **not** a [`ResourceId`] variant yet: `Device::upload_function` and the
+/// release path that variant exists for are the same piece of work, and an identifier a
+/// device can issue but not release would be a resource leak with a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FunctionId(pub u32);
+
 /// A clip region within one scene: a path, a fill rule and an optional parent, so that a
 /// chain is an intersection.
 ///
