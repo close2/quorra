@@ -3,7 +3,7 @@
 //! Everything a pass needs exists before this module runs — the target is bound
 //! (`super::bound`), the buffers are staged (`super::staging`), the bindings are
 //! `super::binds`'s and the passes themselves are `crate::compose`'s. What is decided
-//! here is the **route**, and there are three of them plus one case that takes none:
+//! here is the **route**, and [`Route`] names all four of them:
 //!
 //! - **patched** — the frame renders into the root pair with every pass scissored to
 //!   the damage bounding box, and exactly the damage rectangles are replaced on the
@@ -13,9 +13,9 @@
 //!   slower;
 //! - **layered** — masks realise first, the plan tree renders bottom-up, and the root
 //!   is blitted to the target;
-//! - and a damage list whose every rectangle fell outside the target, which touches no
-//!   pixel at all. That is honouring the list exactly rather than failing to draw, and
-//!   the distinction is why it is a branch with a comment and not an oversight.
+//! - **untouched** — a damage list whose every rectangle fell outside the target, which
+//!   touches no pixel at all. That is honouring the list exactly rather than failing to
+//!   draw, and the distinction is why it is a named route and not a fallthrough.
 //!
 //! The two timestamps that make `Timings::execute` mean first pass to last are
 //! resolved here as well (ADR 0031), because the resolve has to be recorded into the
@@ -37,6 +37,98 @@ use crate::timing::PassQuery;
 /// One frame's per-pass durations and one-off costs.
 pub(super) type FramePhases = Vec<(&'static str, Duration)>;
 
+/// The route one frame's content takes to the target.
+#[derive(Clone, Copy)]
+enum Route<'a> {
+    /// The patched path (ADR 0012): render the frame into the root pair, every pass
+    /// scissored to the damage bounding box, then replace exactly the damage
+    /// rectangles on the caller's retained texture.
+    Patch {
+        bbox: [u32; 4],
+        rects: &'a [[u32; 4]],
+    },
+    /// Every damage rect fell outside the target: nothing visible changed, and
+    /// honouring the list exactly means touching no pixel at all.
+    Untouched,
+    /// A root with no children and no masks, drawn straight into the target — the fast
+    /// path M1 measured.
+    Flat,
+    /// Masks first, then the plan tree bottom-up, then the root onto the target.
+    Layered,
+}
+
+impl<'a> Route<'a> {
+    /// Which of the four a frame takes, from its damage plan and whether its root is
+    /// flat. The order of the arms is the order of the questions: a patched frame
+    /// renders through the root pair even when it is flat.
+    fn of(damage: &'a DamagePlan, flat: bool) -> Self {
+        match damage {
+            DamagePlan::Patch { bbox, rects } if !rects.is_empty() => {
+                Route::Patch { bbox: *bbox, rects }
+            }
+            DamagePlan::Patch { .. } => Route::Untouched,
+            DamagePlan::Full if flat => Route::Flat,
+            DamagePlan::Full => Route::Layered,
+        }
+    }
+
+    /// The rectangle every internal pass is scissored to, where the route has one.
+    fn scissor(&self) -> Option<[u32; 4]> {
+        match self {
+            Route::Patch { bbox, .. } => Some(*bbox),
+            _ => None,
+        }
+    }
+}
+
+/// Record one frame's content along its route, into `recorder`.
+fn record_content(
+    executor: &mut Executor<'_>,
+    recorder: &mut wgpu::CommandEncoder,
+    route: Route<'_>,
+    target: (&wgpu::TextureView, wgpu::TextureFormat),
+) -> Result<(), RenderError> {
+    let (target_view, target_format) = target;
+    match route {
+        Route::Patch { rects, .. } => {
+            executor.realise_masks(recorder)?;
+            let root = executor.render_plan(recorder, 0, None)?;
+            executor.patch_to_target(
+                recorder,
+                &root.view(),
+                root.region(),
+                target_view,
+                target_format,
+                rects,
+            )?;
+        }
+        Route::Untouched => {}
+        Route::Flat => {
+            // is_flat checked: a flat root holds drawable ops only.
+            let root_ops = compose::run_ops(&executor.encoded.root.ops);
+            executor.draw_pass(
+                recorder,
+                target_view,
+                target_format,
+                PassLoad::Clear,
+                &root_ops,
+            )?;
+        }
+        Route::Layered => {
+            executor.realise_masks(recorder)?;
+            let root = executor.render_plan(recorder, 0, None)?;
+            executor.blit_to_target(
+                recorder,
+                &root.view(),
+                root.region(),
+                target_view,
+                target_format,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 impl Device {
     /// Phase 3: the whole device side of one frame — mask realisation, layers,
     /// composites, the flat fast path, timestamps — recorded and submitted.
@@ -55,11 +147,7 @@ impl Device {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("quorra frame"),
             });
-        let flat = Executor::is_flat(encoded);
-        let patch = match damage {
-            DamagePlan::Patch { bbox, rects } if !rects.is_empty() => Some((*bbox, rects)),
-            _ => None,
-        };
+        let route = Route::of(damage, Executor::is_flat(encoded));
         let dummy_view = self.ensure_dummy();
         let mask_count = encoded.mask_plans.len();
         // Taken, not borrowed: it belongs to the first frame of its size and to no other.
@@ -86,51 +174,19 @@ impl Device {
             first_pass_stamped: false,
             query,
             phases: Vec::new(),
-            scissor: patch.map(|(bbox, _)| bbox),
+            scissor: route.scissor(),
             region: Region::whole(width, height),
         };
         let target_view = bound
             .texture()
             .create_view(&wgpu::TextureViewDescriptor::default());
         let target_format = bound.texture().format();
-        if let Some((_, rects)) = patch {
-            // The patched path (ADR 0012): render the frame into the root pair,
-            // every pass scissored to the damage bounding box, then replace exactly
-            // the damage rectangles on the caller's retained texture.
-            executor.realise_masks(&mut recorder)?;
-            let root = executor.render_plan(&mut recorder, 0, None)?;
-            executor.patch_to_target(
-                &mut recorder,
-                &root.view(),
-                root.region(),
-                &target_view,
-                target_format,
-                rects,
-            )?;
-        } else if matches!(damage, DamagePlan::Patch { .. }) {
-            // Every damage rect fell outside the target: nothing visible changed,
-            // and honouring the list exactly means touching no pixel at all.
-        } else if flat {
-            // is_flat checked: a flat root holds drawable ops only.
-            let root_ops = compose::run_ops(&encoded.root.ops);
-            executor.draw_pass(
-                &mut recorder,
-                &target_view,
-                target_format,
-                PassLoad::Clear,
-                &root_ops,
-            )?;
-        } else {
-            executor.realise_masks(&mut recorder)?;
-            let root = executor.render_plan(&mut recorder, 0, None)?;
-            executor.blit_to_target(
-                &mut recorder,
-                &root.view(),
-                root.region(),
-                &target_view,
-                target_format,
-            )?;
-        }
+        record_content(
+            &mut executor,
+            &mut recorder,
+            route,
+            (&target_view, target_format),
+        )?;
         executor.end_stamp(&mut recorder, &target_view);
         let layer_textures = u32::try_from(executor.pool.peak()).unwrap_or(u32::MAX);
         let phases = std::mem::take(&mut executor.phases);
