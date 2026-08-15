@@ -20,8 +20,9 @@ use std::sync::Arc;
 
 use quorra_scene::{ClipId, FillRule, Point, Rect, Scene};
 
+use super::Encoder;
+use super::device_space::{apply, compose, transform_preserves_axes};
 use super::residue::Verdict;
-use super::{Encoder, apply, compose, transform_preserves_axes};
 use crate::error::RenderError;
 use crate::raster::{self, Rule};
 use crate::resources::ResourceStore;

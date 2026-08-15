@@ -38,7 +38,7 @@
 //!
 //! # Why "bit for bit" is a theorem and not a hope
 //!
-//! [`super::apply`] evaluates `a·x + c·y + e` as two multiplies and two additions, so
+//! [`super::device_space::apply`] evaluates `a·x + c·y + e` as two multiplies and two additions, so
 //! each transformed coordinate is `fl(sᵢ + e)` where `sᵢ = fl(fl(a·xᵢ) + fl(c·yᵢ))` is
 //! the linear part alone. IEEE 754 addition is *correctly rounded*, and correct rounding
 //! is monotone: `sᵢ ≥ s_min` implies `fl(sᵢ + e) ≥ fl(s_min + e)`. So the minimum of the
@@ -149,7 +149,7 @@ fn linear_hull_bounds(segments: &[Segment], t: &DeviceTransform) -> Option<[f32;
 #[cfg(test)]
 mod tests {
     use super::{HullMemo, linear_hull_bounds};
-    use crate::encode::apply;
+    use crate::encode::device_space::apply;
     use crate::raster::DeviceTransform;
     use quorra_scene::{OutlineId, Point, Segment};
 
