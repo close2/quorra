@@ -443,9 +443,8 @@ impl Device {
         }
     }
 
-    /// The query set and buffers for one frame's timestamps, when the adapter has
-    /// them.
-    /// This frame's timestamp query, taken out of the device for the duration.
+    /// This frame's timestamp query, taken out of the device for the duration, and
+    /// `None` where the adapter has no timestamps to take.
     ///
     /// **Taken rather than borrowed**, because the frame it belongs to needs `&mut self`
     /// for everything else it does; and taken rather than made, because making one costs
