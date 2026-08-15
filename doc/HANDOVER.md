@@ -132,6 +132,43 @@ cold compile against 6.3 ms, and at 4× it lost the device.
 *(This was **item 5** while three finished items still stood above it, and ADR 0048 and
 `doc/feedback-answers-draft.md` both cite it under that number.)*
 
+**Measured on 2026-08-15 — `doc/notes-tiling-ceiling.md`, and it changes what this item is.**
+The two pages are **two different problems**, and both refuse from **2×** upward rather than
+only at 4×:
+
+- `bug1703683_page2_reduced` refuses because **a residue clip does not bound the tile its
+  mark asks for**. 31 of its 34 tiles are the whole page at 4× — 7 755 264 texels each —
+  while 31 of the 33 seated have an *open* clip rectangle, and the page asks for
+  1 008 561 911 texels where its own chains admit 2 297 897 (**439×**). Median chain box:
+  99 texels.
+- `issue1905` refuses because **its marks are the page**: seven fills wider than the page
+  under a rectangular clip that already bounds them, 1 339 315 879 texels, no residue clip
+  anywhere.
+
+Both want 3.8× and 5.0× the frame budget, so **no sheet-side scheme draws either** — the
+second sheet, a pane cut and a tighter packer all move the refusal to `FrameBudgetExceeded`,
+and the packer is already at **98.6 % and 97.4 % occupancy** when each refuses, so ≤2.6 % of
+slack stands against overshoots of 17 % and 37 %. That retires three of the five candidates
+with numbers rather than with argument.
+
+**What does work is bounding a clipped mark's tile by its chain's own device box** — the box
+`chain_region` already computes and currently uses only to price ADR 0049's cache. Measured
+on the corpus in one copy: `bug1703683_page2_reduced` goes from **refused to agreeing with
+the oracle** at 4× (936/11/4/23 → 937/11/3/23), its coverage from 1 008 561 911 to 2 511 363
+texels (**402×**), every other page line identical to the character at both scales, no second
+pass over the commands, and **nothing paid by a page with no residue clip**. It buys
+`issue1905` nothing, which is the honest half — that page needs a different answer, and
+before spending a round on it, ask the caller whether it refuses in the product or only in
+the gate: the frame that refuses is a whole page at 4× in one target, and a viewer's viewport
+is its window.
+
+**Two instrument debts fall out of the measurement**, and both are the reason it cost a
+patched crate to obtain: `ScratchExhausted { limit }` names the adapter's wall and nothing
+about the frame that hit it, and **a refused frame has no `Counters` at all**; and `Counters`
+has no field for what a frame's coverage costs, so a 402× reduction moves no row of
+`tests/archetypes.rs`. `crates/quorra-gpu/tests/tiling_ceiling.rs` holds both findings in
+public API, both verified able to fail.
+
 Two pages at 4× refuse with `ScratchExhausted` — `bug1703683_page2_reduced.pdf` and
 `issue1905.pdf`, the coverage sheet against the adapter's 16 384 limit, a different ceiling
 from the frame budget. **It is the only *budget* that refuses a frame we could otherwise
@@ -407,6 +444,17 @@ reserved keyword in `blit.wgsl` panicked the warm-up thread inside wgpu, and eve
 that calls `wait_until_warm` then waited on a `Condvar` with no notifier left alive — an
 infinite hang with no output at all. If you ever see a silent hang again, suspect the same
 shape: a `Condvar` whose only notifier can leave without notifying.
+
+**Cargo can call a stale artefact fresh, and a test *count* is how you catch it.** Four merge
+verifications in the 2026-08-15 debt round reported `cargo test --workspace` green while the
+`quorra-gpu` lib binary being run was the one built at `619ef3b` — **89 unit tests where the
+tree had 112**, so the layout gate and the ramp tests that had just merged were never
+executed, and nothing failed because nothing ran. The tell was arithmetic: the total dropped
+by 21 across a merge that added two files. `RUSTFLAGS="-D warnings" cargo test -- --list`
+read 89 while the same command without `RUSTFLAGS` read 112, and `touch`ing one source file
+restored it. So: **compare a suite's test count against `grep -rc '#\[test\]'` before
+believing a green run**, especially in the shared target dir, and touch the tree when a merge
+has just landed. A count is exact where a duration is not — the same seam ADR 0052 drew.
 
 **A clippy run that says "Finished" may not have looked at your file.** Eight edited test
 files in the shared `/home/AI/cargo-target/quorra`, and `RUSTFLAGS=-D warnings cargo clippy

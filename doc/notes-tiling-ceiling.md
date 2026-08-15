@@ -152,11 +152,15 @@ the sheet and 1 256 small ones carrying the rest.
 
 Five places, and only one of them is a decision:
 
-- **`encode.rs::coverage_tile`** — `shape bounds ∩ resolved.rect ∩ target`, floored and
+*(Written against the tree before `encode.rs` was split into eleven modules; the two
+citations below were repointed at `encode/coverage.rs` when the round merged. Everything
+else in this section still names the file it named.)*
+
+- **`encode/coverage.rs::coverage_tile`** — `shape bounds ∩ resolved.rect ∩ target`, floored and
   ceiled to whole pixels. It charges that box, calls `raster::fill_mask` over exactly it,
   and only *then* asks `residue_intersection` for the clip coverage to multiply in. The
   residue arrives after the size is already fixed.
-- **`encode.rs::visible_tile`** — the same arithmetic without rasterising, for the GPU
+- **`encode/coverage.rs::visible_tile`** — the same arithmetic without rasterising, for the GPU
   lane; `commit.rs::tile_bound` uses it to price a queued job.
 - **`encode/parallel/commit.rs::deferrable_bounds`** — `clip ∩ target` for a deferred
   sheet job, and its own doc comment says it is "the same bound `coverage_tile` computes
