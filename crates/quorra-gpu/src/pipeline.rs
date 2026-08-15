@@ -33,15 +33,15 @@
 //! back a handle either way and the error goes to the device's uncaptured-error
 //! handler, whose default is to panic — on whatever thread was compiling, which for
 //! the warm set is a thread nobody is listening to. Every compile here therefore runs
-//! inside a validation error scope ([`captured`]), a captured failure becomes a
-//! [`PipelineProblem`], and [`PipelineStore::get`] is fallible so the frame that needed
+//! inside a validation error scope (`captured`), a captured failure becomes a
+//! [`PipelineProblem`], and the store's `get` is fallible so the frame that needed
 //! the pipeline is refused by name (ADR 0042). What the warm-up thread ends with is
-//! recorded in [`WarmUp`] on **every** exit path, so [`PipelineStore::wait_until_warm`]
+//! recorded in [`WarmUp`] on **every** exit path, so its `wait_until_warm`
 //! always returns.
 //!
 //! Fallibility is what the module's three files are split along: `layouts.rs` is the
-//! half of a pipeline no adapter can refuse, `spec.rs` is what each [`Kind`] *is*, and
-//! this file is the store — its one lock, its laziness and its warm-up.
+//! half of a pipeline no adapter can refuse, `spec.rs` is what each pipeline `Kind`
+//! *is*, and this file is the store — its one lock, its laziness and its warm-up.
 //!
 //! # Shaders are code, and this project's rules apply to them
 //!

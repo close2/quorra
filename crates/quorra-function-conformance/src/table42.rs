@@ -90,9 +90,10 @@ pub enum Table42 {
     True,
     /// `xor`.
     Xor,
-    /// `if`, which reaches us lowered to [`FnOp::JumpUnless`].
+    /// `if`, which reaches us lowered to [`quorra_scene::function::FnOp::JumpUnless`].
     If,
-    /// `ifelse`, which reaches us lowered to [`FnOp::JumpUnless`] and [`FnOp::Jump`].
+    /// `ifelse`, which reaches us lowered to [`quorra_scene::function::FnOp::JumpUnless`]
+    /// and [`quorra_scene::function::FnOp::Jump`].
     Ifelse,
     /// `copy`.
     Copy,

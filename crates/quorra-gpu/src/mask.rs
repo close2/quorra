@@ -22,11 +22,11 @@
 //! for a *fully transparent* pixel — `transfer[0]` under §11.5.2's alpha rule, and the
 //! transferred luminosity of §11.5.3's backdrop under the luminosity one, which is why a
 //! luminosity mask with a white backdrop admits everything outside its group and one with
-//! the caller's default black admits nothing. [`MaskPlacement::outside`] carries that
+//! the caller's default black admits nothing. A placement's `outside` carries that
 //! constant, and a mask that is absent altogether is the placement with no area at all,
 //! whose every sample is therefore its `outside` of 1.
 //!
-//! [`transparent_value`] is a second implementation of `reduce.wgsl`'s own arithmetic for
+//! `transparent_value` is a second implementation of `reduce.wgsl`'s own arithmetic for
 //! the transparent case, on the CPU because five uniforms need the number before any pass
 //! runs. Two implementations of one rule is what the reduction already is (that one
 //! against the caller's `SoftMask::value`, §4.2), and it is held the same way: by a test

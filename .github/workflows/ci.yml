@@ -32,6 +32,14 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy, all targets, warnings as errors
         run: cargo clippy --workspace --all-targets
+      # A rustdoc warning is a published page with a dead reference on it, and seven of
+      # them accumulated unnoticed because nothing here ever ran rustdoc. `missing_docs`
+      # is already a compile error; this is the other half — the links between the items
+      # it forces to exist.
+      - name: Documentation builds without a warning
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
       - name: Tests (unit, golden, byte-equality and refusal gates)
         run: cargo test --workspace
       - name: Perf gate (release, timestamp queries)

@@ -17,7 +17,7 @@
 //! - [`corpus`] — the cases themselves, one family per module: at least one program per
 //!   Table 42 operator, the cases where implementations drift, §7.10's two clips, and one
 //!   program per refusal ground.
-//! - [`reference`] — an evaluator written from the clause, which the corpus's own test
+//! - [`mod@reference`] — an evaluator written from the clause, which the corpus's own test
 //!   runs every case through. Where an expectation and the evaluator disagree, one of
 //!   them has misread ISO 32000-2 or PLRM3, and finding out which is the point.
 //!
