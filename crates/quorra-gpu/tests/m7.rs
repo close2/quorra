@@ -22,39 +22,13 @@ use std::sync::Arc;
 use quorra_gpu::{Device, Options, RenderError, Target, Viewport};
 use quorra_scene::{
     Affine, BlendMode, Color, Compose, FillRule, ImageFilter, ImageId, ImageSpec, MeshId, MeshSpec,
-    Paint, Point, RampId, Rect, Scene, SceneBuilder, Segment, ShadingKind, Stop,
+    Paint, Point, RampId, Rect, SceneBuilder, Segment, ShadingKind, Stop,
 };
 
-fn device() -> Device {
-    Device::headless(&Options {
-        adapter: Some("llvmpipe".into()),
-        ..Options::default()
-    })
-    .expect("llvmpipe is present wherever this suite runs")
-}
+mod common;
 
-fn rect_outline(rect: Rect) -> Vec<Segment> {
-    vec![
-        Segment::MoveTo(rect.min),
-        Segment::LineTo(Point::new(rect.max.x, rect.min.y)),
-        Segment::LineTo(rect.max),
-        Segment::LineTo(Point::new(rect.min.x, rect.max.y)),
-        Segment::Close,
-    ]
-}
-
-fn render(device: &mut Device, scene: &Scene, width: u32, height: u32) -> Vec<u8> {
-    device
-        .render(
-            scene,
-            &Viewport::full(width, height, Affine::IDENTITY),
-            Target::Readback,
-        )
-        .expect("renders")
-        .into_raster()
-        .unwrap()
-        .into_pixels()
-}
+use common::headless::{device, render};
+use common::scene::rect_outline;
 
 fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
     let at = ((y * width + x) * 4) as usize;

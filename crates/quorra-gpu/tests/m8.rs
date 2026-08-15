@@ -16,19 +16,15 @@
     clippy::arithmetic_side_effects
 )]
 
-use quorra_gpu::{Device, Options, RenderError, ReportKind, Target, Viewport};
+use quorra_gpu::{Device, RenderError, ReportKind, Target, Viewport};
 use quorra_scene::{Affine, BlendMode, Color, Compose, Point, Rect, Scene, SceneBuilder};
+
+mod common;
+
+use common::headless::device;
 
 /// 64 pixels wide on purpose: 64 × 4 bytes = 256, the buffer-copy row alignment.
 const SIZE: u32 = 64;
-
-fn device() -> Device {
-    Device::headless(&Options {
-        adapter: Some("llvmpipe".into()),
-        ..Options::default()
-    })
-    .expect("llvmpipe is present wherever this suite runs")
-}
 
 fn target_texture(device: &Device) -> wgpu::Texture {
     let (gpu, _) = device.wgpu();

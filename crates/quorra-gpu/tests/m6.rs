@@ -29,32 +29,15 @@
     clippy::too_many_lines
 )]
 
-use quorra_gpu::{Device, Options, Target, Viewport};
+use quorra_gpu::{Device, Options};
 use quorra_scene::{
-    Affine, BlendMode, Color, Compose, FillRule, GroupSpec, MaskKind, Paint, Point, Rect, Scene,
+    Affine, BlendMode, Color, Compose, FillRule, GroupSpec, MaskKind, Paint, Point, Rect,
     SceneBuilder, Segment, Transfer,
 };
 
-fn device() -> Device {
-    Device::headless(&Options {
-        adapter: Some("llvmpipe".into()),
-        ..Options::default()
-    })
-    .expect("llvmpipe is present wherever this suite runs")
-}
+mod common;
 
-fn render(device: &mut Device, scene: &Scene, width: u32, height: u32) -> Vec<u8> {
-    device
-        .render(
-            scene,
-            &Viewport::full(width, height, Affine::IDENTITY),
-            Target::Readback,
-        )
-        .expect("renders")
-        .into_raster()
-        .unwrap()
-        .into_pixels()
-}
+use common::headless::{device, render};
 
 fn plain_group() -> GroupSpec {
     GroupSpec {

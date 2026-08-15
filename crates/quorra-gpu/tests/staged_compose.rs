@@ -29,21 +29,17 @@
     clippy::arithmetic_side_effects
 )]
 
-use quorra_gpu::{Device, Options, Target, Viewport};
+use quorra_gpu::{Device, Target, Viewport};
 use quorra_scene::{
     Affine, BlendMode, Color, Compose, FillRule, GroupComposeReason, GroupSpec, MaskKind,
     OutlineId, Paint, Point, Scene, SceneBuilder, SceneError, Segment, StagedComposeReason,
 };
 
-const SIZE: u32 = 64;
+mod common;
 
-fn device() -> Device {
-    Device::headless(&Options {
-        adapter: Some("llvmpipe".into()),
-        ..Options::default()
-    })
-    .expect("llvmpipe is present wherever this suite runs")
-}
+use common::headless::device;
+
+const SIZE: u32 = 64;
 
 fn render(device: &mut Device, scene: &Scene) -> Vec<u8> {
     device
