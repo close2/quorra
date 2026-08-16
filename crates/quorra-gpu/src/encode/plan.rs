@@ -70,14 +70,6 @@ impl Encoder<'_> {
         }
     }
 
-    /// Append an op to the current plan, and grow the plan's bounds to hold it
-    /// (ADR 0036).
-    ///
-    /// Here rather than at the four call sites, because a site that forgot would give a
-    /// plan a texture too small for what it draws — and the mark would be *clipped*,
-    /// which is a plausible-looking wrong page rather than an error. A `Draw` is the
-    /// exception and marks as its instances are pushed: a batch is a range, and the
-    /// rectangles are the instances'.
     /// [`Encoder::append_op`] with the queue drained first: op order is draw order, so
     /// a mark whose coverage is still pending belongs before whatever this op is
     /// (`parallel`). A batch is the exception and goes straight to `append_op`, because
@@ -88,6 +80,14 @@ impl Encoder<'_> {
         Ok(())
     }
 
+    /// Append an op to the current plan, and grow the plan's bounds to hold it
+    /// (ADR 0036).
+    ///
+    /// Here rather than at the four call sites, because a site that forgot would give a
+    /// plan a texture too small for what it draws — and the mark would be *clipped*,
+    /// which is a plausible-looking wrong page rather than an error. A `Draw` is the
+    /// exception and marks as its instances are pushed: a batch is a range, and the
+    /// rectangles are the instances'.
     pub(super) fn append_op(&mut self, op: Op) {
         match &op {
             Op::Image(image) => self.plan_mut().mark(image.dest),

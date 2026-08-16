@@ -63,8 +63,9 @@ pub(super) fn tile_side(low: f32, high: f32) -> u32 {
 /// Two device pixels, and each one is a real mechanism rather than a safety margin:
 /// the glyph lane rasterises at a *quantised* sub-pixel phase, which moves a tile by
 /// under one pixel from the transform its bounds were taken from
-/// ([`Encoder::push_glyph`]); and every coverage tile expands to whole pixels by
-/// `floor`/`ceil`, which reaches under one pixel further again. Flattening adds
+/// ([`Job::glyph`](super::parallel::Job::glyph)); and every coverage tile expands to
+/// whole pixels by `floor`/`ceil`, which reaches under one pixel further again.
+/// Flattening adds
 /// nothing to this — a flattened point lies on the curve, which lies inside the
 /// control hull [`HullMemo::bounds`](super::hull::HullMemo::bounds) measures.
 pub(super) const CULL_MARGIN: f32 = 2.0;
@@ -103,12 +104,13 @@ impl Encoder<'_> {
     /// that would have shown. [`Counters::commands_culled`] reports how often it
     /// fired, so the saving is measured rather than assumed.
     ///
-    /// [`Counters::commands_culled`]: crate::frame::Counters::commands_culled
     /// **What it costs when it wins nothing**, since it runs once per command on the
     /// hottest walk there is: a page with nothing outside the target encodes 6% slower
     /// (5 933 commands, 0.76 → 0.81 ms; ADR 0015's table). Writing the same test on
     /// scalars instead of through [`Rect::intersection`] measured the same 6%, so the
     /// clear construction is the one that stays.
+    ///
+    /// [`Counters::commands_culled`]: crate::frame::Counters::commands_culled
     pub(super) fn culled(&mut self, bounds: (f32, f32, f32, f32), clip: &ResolvedClip) -> bool {
         let (x0, y0, x1, y1) = bounds;
         let reach = Rect::new(

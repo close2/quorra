@@ -342,9 +342,6 @@ pub(crate) fn encode(
 }
 
 impl Encoder<'_> {
-    // `index` names commands in refusals; with only M7's images left to refuse it
-    // currently reaches errors only through nested walks, which the lint misreads.
-    #[allow(clippy::only_used_in_recursion)]
     fn command(&mut self, index: usize, command: &Command) -> Result<(), RenderError> {
         match command {
             Command::Rect {
