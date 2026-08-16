@@ -30,7 +30,7 @@ use crate::layers;
 use crate::pipeline::PipelineStore;
 use crate::resources::ResourceStore;
 use crate::startup::{self, Options, PreSteps, StartupTimings, WarmUp};
-use crate::surface::SurfaceState;
+use crate::surface::{SurfaceSlot, SurfaceState};
 use crate::timing::{PassQuery, TimestampSupport};
 
 /// What asking an adapter for a device produced, and what the asking cost.
@@ -232,7 +232,8 @@ impl Device {
 
         let surface_state = surface
             .map(|surface| SurfaceState::new(surface, &adapter, &info.name))
-            .transpose()?;
+            .transpose()?
+            .map_or(SurfaceSlot::Headless, SurfaceSlot::Held);
 
         let Requested {
             gpu,
@@ -244,7 +245,7 @@ impl Device {
         let pipelines = PipelineStore::new(gpu.clone());
         // A surface device warms the presenting lanes in the surface's own format too,
         // so its first frame does not compile them inside itself (ADR 0043).
-        let warm_up = pipelines.spawn_warm_up(surface_state.as_ref().map(SurfaceState::format));
+        let warm_up = pipelines.spawn_warm_up(surface_state.format());
 
         // A sampler is a descriptor, not a compilation: creating it here costs
         // startup nothing measurable and spares every frame an Option.

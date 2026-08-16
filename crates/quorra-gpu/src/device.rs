@@ -45,6 +45,8 @@
 //!   honour one.
 //! - `bound` — what a frame draws into, and the contract each of the three targets
 //!   must satisfy before it does.
+//! - `present` — the surface leaving and coming back, which is the whole of what this
+//!   device knows about [`crate::present`] (ADR 0056).
 //! - `staging` — phase 2: the buffers and textures one frame stages before anything is
 //!   recorded.
 //! - `record` — phase 3: the route a frame's content takes to the target, recorded
@@ -59,6 +61,7 @@ mod binds;
 mod bound;
 mod construct;
 mod damage;
+mod present;
 mod ramp;
 mod rare;
 mod record;
@@ -77,7 +80,7 @@ use crate::atlas::AtlasStore;
 use crate::pipeline::PipelineStore;
 use crate::resources::ResourceStore;
 use crate::startup::Coverage;
-use crate::surface::SurfaceState;
+use crate::surface::SurfaceSlot;
 pub(crate) use crate::timing::PassQuery;
 use crate::timing::TimestampSupport;
 
@@ -152,7 +155,9 @@ pub struct Device {
     /// one frame after a read fails, which is what returns a poisoned map buffer to a
     /// fresh one.
     pass_query: Option<PassQuery>,
-    surface: Option<SurfaceState>,
+    /// The surface, and who has it: this device, a [`Presenter`](crate::present::Presenter)
+    /// it handed out, or nobody because there never was one (ADR 0056).
+    surface: SurfaceSlot,
     /// The blocking startup steps, each measured on its own (§7, and the caller's
     /// feedback §8.1: one number that measured three could not be attributed).
     startup: StartupSteps,

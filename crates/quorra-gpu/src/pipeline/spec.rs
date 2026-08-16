@@ -6,7 +6,7 @@
 //! entry-point names. The three blend states below are the whole of ADR 0010's algebra
 //! as `wgpu` factors, named once and referred to by name from the arms that use them.
 //!
-//! The table has two axes and is written as two: twelve of the seventeen kinds are a
+//! The table has two axes and is written as two: twelve of the eighteen kinds are a
 //! [`Lane`] family — rectangles, coverage quads, images, shadings — in one of three
 //! [`Style`]s, and the style means the same thing in every family. Three more are the
 //! compositor's full-screen passes, which differ only in what they read. Writing the
@@ -52,6 +52,10 @@ pub(crate) enum Kind {
     Reduce,
     /// Root layer to target, unchanged (`blit.wgsl`).
     Blit,
+    /// One finished layer onto the surface under an affine and a filter
+    /// (`present.wgsl`; premultiplied over, ADR 0056). The only pass a detached
+    /// [`Presenter`](crate::present::Presenter) draws with.
+    Present,
     /// Outline triangles accumulating a winding number (`winding.wgsl` `fs_winding`;
     /// additive, ADR 0016). The GPU coverage lane's first pass.
     Winding,
@@ -252,6 +256,22 @@ impl<'a> Spec<'a> {
                 Self::full_screen("quorra reduce", &modules.reduce, &layouts.reduce_pipe)
             }
             Kind::Blit => Self::full_screen("quorra blit", &modules.blit, &layouts.blit_pipe),
+            // A full-screen triangle like the three above, and the one that blends:
+            // `layers` is a slice, so the second layer of a present has to land *over*
+            // the first rather than replace it, and both are premultiplied rasters —
+            // which is exactly what OVER's factors compose (ADR 0010's algebra, applied
+            // to two finished rasters rather than to a page).
+            Kind::Present => Spec {
+                label: "quorra present",
+                shader: &modules.present,
+                layout: &layouts.present_pipe,
+                vertex: "vs_main",
+                entry: "fs_main",
+                blend: Some(OVER),
+                buffer: None,
+                step: wgpu::VertexStepMode::Instance,
+                strip: false,
+            },
             // Additive, and that is the whole mechanism: what lands in the sheet is
             // the sum of every triangle's ±1, which is the winding number (ADR 0016).
             Kind::Winding => Spec {

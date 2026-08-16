@@ -86,6 +86,7 @@ struct BindLayouts {
     composite: wgpu::BindGroupLayout,
     reduce: wgpu::BindGroupLayout,
     blit: wgpu::BindGroupLayout,
+    present: wgpu::BindGroupLayout,
     sampled: wgpu::BindGroupLayout,
     winding: wgpu::BindGroupLayout,
 }
@@ -109,6 +110,9 @@ pub(crate) struct Layouts {
     pub(crate) reduce: wgpu::BindGroupLayout,
     /// Blit pass: src, and where in it to read (ADR 0038).
     pub(crate) blit: wgpu::BindGroupLayout,
+    /// Present pass: the placement's inverse, the layer (filterable), the sampler
+    /// (ADR 0056).
+    pub(crate) present: wgpu::BindGroupLayout,
     /// The winding resolve's one sampled texture.
     pub(crate) sampled: wgpu::BindGroupLayout,
     /// Winding and resolve passes: the sheet's globals, read by both stages.
@@ -120,6 +124,7 @@ pub(crate) struct Layouts {
     pub(crate) composite_pipe: wgpu::PipelineLayout,
     pub(crate) reduce_pipe: wgpu::PipelineLayout,
     pub(crate) blit_pipe: wgpu::PipelineLayout,
+    pub(crate) present_pipe: wgpu::PipelineLayout,
     pub(crate) winding_pipe: wgpu::PipelineLayout,
     pub(crate) resolve_pipe: wgpu::PipelineLayout,
 }
@@ -144,6 +149,7 @@ impl Layouts {
         let composite_pipe = pipe_layout("quorra composite", &[&layouts.composite]);
         let reduce_pipe = pipe_layout("quorra reduce", &[&layouts.reduce]);
         let blit_pipe = pipe_layout("quorra blit", &[&layouts.blit]);
+        let present_pipe = pipe_layout("quorra present", &[&layouts.present]);
         let winding_pipe = pipe_layout("quorra winding", &[&layouts.winding]);
         let resolve_pipe = pipe_layout(
             "quorra winding resolve",
@@ -159,6 +165,7 @@ impl Layouts {
             composite: layouts.composite,
             reduce: layouts.reduce,
             blit: layouts.blit,
+            present: layouts.present,
             sampled: layouts.sampled,
             winding: layouts.winding,
             lane_pipe,
@@ -168,6 +175,7 @@ impl Layouts {
             composite_pipe,
             reduce_pipe,
             blit_pipe,
+            present_pipe,
             winding_pipe,
             resolve_pipe,
         }
@@ -260,6 +268,21 @@ fn bind_layouts(device: &wgpu::Device) -> BindLayouts {
             &[
                 texture_entry(0),
                 uniform_entry(1, 16, wgpu::ShaderStages::FRAGMENT),
+            ],
+        ),
+        // The present pass (ADR 0056). Filterable, unlike every other sampled texture in
+        // this crate except the image's: a layer is put on the surface under an affine
+        // the host chose, so the sample point does not land on texel centres and the
+        // hardware sampler must be usable on it. 48 bytes: the placement's inverse (six
+        // coefficients across two vec4s, the second carrying the filter), then the
+        // layer's extent in texels. Fragment-only — the vertex stage is a full-screen
+        // triangle that reads nothing.
+        present: make(
+            "quorra present",
+            &[
+                uniform_entry(0, 48, wgpu::ShaderStages::FRAGMENT),
+                filterable_entry(1),
+                sampler_entry(2),
             ],
         ),
         // The winding resolve's source. Identical in shape to `blit` before ADR 0038
