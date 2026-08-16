@@ -12,9 +12,11 @@
 //! chooser from what it chooses is how a lane comes to be taken on one reading of the
 //! cache and entered on another, which is a tile rasterised twice or not at all; and the
 //! two branches have to agree, to the pixel, about the tile they produce — the same
-//! `shape ∩ clip ∩ target` rounded out the same way — which is a property a reader can
-//! only check by having both in front of them ([`Encoder::visible_tile`] is that
-//! arithmetic without the rasterising).
+//! `shape ∩ clip ∩ target` rounded out the same way — so both ask
+//! [`Encoder::visible_tile`] for it and neither states it a second time. That is one
+//! place rather than two on purpose: ADR 0057 narrowed what a clipped mark's tile is
+//! bounded by, and a bound changed in one branch and not the other is a mark rasterised
+//! over a region the lane that drew it thought was smaller.
 //!
 //! Whichever branch ran, the tile is packed onto the frame's sheet in encounter order
 //! (ADR 0034) and drawn as one quad instance.
