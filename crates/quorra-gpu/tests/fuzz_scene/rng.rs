@@ -64,7 +64,9 @@ impl Rng {
     }
 
     /// An alpha: in range seven times in eight, and drawn from the hostile spread
-    /// otherwise, which is the `SceneError::InvalidGroupAlpha` path.
+    /// otherwise — the `SceneError::InvalidGroupAlpha` path on a group and the
+    /// `SceneError::InvalidImageAlpha` one on an image, which are the same range
+    /// (ISO 32000-2 §11.3.7.2) refused under the name of what carried it.
     pub(crate) fn alpha(&mut self) -> f32 {
         if self.one_in(8) {
             self.f32()

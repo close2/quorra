@@ -117,13 +117,39 @@ impl SceneBuilder {
         }
     }
 
-    /// A constant alpha, `0..=1` — §11.4.5's group alpha, and the image lane's
-    /// constant alpha, which is the same range checked the same way.
-    pub(super) fn check_alpha(alpha: f32) -> Result<(), SceneError> {
-        if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
-            return Err(SceneError::InvalidGroupAlpha { alpha });
+    /// A constant alpha, in ISO 32000-2 §11.3.7.2's range:
+    ///
+    /// > All of the shape and opacity inputs shall have values in the range 0.0 to 1.0
+    /// > (inclusive), with a default value of 1.0.
+    ///
+    /// One predicate for both of a scene's alphas because they are one parameter:
+    /// §11.6.4.4's constant opacity is applied to an elementary object, and "the
+    /// nonstroking alpha constant shall also be applied when painting a transparency
+    /// group's results onto its backdrop". NaN and the infinities are refused on top of
+    /// the clause's range — a PDF number is neither — and are what the finiteness test
+    /// adds to `contains`, which would reject them anyway but says nothing about why.
+    fn constant_alpha_is_valid(alpha: f32) -> bool {
+        alpha.is_finite() && (0.0..=1.0).contains(&alpha)
+    }
+
+    /// A group's constant alpha, refused under the name of the thing that carried it.
+    pub(super) fn check_group_alpha(alpha: f32) -> Result<(), SceneError> {
+        if Self::constant_alpha_is_valid(alpha) {
+            Ok(())
+        } else {
+            Err(SceneError::InvalidGroupAlpha { alpha })
         }
-        Ok(())
+    }
+
+    /// An image command's constant alpha. Same clause, same range, **different
+    /// refusal**: a shared variant would send a caller with no group in the scene to
+    /// read about one.
+    pub(super) fn check_image_alpha(alpha: f32) -> Result<(), SceneError> {
+        if Self::constant_alpha_is_valid(alpha) {
+            Ok(())
+        } else {
+            Err(SceneError::InvalidImageAlpha { alpha })
+        }
     }
 
     /// §11.5.3's backdrop colour is a colour like any other, and is the only value a
@@ -237,9 +263,10 @@ mod tests {
     use crate::blend::{BlendMode, Compose, FillRule};
     use crate::error::SceneError;
     use crate::geom::{Affine, Point, Rect};
-    use crate::ids::{ClipId, OutlineId};
+    use crate::ids::{ClipId, ImageId, OutlineId};
     use crate::paint::{Color, LineCap, LineJoin, Paint, Stroke};
     use crate::scene::GroupSpec;
+    use crate::scene::ImageFilter;
     use crate::scene::SceneBuilder;
     use crate::scene::fixtures::{black, plain_group, unit_rect};
 
@@ -311,6 +338,64 @@ mod tests {
             builder.finish().commands().is_empty(),
             "refused inputs must not be appended"
         );
+    }
+
+    /// One range, two names. Every value outside ISO 32000-2 §11.3.7.2's `0..=1` is
+    /// refused from both calls that take a constant alpha, and each refusal names the
+    /// thing that carried it — an image's alpha reported as a group's would send a
+    /// caller with no group in the scene to read about one.
+    #[test]
+    fn a_constant_alpha_is_refused_under_the_name_of_what_carried_it() {
+        let mut builder = SceneBuilder::new();
+        let group = |builder: &mut SceneBuilder, alpha| {
+            let spec = GroupSpec {
+                alpha,
+                ..plain_group()
+            };
+            builder.group(spec, |_| Ok(()))
+        };
+        let image = |builder: &mut SceneBuilder, alpha| {
+            builder.image(
+                ImageId(0),
+                Affine::IDENTITY,
+                alpha,
+                ImageFilter::Nearest,
+                None,
+                BlendMode::Normal,
+                None,
+            )
+        };
+
+        // NaN and the infinities, then both sides of the interval.
+        for alpha in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.001, 1.001] {
+            assert!(
+                matches!(
+                    group(&mut builder, alpha),
+                    Err(SceneError::InvalidGroupAlpha { .. })
+                ),
+                "a group's alpha of {alpha} must be refused as a group's"
+            );
+            assert!(
+                matches!(
+                    image(&mut builder, alpha),
+                    Err(SceneError::InvalidImageAlpha { .. })
+                ),
+                "an image's alpha of {alpha} must be refused as an image's"
+            );
+        }
+
+        // The clause's range is "(inclusive)", so both endpoints are accepted — checked
+        // here so that a bound tightened by accident is a failure and not a silence.
+        for alpha in [0.0, 0.5, 1.0] {
+            assert!(
+                group(&mut builder, alpha).is_ok(),
+                "a group's alpha of {alpha} is inside the clause's range"
+            );
+            assert!(
+                image(&mut builder, alpha).is_ok(),
+                "an image's alpha of {alpha} is inside the clause's range"
+            );
+        }
     }
 
     /// Clip identifiers are scene-scoped: a foreign or future id is refused wherever
