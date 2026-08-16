@@ -106,6 +106,25 @@ a shader can matter to it, and the work is CPU recording — which is why the la
 rounds were a bound memo, three probe removals and a retained encode rather than anything
 on the GPU.
 
+### The surface can leave the device
+
+ADR 0056 (2026-08-16), asked for by the caller's `QUORRA_NONBLOCKING_RENDER.md` and answered
+in `doc/answer-nonblocking-render.md`. `Device::detach_presenter` hands the surface and one
+pipeline to a `Send` `Presenter`, so a host can present on the thread that owns its event
+loop while `Device::render` runs on another. **The number that justifies it is theirs**:
+`execute` is 6.7 ms of a 4 454.9 ms run, so the graphics device is idle for 99.85 % of a
+frame of their page, and the reprojection that exists for exactly those milliseconds could
+not be issued because it needed the same `&mut Device`.
+
+**The split is proven under `Xvfb` and gated in CI** (`examples/present_thread/`): a page
+renders on a second thread while the main thread presents — **three to five presents through
+a single render, where the old arrangement allows none** — the finished raster lands under
+`scale(2) ∘ translate(64, 32)` with chrome at identity, six window points are read back with
+`xwd`, and the gate was verified able to fail in three of the ways it exists to catch.
+**Whether it holds 60 or 120 Hz cannot be measured here** — `Xvfb` reports a refresh of 0.00
+— so that number is the owner's on the real display. §1.7's determinism is untouched: nothing
+on this path draws a page, and the corpus and the oracle both use `Target::Readback`.
+
 ### What is still open
 
 - **The residue-clip seam, half taken.** The residue itself is now rasterised once per

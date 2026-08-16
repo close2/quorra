@@ -71,6 +71,44 @@ conversation and is worth reading before answering anything in it: a heading the
 stale in either direction, and §13 sat marked *open* for eleven of their rounds after
 ADR 0023 had answered it.
 
+## The caller's non-blocking-render ask, answered on 2026-08-16
+
+Their `doc/QUORRA_NONBLOCKING_RENDER.md` asked for the surface to stop being the device's
+business, so that a picture can be presented while a page is being drawn. **The answer is yes
+and it is built (ADR 0056)**, and the measurement half of the same document (§9, `recording`)
+is `doc/notes-recording-shares.md`. **`doc/answer-nonblocking-render.md` is the single reply
+for the owner to carry across — we never edit their tree.**
+
+`Device::detach_presenter` hands the surface, its swapchain and one pipeline to a `Send`
+`Presenter`; `attach_presenter` refuses a presenter from another device by ADR 0048's device
+id and **hands it back inside the refusal**, because consuming it on the failing path would
+destroy a window's surface over a caller's mix-up. While the presenter is out,
+`Target::Surface` is refused as `RenderError::PresenterDetached` — a different word with a
+different fix from `NoSurface`. `Presenter::present(&[Layer])` draws each finished raster
+under its own `Affine` and `ImageFilter` through `Kind::Present` / `present.wgsl`, which
+joins the warm set of every surface device, so detaching compiles nothing.
+
+**Two things this round could not settle, and neither is a defect in the design.** Whether the
+arrangement holds 60 or 120 Hz **cannot be observed on this machine** — `Xvfb` reports a
+refresh of 0.00 and `--newmode` does not take — so that number is the owner's, on the display
+that states its own refresh, behind the caller's ADR 0383 trace lines. And a layer texture
+from a device of a *different* `wgpu::Instance` still panics inside wgpu-core rather than
+being refused: ids are per-instance, so no scope sees it. That hole is pre-existing —
+`Target::Texture` shares it — and the remedy is one instance per process, which is documented
+in the error type, the ADR and the reply.
+
+**What §9's measurement says, because it changes what is worth doing next.** `recording` on a
+path-heavy page is **56 % one thing nobody had named** — computing each mark's device
+bounding box — and ADR 0045's memo is pure cost there, because that page places each of its
+58 009 outlines exactly once. It *is* divisible by a parallel pre-pass, but that is worth
+**1.31× on the encode, not the 6.6× geometry gave**, and it needs an ADR, a distinctness
+floor and a charged allocation before anyone starts. **The floor is the finding**: with the
+whole of `encode` at zero their frame is still 107.0 ms and 12.8 refreshes at 120 Hz, so
+nothing in phase one is what stands between that page and the rate they want — which is
+exactly why the presenter split was the right thing to ask for. One live defect fell out of
+it: on a *clipped* page the geometry clock **mislabels** the residue multiply, so 56 % of
+artwork's reported `recording` is per-pixel geometry outside the span.
+
 ## What to do next, in this order
 
 Two items, and the ordering reason is one sentence: **the caller conversation is the older
@@ -244,7 +282,15 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
 
 ### Small debts, none blocking
 
-- **`encode/parallel.rs` at 532 lines is now the only source file past the ~500-line smell.**
+- **`error.rs` is 558 lines** and `encode/parallel.rs` 532 — the two files past the ~500-line
+  smell. `error.rs` grew with ADR 0056's four new variants and is the next split candidate.
+- **`fill_solid`'s duplicate outline lookup is priced**: 9 514 587 instructions on the
+  caller's page (2.31 % of its `recording`), 711 286 on dense text (5.79 %). It still needs
+  the lifetime that fights `&mut self`, which is why it is a round and not an edit.
+- **The present pass draws a full-screen triangle per layer** rather than a transformed
+  bounding quad. Nothing has measured it; on a page-sized layer they are the same, and on a
+  small chrome layer they are not.
+- **`encode/parallel.rs` at 532 lines is one of two source files past the ~500-line smell.**
   `encode.rs` is 435 lines over eleven new modules (`doc/notes-encode-split.md`), `device.rs`
   is 235 over eleven, and the dispatch now has one module per command arm — `rect`, `fill`,
   `stroke`, `rare`, `layer` — which is the shape the next lane should be added in.

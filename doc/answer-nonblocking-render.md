@@ -240,3 +240,84 @@ branches are run rather than only compiled. The gate was verified able to fail i
 the ways it exists to catch: with the offset at zero the uncovered strip shows the page
 instead of the clear, with the scale at 1 the mark's edge lands a pixel out, and with the
 sampler's coordinate mis-normalised the linear present reads the wrong part of the page.
+
+---
+
+## §9 — the three questions about `recording`
+
+Measured in the same round, on a separate branch, with callgrind rather than a clock;
+the whole of it — the subdivision on three page shapes, the divisibility argument in the
+code, and how the floor was computed — is `doc/notes-recording-shares.md`. What follows is
+the part written to be read by you.
+
+### §9 — what `recording` is made of, whether it divides, and the floor
+
+**1. What it is made of.** We subdivided it with callgrind rather than with a clock — an
+instruction count is exact and this machine's wall clocks are not — on your page shape at
+the full 58 009 marks, and on two others so that a lane tuned on one page is not published
+as a general finding. **None of the four things you quoted back at us dominates**, and nor
+does the fifth our own round notes added to them. On your page, clip resolution is
+**0.30 %** of `recording` (you state no clip, and the resolver returns an open rectangle
+without touching anything), culling is **0.60 %**, instance building **4.17 %**, plan
+assembly **0.55 %**, and atlas lookups — the fifth — **4.89 %**. What dominates is
+something none of our prose ever named: **computing each mark's device bounding box,
+56.0 % of `recording`'s instructions and 40–43 % of its wall clock.** Your page carries 52
+path segments a mark, so a mark is 157 control points, and the box is four multiplies and
+four min/max per point — 9.1 million control points a frame, 231 million instructions, 3 983 a mark. The memo we
+built to make that cheap (our ADR 0045) keys on `(outline, linear part)` and is worth 21 %
+of a *dense text* encode because 4 320 placements there collapse to 818 boxes. **Your page
+has 58 009 outlines and places each of them exactly once**, so the memo misses every time
+and costs about 20 M of the 231 M for nothing. The rest of `recording` is a long tail with
+no second peak: the walk's own dispatch 16.8 %, two counter sets 6.5 %, atlas lookups
+4.9 %, the outline store's `HashMap` 4.6 %, the budget and commit 3.4 %, the queue 1.9 %.
+
+**2. Is any of it divisible.** Partly — and unusually, the part that is divisible is the
+majority of it, which is why the answer is not the clean "no" we expected to give you. The
+bounding depends on nothing the frame's order decides: it is a pure function of the outline
+and the linear part of the transform, provably bit-identical however it is computed, and it
+writes only a memo that changes no answer. So it could be a **pre-pass** — bound every
+command in parallel into a vector, then let the walk read it — which touches no ordered
+structure at all. We have not built it, and the reasons are in
+`doc/notes-recording-shares.md` §3.2: it is a second pass over the commands (a shape two of
+our ADRs have declined before), it undoes ADR 0045 on the page ADR 0045 exists for unless
+it carries a *distinctness* floor of its own, it allocates 1.4 MB from a scene-derived
+number that principle 3 says must be charged first, and — the number that decides it — **it
+would take your encode from 127.8 ms to about 97, a 1.31× improvement and not a 6.6× one.**
+
+**What is not divisible is the remaining ~15 %, and there the order genuinely is the
+product**, in your words. Five structures, each of which is a *sequence* rather than a
+value: the frame budget's running total, so that a refusal names the same two numbers a
+one-threaded frame names; the scratch sheet's shelf cursors, whose encounter order our
+ADR 0034 made load-bearing and declined to sort, because assigning positions after the walk
+is the two-pass encode; the atlas allocator, which must be asked of an atlas every earlier
+mark has already reached — that is not theory, it is how our determinism gate caught
+`bytes_uploaded` off by exactly 64 bytes, one 8 × 8 tile rasterised twice; the instance
+stream, where a `Batch` is a *range* of consecutive instances and the painter's algorithm
+survives as the order the bytes were written in, so reordering instances is repainting the
+page; and the layer plans, whose bounds grow by the rectangle each op will mark. Those five
+are why the walk and the commit are serial by design and will stay that way.
+
+**3. The floor.** Taking your own trace and zeroing our phases the way your ADR 0368 zeroed
+geometry: with **`recording` at zero** your 24 frames go 4454.9 → 3348.8 ms, **139.5 ms a
+frame, 16.7 refreshes at 120 Hz**. With **`recording` and `geometry` both at zero**,
+113.1 ms a frame. With **the whole of `encode` at zero — phase one deleted outright —
+107.0 ms a frame, 12.8 refreshes.** What is left in that last case is `transfer` 37.2 %,
+`elsewhere` 37.1 %, your own scene walk 22.8 %, and the graphics device 0.3 %. And if
+everything quorra does cost nothing at all, your scene walk alone is 24.4 ms a frame —
+**2.9 refreshes long**, so the page still could not be drawn inside one. Applied to your
+§9's own ratio: the 15 renderings in 524 refreshes become 19.9 with `recording` at zero (2.9 % → 3.8 %) and 26.0 with `encode` at
+zero (5.0 %). **So `recording` is not what stands between this page and 120 Hz, and neither
+is anything else in `encode`.** We will keep taking the milliseconds — the bounding pre-pass
+is now a costed candidate rather than a guess — but the arithmetic says your §4 is asking
+for the right thing: at 107 ms a frame the question is not how to make the frame fit a
+refresh, it is how the refresh gets a picture while a frame is still running.
+
+**One thing we owe you off the back of this.** You wrote that you cannot subdivide
+`recording` from outside, and you are right — and worse, on a *clipped* page our own three
+phases mislabel it: 56 % of artwork's `recording` is the per-pixel multiply of a clip's
+residue into a coverage tile, which is geometry by any reading and lands outside the
+geometry span. We are recommending that `Options::instrument_encode` grow an optional
+detail level that emits `encode: bounds`, `encode: atlas`, `encode: instances` and
+`encode: commit` as extra rows, with `encode: recording` still the remainder so a trace that
+sums the rows still gets `encode` and an existing parser sees the three rows it always saw.
+It is additive and free when off. It is not in this round.
