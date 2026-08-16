@@ -10,6 +10,10 @@ struck-through corrections where they now say something false. Nothing else move
 nothing was deleted — a claim two test files cite by section number is corrected in place
 rather than quietly removed.
 
+**Amended again on 2026-08-16**: §4.5's remaining three bullets are closed, in the same
+style. `doc/notes-function-gaps.md` is that round — what each gate observes, the clause each
+expectation comes from, and the forced defect that proved each able to fail.
+
 Wave 1 left a vocabulary, an analyser, a generator and a conformance corpus, and no lane:
 `Paint::Function` reached the encoder and was refused by name. **It draws now.** This
 records what was wired, what was measured and where, the bound I justify for the corpus
@@ -271,20 +275,29 @@ to it. Corrected 2026-08-15.
   reviewed, and nothing drew one.
 
 And three the two new files did **not** close, found by reading them rather than by
-assuming what their names cover:
+assuming what their names cover. **All three closed on 2026-08-16** —
+`doc/notes-function-gaps.md` is the round, ten tests in three new files, and each bullet
+below carries its correction rather than being deleted, because the sentence is what a
+reader following a citation comes here for:
 
-- **`base_weight`'s clip and soft-mask factors are never anything but 1.** No test in this
-  tree draws a `Paint::Function` under a clip or under a soft mask, in a knockout group or
-  out of one — §1.2's step 4 says the result is weighted by coverage × clip × soft mask,
-  and only the coverage factor has ever been observed. It is the same line every lane
-  shares, which is the argument that it works and is not evidence that it does; the
-  knockout fixtures would take a clip cheaply.
-- **Nothing draws this paint under `Coverage::Gpu`.** Every function test runs the default
-  `Coverage::Cpu`. What the lanes share is the *quad*, which is placed by `rare.rs` from a
-  coverage tile either lane produced, so the risk is small and stated rather than measured.
-- **The scene's own §11.4.6 stages** (ADR 0025's `DestOut` and `Plus`, where `Style::of`
-  hands the lane one half of the pair) are compiled and selected but not drawn, which is
-  where §4.5's knockout bullet stood before §4.6.
+- ~~**`base_weight`'s clip and soft-mask factors are never anything but 1.**~~ **Closed by
+  `tests/function_weights.rs`**, five tests: a rectangular clip whose edge falls inside a
+  pixel, a residue clip, §11.5.2's alpha mask, §11.5.3's luminosity mask over a white
+  backdrop, and the two together as a product. What the bullet said was right and the
+  suspicion it carried was not — no defect was found, and each factor is now observed at a
+  value the other two cannot produce. §1.2's step 4 is measured rather than reasoned about.
+- ~~**Nothing draws this paint under `Coverage::Gpu`.**~~ **Closed by
+  `tests/function_coverage.rs`**, and the bullet's own hedge — "the risk is small and
+  stated rather than measured" — understated what could be said. The setting cannot reach
+  this paint *at all*: `take_gpu_lane` is asked only in the solid arm, so the two settings
+  draw a page of function paint **byte for byte the same**, which is what the file asserts
+  instead of a bound. The second test puts a device-drawn tile and a function tile on one
+  sheet, which is the interaction the setting does create.
+- ~~**The scene's own §11.4.6 stages**~~ (ADR 0025's `DestOut` and `Plus`) **are drawn now**,
+  by `tests/function_staged.rs`: the pair against §11.4.6's line at 0.57 of 255 where one
+  source-over mark is 114.90, plus the two things peculiar to this paint — a point
+  §8.7.4.5.2 leaves unpainted has no shape and so is erased by nothing, and a `Background`'s
+  alpha is opacity and changes nothing about what `DestOut` erases.
 
 ### 4.6 In a knockout group — `tests/function_knockout.rs`, 3 tests
 

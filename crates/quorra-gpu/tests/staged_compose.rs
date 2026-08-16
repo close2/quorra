@@ -37,6 +37,7 @@ use quorra_scene::{
 
 mod common;
 
+use common::clause::{deviation_from_the_clause, premul};
 use common::headless::device;
 
 const SIZE: u32 = 64;
@@ -142,10 +143,6 @@ fn the_pair_is_the_clause_and_source_over_is_not() {
     backdrop(&mut over_scene);
     fill(&mut over_scene, outline, object, Compose::SrcOver).unwrap();
     let over = render(&mut device, &over_scene.finish());
-
-    let premul = |raster: &[u8], at: usize, channel: usize| {
-        f32::from(raster[at + channel]) * f32::from(raster[at + 3]) / 255.0
-    };
 
     let (mut worst_staged, mut worst_over) = (0.0_f32, 0.0_f32);
     let mut partial_pixels = 0_u32;
@@ -327,38 +324,6 @@ fn masked(
         compose,
         Some(mask),
     )
-}
-
-/// The worst premultiplied deviation from §11.4.6's line `P' = (1 − f) × P + S`, and how
-/// many pixels of the fixture are partially covered.
-///
-/// Its own function because the test that uses it reads three rasters out of the device
-/// and would otherwise be one long block of indexing: `before` is the group's content
-/// under the element, `shape` carries `f` in its alpha, `deposit` is the element drawn
-/// onto transparency, and `actual` is the frame under test.
-fn deviation_from_the_clause(
-    before: &[u8],
-    shape: &[u8],
-    deposit: &[u8],
-    actual: &[u8],
-) -> (f32, u32) {
-    let premul = |raster: &[u8], at: usize, channel: usize| {
-        f32::from(raster[at + channel]) * f32::from(raster[at + 3]) / 255.0
-    };
-    let (mut worst, mut partial) = (0.0_f32, 0_u32);
-    for pixel in 0..(SIZE * SIZE) as usize {
-        let at = pixel * 4;
-        let f = f32::from(shape[at + 3]) / 255.0;
-        if f > 0.0 && f < 1.0 {
-            partial += 1;
-        }
-        for channel in 0..3 {
-            let expected =
-                (1.0 - f).mul_add(premul(before, at, channel), premul(deposit, at, channel));
-            worst = worst.max((premul(actual, at, channel) - expected).abs());
-        }
-    }
-    (worst, partial)
 }
 
 /// **The pair inside a knockout group is the clause's line for that element** (ADR 0032).

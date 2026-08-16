@@ -173,14 +173,23 @@ because ADR 0053 promises no cross-adapter identity for this paint.
 
 ## 5. What is still not tested here
 
+*(Corrected 2026-08-16: the second bullet closed, and the first gained the clause its answer
+has to start from. `doc/notes-function-gaps.md` is that round. The sentences stand with their
+corrections rather than being deleted, as §4.5 of `notes-function-wiring.md` does.)*
+
 - **A knockout group over a function paint under a soft mask**, where §11.6.4.3's opacity and
   §11.6.4.2's shape differ for a second reason. `fs_shape` weights by `base_weight`, which
   includes the mask, and whether that is the right reading of §11.6.4.2 is a question ADR
-  0025 answered for the other lanes and nothing re-asks here.
-- **§11.4.6's two stages by name** (`Compose::DestOut` / `Compose::Plus`, ADR 0025) over a
-  function paint. `Style::of` maps them, and the builder refuses a staged mark *inside* a
-  knockout group, so the combination this file draws and the one that ADR names are disjoint;
-  a staged function fill outside a knockout group has no test.
+  0025 answered for the other lanes and nothing re-asks here. **Still open, and it is a
+  five-lane question rather than this one's**: `rect.wgsl`'s `fs_shape` cites §11.4.7.2 for
+  "object shape ∧ clip ∧ mask shape" and every lane follows it, so the clause to start from
+  is §11.4.7.2 and the round that opens it has to be able to move all five.
+- ~~**§11.4.6's two stages by name**~~ (`Compose::DestOut` / `Compose::Plus`, ADR 0025) over a
+  function paint. **Closed by `tests/function_staged.rs`**, three tests. The bullet's
+  reasoning was exactly right and is now demonstrated rather than argued: forcing
+  `Style::of(DrawStyle::DestOut)` to the over pipeline fails all three of the new file's
+  tests and leaves all six of `staged_compose.rs` green.
 - **A retained frame whose function paint is inside a group or under a clip residue.** The
   page here is flat; `retained_frame.rs`'s artwork page carries the layer plan and the
-  composite for the other lanes, and no page carries both.
+  composite for the other lanes, and no page carries both. Still open — the pages of the
+  2026-08-16 round are immediate too.

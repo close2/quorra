@@ -29,8 +29,10 @@
 //! is the element's **shape** (§11.6.4.2: geometry, so the coverage of the mark under its
 //! clip) and `S` is the element's own premultiplied contribution. That is the same
 //! statement `tests/knockout_blend.rs` holds the fill and the stroke arms to and the same
-//! one ADR 0025 measured; it is written out in both places rather than shared, because
-//! each file derives it from the clause for the lane it is about.
+//! one ADR 0025 measured, and all four files that measure it now do so through one
+//! arithmetic — `tests/common/clause.rs`, whose module comment carries the derivation.
+//! What each file still derives for itself is which raster is `P`, which is `S` and where
+//! `f` is read from, because that is the part that is about *its* lane.
 //!
 //! # The three things that are peculiar to *this* paint
 //!
@@ -64,6 +66,10 @@ use quorra_scene::{
     Affine, BlendMode, Color, Compose, FillRule, FnOp, FnRange, FunctionId, GroupSpec, OutlineId,
     Paint, Point, Rect, Scene, SceneBuilder, Segment,
 };
+
+mod common;
+
+use common::clause::{deviation_from_the_clause, premul};
 
 const SIZE: u32 = 64;
 
@@ -217,40 +223,6 @@ fn unit_square() -> Rect {
 /// outside the transformed domain rectangle (§8.7.4.5.2).
 fn left_quarter() -> Rect {
     Rect::new(Point::new(0.0, 0.0), Point::new(0.25, 1.0))
-}
-
-/// One straight-alpha channel of a readback pixel, premultiplied — the space §11.3.6 and
-/// §11.4.6 are written in.
-fn premul(raster: &[u8], at: usize, channel: usize) -> f32 {
-    f32::from(raster[at + channel]) * f32::from(raster[at + 3]) / 255.0
-}
-
-/// Worst premultiplied deviation from §11.4.6's line `P' = (1 − f) × P + S` over the whole
-/// target, and how many pixels of the fixture are partially covered.
-///
-/// The second number is what says the fixture is worth measuring: a shape with no partially
-/// covered pixel makes `f` either 0 or 1 everywhere, where a weighted average and a
-/// composite agree for the wrong reason.
-fn deviation_from_the_clause(
-    before: &[u8],
-    shape: &[u8],
-    deposit: &[u8],
-    actual: &[u8],
-) -> (f32, u32) {
-    let (mut worst, mut partial) = (0.0_f32, 0_u32);
-    for index in 0..(SIZE * SIZE) as usize {
-        let at = index * 4;
-        let f = f32::from(shape[at + 3]) / 255.0;
-        if f > 0.0 && f < 1.0 {
-            partial += 1;
-        }
-        for channel in 0..3 {
-            let expected =
-                (1.0 - f).mul_add(premul(before, at, channel), premul(deposit, at, channel));
-            worst = worst.max((premul(actual, at, channel) - expected).abs());
-        }
-    }
-    (worst, partial)
 }
 
 /// **The clause's line, on the lane that had never drawn it.**
