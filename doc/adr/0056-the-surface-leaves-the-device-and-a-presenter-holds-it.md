@@ -274,6 +274,11 @@ when the warm set missed it.
   layer under an arbitrary affine has no axis-aligned quad to draw, and the clear
   construction wins here because nothing has measured the alternative — a transformed
   bounding quad is available later if a measurement ever asks for it.
+
+  **Superseded on 2026-08-17 by ADR 0058**, which is that measurement: 51 % of a realistic
+  four-layer present's 20 971 520 fragments are shaded to no effect at 2048 × 2560, and a
+  layer now draws its own rectangle. The bytes are identical on both adapters and no public
+  API moved.
 - **One more pipeline in the warm set** for every device built with a surface, on the
   thread nobody blocks on, whether or not the host ever detaches. `is_warm` arrives
   correspondingly later, which ADR 0040 and ADR 0043 already accepted for the same reason.
