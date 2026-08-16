@@ -180,6 +180,9 @@ between crates, nothing changed a signature's types, and nothing changed an orde
 
 ## 5. Findings noticed and deliberately not acted on
 
+**Six of the nine were closed on 2026-08-16** — `doc/notes-fill-solid-lookup.md` is that
+round's note, and each item below carries its own outcome line. Items 7, 8 and 9 stand.
+
 1. **`push_op`'s doc comment is two openings for one function** — exactly the shape
    `doc/HANDOVER.md` records from `take_pass_query` in the `device.rs` round. Its first
    paragraph ("Append an op to the current plan, and grow the plan's bounds to hold it…
@@ -187,16 +190,20 @@ between crates, nothing changed a signature's types, and nothing changed an orde
    no doc comment at all; the second ("[`Encoder::append_op`] with the queue drained
    first…") is `push_op`'s own, and the two run together with no blank line between them.
    Moving the first three sentences down one function is a two-line edit for whoever next
-   owns `plan.rs`.
+   owns `plan.rs`. **Closed 2026-08-16**: each paragraph is now on the function it
+   describes.
 2. **`CULL_MARGIN`'s doc cites `Encoder::push_glyph`, which no longer exists.** ADR 0054
    replaced that method with `parallel`'s `Job::glyph`. It is one of the 37 private-doc
    warnings and has been for at least a round; the sentence is still true, only the name
-   is gone.
+   is gone. **Closed 2026-08-16**: it cites `Job::glyph`, and
+   `cargo doc -p quorra-gpu --document-private-items` goes 32 warnings to 31 — the tree
+   has moved since the 37 recorded in §3, and the one that leaves is that link.
 3. **`culled`'s doc has a link definition in the middle of its prose.** The line
    `/// [`Counters::commands_culled`]: crate::frame::Counters::commands_culled` sits
    between two paragraphs, so "**What it costs when it wins nothing**" reads in the
    source as a continuation of a reference definition. Rustdoc renders it correctly; a
-   reader of the file does not.
+   reader of the file does not. **Closed 2026-08-16**: the definition is at the end of the
+   comment.
 4. **`fill_solid` looks the outline up a second time.** `encode_fill` has already done
    `self.resources.outline(outline)` and taken the `UnknownOutline` refusal when
    `fill_solid` does exactly the same lookup with the same id, because `SolidFill` carries
@@ -204,16 +211,26 @@ between crates, nothing changed a signature's types, and nothing changed an orde
    that is a second hash lookup per solid fill on the hottest walk in the tree — 4 320 of
    them on the dense-text archetype. It is not a defect and it is not free; carrying the
    borrow needs a lifetime on `SolidFill` that fights `&mut self`, which is a design
-   question and not a move.
+   question and not a move. **Closed 2026-08-16, and that last sentence was wrong**: the
+   encoder holds the store as `&'a ResourceStore`, so a borrow out of it keeps no loan on
+   `self`, and `SolidFill<'a>` compiles with no other change than naming the lifetime the
+   `impl` block already had. Measured at 9 340 817 instructions on the caller's 58 009-mark
+   page and 729 118 on dense text — 2.26 % and 5.93 % of those pages' `recording`;
+   `doc/notes-fill-solid-lookup.md` §2 says why the reading survived three documents.
 5. **`command`'s `#[allow(clippy::only_used_in_recursion)]` no longer fires.** Removing
    it after the group arm moved out leaves clippy clean at `-D warnings`. Verified and
    then reverted, because an allow is not a comment made wrong by the move — but it is a
    one-line deletion, and its comment ("with only M7's images left to refuse…") is about
-   a state of the walk that has moved on.
+   a state of the walk that has moved on. **Closed 2026-08-16**: deleted, and
+   `RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets` is clean without it.
 6. **`visible_tile` and `coverage_tile` share ten lines of identical arithmetic**, and
    `visible_tile`'s comment says so. Before this round they were 60 lines apart in a
    2 421-line file; they are now adjacent, which is the first time the duplication is
    visible in one screen. Factoring it is behaviour-preserving but it is not a move.
+   **Closed 2026-08-16, in a commit of its own that can be dropped**: `coverage_tile` asks
+   `visible_tile` for the bound, so the module comment's invariant — "the two branches have
+   to agree, to the pixel, about the tile they produce" — holds by construction. It is
+   separate because a sibling round is changing what a coverage tile is bounded by.
 7. **`encode/rare.rs`'s module comment says "What the ops mean to the device that draws
    them is `device.rs`'s half".** Since the `device.rs` split that half is
    `device/rare.rs`, and `device/rare.rs`'s own comment says the same thing about
