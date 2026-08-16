@@ -245,3 +245,91 @@ something else. It does not affect this question's answer: under either reading 
 transparent* mask is a no-op, because either the shape or the opacity is zero and both
 routes leave the backdrop.
 
+---
+
+## 3. A stencil mask whose grid is not the image's (their §4, hayro #1315 / #1319 / #2)
+
+### A correction to the citation, and it does not change their point
+
+Their note cites §8.9.6.4 for the permission. §8.9.6.4 is **colour key masking** — a range
+of colours to be masked out — and says nothing about resolution. The permission is
+**§8.9.6.3 Explicit masking**:
+
+> The base image and the image mask need not have the same resolution ( Width and Height
+> values), but since all images shall be defined on the unit square in user space, their
+> boundaries on the page will coincide; that is, they will overlay each other.
+
+which leans on §8.9.5.1:
+
+> The correspondence between image space and user space is constant: the unit square of
+> user space, bounded by user coordinates (0, 0) and (1, 1), corresponds to the boundary of
+> the image in image space
+
+Their substantive claim — that a mismatched grid is the ordinary case and that scanners
+produce it constantly — stands unchanged; only the subclause number moves.
+
+### It cannot reach us
+
+`ImageSpec` is one straight-alpha RGBA8 buffer on one grid, three fields and no fourth.
+`Command::Image` names one `ImageId`; its only other attenuation is a `MaskId`, and a
+`MaskId` names a **list of drawing commands** (§11.5's transparency group), not a raster
+with a grid. There is no stencil concept anywhere in this workspace — `grep -rni stencil`
+over `crates/` finds only wgpu's `depth_stencil: None`.
+
+So a `/Mask` at a different resolution is resolved before it reaches us, and it is worth
+recording exactly where, because that is the answer:
+
+- `pdf-model/src/image.rs::apply_explicit_mask` → `combine_on_the_finer_grid`, which builds
+  the output on `max(image.width, mask.width) × max(image.height, mask.height)`,
+  nearest-neighbour resamples both sources onto it and **multiplies** the alphas rather than
+  replacing (its comment reads that as §11.3.7's `α = shape × opacity` through §11.6.4.1).
+  An explicit `/Mask` is always folded eagerly; there is no deferred path for it.
+- A `/SMask` whose refinement is unbuildable is deferred instead:
+  `pdf-render::ImageSource::AtDeviceScale` keeps the mask in the file's own packed bits and
+  rasterises it at `Grid::for_placement`'s device resolution when the placement is known.
+  Their witness is `issue16263.pdf` — a **2 × 2 image with a 34 862 × 4 332 mask**, 604 MB
+  of RGBA on the finer of the two grids.
+
+What arrives here is one already-composited raster plus a `Nearest`/`Linear` flag
+(integration note 1). The decoding cost hayro #1319 measures at 30× is entirely theirs; the
+drawing cost #1315 measures is ours only in the form below.
+
+### The mismatch we do have
+
+A **soft mask** is a second grid: §11.5 renders it at device resolution while the image
+keeps its own. An image at a coarse grid under a soft mask is therefore "drawing through a
+mask whose grid does not match", in the one form that reaches this library — and the answer
+must be that the mask's edge lands where the device says, because §11.5.1 makes a soft mask
+a thing that "defines values that may vary across different points on the page", not across
+points of some image's grid.
+
+### The gate
+
+`crates/quorra-gpu/tests/mask_grid.rs`, four tests at two depths:
+
+- `an_uploaded_image_is_one_raster_on_one_grid` and
+  `an_image_command_carries_no_second_raster` destructure `ImageSpec` and `Command::Image`
+  **exhaustively**, with no `..`. Neither type is `#[non_exhaustive]`, so a field added to
+  either stops this file compiling and whoever adds it reads the comment. That is the gate
+  the assumption actually needs: the assumption is not "we sample two grids correctly", it
+  is "there is only one grid", and only the type can hold that.
+- `a_soft_mask_edge_lands_on_the_device_grid_not_the_images` — a 4 × 4 image over a 48-pixel
+  square, so each texel is 12 device pixels, under a soft mask whose rectangle ends at
+  device x = 30, which is *inside* a texel. The transition is asserted at 30, and asserted
+  not to be at 20 or 32, which is where the two neighbouring texel boundaries are.
+- `an_images_own_texel_boundary_lands_where_the_unit_square_puts_it` — the other side of
+  §8.9.5.1's mapping: a 2 × 2 image over the same square puts its texel boundary at device
+  32, four distinct colours, each constant across the 24 device pixels it covers.
+
+**Verified able to fail**, four ways:
+
+1. `soft_mask_at(p)` in `image.wgsl` replaced by `soft_mask_at(floor(p / 12.0) * 12.0)` —
+   the mask sampled on the image's grid — fails the soft-mask test and nothing else.
+2. `tex_uv` shifted by a quarter of the unit square fails the texel-boundary test and
+   nothing else.
+3. A `stencil` field added to `ImageSpec` fails `mask_grid.rs:140` with E0027, "pattern does
+   not mention field `stencil`".
+4. A `stencil` field added to `Command::Image` fails the build at `quorra-gpu`'s own
+   exhaustive match first — which is `command.rs`'s stated promise doing its job — and the
+   test's destructuring behind it.
+
