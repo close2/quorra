@@ -46,6 +46,7 @@ pub mod mask;
 mod outline;
 mod pane;
 pub mod pipeline;
+pub mod present;
 mod raster;
 mod readback;
 pub mod report;
@@ -60,8 +61,11 @@ pub mod viewport;
 mod winding;
 
 pub use device::{Device, Limits};
-pub use error::{DeviceError, PipelineProblem, RenderError, ResourceProblem, SurfaceProblem};
+pub use error::{
+    DeviceError, LayerProblem, PipelineProblem, RenderError, ResourceProblem, SurfaceProblem,
+};
 pub use frame::{Counters, EncodeSource, Frame, Raster, TimingProvenance, Timings};
+pub use present::{ForeignPresenter, Layer, PresentCost, Presenter};
 pub use report::{Report, ReportKind};
 pub use retained::RetainedScene;
 pub use startup::{

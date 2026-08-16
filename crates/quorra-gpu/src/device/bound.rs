@@ -55,12 +55,11 @@ impl Device {
     ///
     /// [`RenderError::NoSurface`] on a device constructed with
     /// [`Device::headless`] — asking to invalidate a surface that cannot exist is a
-    /// caller bug, and hiding it would hide the defect.
+    /// caller bug, and hiding it would hide the defect — and
+    /// [`RenderError::PresenterDetached`] while the surface is out with a
+    /// [`Presenter`](crate::present::Presenter), which owns its own recovery.
     pub fn invalidate_surface(&mut self) -> Result<(), RenderError> {
-        let Some(surface) = self.surface.as_mut() else {
-            return Err(RenderError::NoSurface);
-        };
-        surface.invalidate();
+        self.surface.held_mut()?.invalidate();
         Ok(())
     }
 
@@ -74,7 +73,7 @@ impl Device {
     pub(super) fn abandon_frame(&mut self, bound: Bound<'_>, error: RenderError) -> RenderError {
         if matches!(bound, Bound::Acquired(_)) {
             drop(bound);
-            if let Some(surface) = self.surface.as_mut() {
+            if let Ok(surface) = self.surface.held_mut() {
                 surface.invalidate();
             }
         }
@@ -109,9 +108,11 @@ impl Device {
                 Ok(Bound::Borrowed(texture))
             }
             Target::Surface => {
-                let Some(state) = self.surface.as_mut() else {
-                    return Err(RenderError::NoSurface);
-                };
+                // The refusal a detached presenter earns is `PresenterDetached` and not
+                // `NoSurface`: the surface exists, it is simply somewhere else, and a
+                // frame that drew nowhere rather than saying so is principle 6's third
+                // state (ADR 0056).
+                let state = self.surface.held_mut()?;
                 Ok(Bound::Acquired(state.acquire(
                     &self.gpu,
                     viewport.width,

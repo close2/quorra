@@ -86,7 +86,8 @@ pub use quorra_scene::{
 
 pub use quorra_gpu::{
     Counters, DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_RESOURCE_BYTES, Device, DeviceError,
-    EncodeSource, Frame, Limits, Options, PipelineProblem, Raster, RenderError, Report, ReportKind,
-    ResourceProblem, RetainedScene, StartupTimings, SurfaceProblem, Target, TimingProvenance,
-    Timings, Viewport, WarmUp, create_instance, create_instance_with,
+    EncodeSource, ForeignPresenter, Frame, Layer, LayerProblem, Limits, Options, PipelineProblem,
+    PresentCost, Presenter, Raster, RenderError, Report, ReportKind, ResourceProblem,
+    RetainedScene, StartupTimings, SurfaceProblem, Target, TimingProvenance, Timings, Viewport,
+    WarmUp, create_instance, create_instance_with,
 };

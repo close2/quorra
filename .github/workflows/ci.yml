@@ -23,10 +23,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install the pinned toolchain
         run: rustup show # respects rust-toolchain.toml
-      - name: Install lavapipe (software Vulkan) and Xvfb
+      # `x11-apps` is for `xwd`: the presenter smoke test reads its own window back and
+      # asserts the pixels, so without it that gate cannot report a result at all (it
+      # fails loudly rather than passing quietly).
+      - name: Install lavapipe (software Vulkan), Xvfb and xwd
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers xvfb
+          sudo apt-get install -y mesa-vulkan-drivers xvfb x11-apps
       - uses: Swatinem/rust-cache@v2
       - name: Formatting
         run: cargo fmt --all --check
@@ -46,6 +49,13 @@ jobs:
         run: cargo test --release -p quorra-gpu --test perf_gate -- --nocapture
       - name: Window smoke (surface path presents real frames under Xvfb)
         run: xvfb-run -a cargo run -p quorra-gpu --example window_smoke
+      # The other half of the surface path since ADR 0056: a page rendered on one thread
+      # while the window is presented from another, with the window's pixels read back
+      # to check that a non-identity placement put them where it says. It also asserts
+      # the refusals either side of the split — `Target::Surface` while the presenter is
+      # out, and a presenter offered to a device that did not hand it out.
+      - name: Presenter smoke (a render on one thread, presents on another, under Xvfb)
+        run: xvfb-run -a cargo run -p quorra-gpu --example present_thread
 
   supply-chain:
     runs-on: ubuntu-latest

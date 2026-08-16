@@ -4,9 +4,9 @@
 //! that compiled it, which was fine while nothing else needed one. The uniform-layout
 //! gate does: it reads the same source the adapter reads and derives what offset each
 //! field of a `Params` sits at (`layout`, and the `#[cfg(test)]` modules beside every
-//! writer of a uniform). Two `include_str!` lists of the same eight files would be two
-//! lists that can drift, and a gate reading a file the device no longer compiles is a
-//! gate that proves nothing — so there is one list, and it is this.
+//! writer of a uniform). Two `include_str!` lists of the same files would be two lists
+//! that can drift, and a gate reading a file the device no longer compiles is a gate
+//! that proves nothing — so there is one list, and it is this.
 //!
 //! What each shader *does* is stated in its own header. `function_ops.wgsl` is not here
 //! because it is not a shader: it is the operator library a generated program is built
@@ -29,6 +29,8 @@ pub(crate) const COMPOSITE: &str = include_str!("shaders/composite.wgsl");
 pub(crate) const REDUCE: &str = include_str!("shaders/reduce.wgsl");
 /// Pixels moved and not changed (ADR 0038, ADR 0039).
 pub(crate) const BLIT: &str = include_str!("shaders/blit.wgsl");
+/// One finished layer put on the surface under an affine and a filter (ADR 0056).
+pub(crate) const PRESENT: &str = include_str!("shaders/present.wgsl");
 /// The GPU coverage lane's winding accumulation and resolve (ADR 0016).
 pub(crate) const WINDING: &str = include_str!("shaders/winding.wgsl");
 /// The fixed half of a generated function paint's pipeline (ADR 0053); the program's

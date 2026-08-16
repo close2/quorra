@@ -20,7 +20,10 @@
 //!   group otherwise compiles inside itself (ADR 0040). Everything else — knockout
 //!   variants, the image and shading quads (ADR 0011) — compiles on first use. Each
 //!   kind is instantiated per target format, and a device constructed for a surface
-//!   warms the presenting lanes in the surface's negotiated format too (ADR 0043).
+//!   warms the presenting lanes in the surface's negotiated format too (ADR 0043) —
+//!   including `Kind::Present`, the one pass a detached
+//!   [`Presenter`](crate::present::Presenter) draws with, so that detaching one
+//!   compiles nothing (ADR 0056).
 //!
 //! The pipeline cache blob §7 also asks for is deliberately absent: `wgpu` 30 exposes
 //! it only through an `unsafe` constructor, this crate is `#![forbid(unsafe_code)]`,
@@ -77,20 +80,25 @@ pub(crate) const WARM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Un
 ///
 /// This is the whole mechanism by which a refused shader becomes a value rather than a
 /// panic. The scope is thread-local, so the warm-up thread and a frame compiling on
-/// demand each capture their own without seeing the other's.
+/// demand each capture their own without seeing the other's — and so does a
+/// [`Presenter`](crate::present::Presenter) binding a layer texture on a third thread,
+/// which is the other creation in this crate whose failure must be a value (ADR 0056).
 ///
 /// `pollster` resolves the pop, which blocks on nothing: `wgpu`'s own backend pops the
 /// scope synchronously and returns an already-ready future, so this is the same "a
 /// thread is not a runtime" position CLAUDE.md's stack table takes for the two awaits
 /// in device creation.
-fn captured<T>(device: &wgpu::Device, create: impl FnOnce() -> T) -> (T, Option<String>) {
+pub(crate) fn captured<T>(
+    device: &wgpu::Device,
+    create: impl FnOnce() -> T,
+) -> (T, Option<String>) {
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let handle = create();
     let error = pollster::block_on(scope.pop());
     (handle, error.map(|error| error.to_string()))
 }
 
-/// The eight parsed WGSL modules, made together on first need.
+/// The nine parsed WGSL modules, made together on first need.
 ///
 /// Together because they are one artefact: the shaders this crate ships either all
 /// parse on an adapter or the adapter cannot run this renderer, and there is no useful
@@ -103,6 +111,7 @@ struct Modules {
     composite: wgpu::ShaderModule,
     reduce: wgpu::ShaderModule,
     blit: wgpu::ShaderModule,
+    present: wgpu::ShaderModule,
     winding: wgpu::ShaderModule,
 }
 
@@ -129,6 +138,7 @@ impl Modules {
             composite: module("quorra composite", shaders::COMPOSITE)?,
             reduce: module("quorra reduce", shaders::REDUCE)?,
             blit: module("quorra blit", shaders::BLIT)?,
+            present: module("quorra present", shaders::PRESENT)?,
             winding: module("quorra winding", shaders::WINDING)?,
         })
     }
@@ -289,6 +299,16 @@ impl PipelineStore {
     /// pipelines it does not use, off the critical path, and reaches `is_warm` about
     /// 1.1 ms later.
     ///
+    /// **[`Kind::Present`] is in the second set and only there** (ADR 0056). A
+    /// presenter draws onto the surface and onto nothing else, so the pass has exactly
+    /// one format it can ever be asked for and `WARM_FORMAT` is not it unless the
+    /// surface negotiated that — which is why it is compiled whenever a present format
+    /// exists, including when that format equals `WARM_FORMAT`, while the other three
+    /// of the second set are skipped in that case as already compiled. A host that
+    /// detaches its presenter therefore finds the pipeline built by this thread, and
+    /// `Device::detach_presenter` compiles nothing itself; a host on a surface that
+    /// never presents pays one pipeline on the thread nobody blocks on.
+    ///
     /// **A refusal is kept rather than retried** (ADR 0042), and the guard records one
     /// on every exit path including an unwind — a warm-up that ends without saying so
     /// leaves every waiter on a `Condvar` nobody will notify, which is how an invalid
@@ -301,18 +321,29 @@ impl PipelineStore {
             .and_then(|_| self.get(Kind::CoverOver, WARM_FORMAT))
             .and_then(|_| self.get(Kind::Composite, WARM_FORMAT))
             .and_then(|_| self.get(Kind::Blit, WARM_FORMAT))
-            .and_then(|_| match present_format {
-                Some(format) if format != WARM_FORMAT => self
-                    .get(Kind::RectOver, format)
-                    .and_then(|_| self.get(Kind::CoverOver, format))
-                    .and_then(|_| self.get(Kind::Blit, format))
-                    .map(|_| ()),
-                _ => Ok(()),
-            });
+            .and_then(|_| self.warm_presenting_lanes(present_format));
         guard.finish(match compiled {
             Ok(()) => WarmUp::Warm(started.elapsed()),
             Err(reason) => WarmUp::Refused(reason),
         });
+    }
+
+    /// The second set: what a device built for a surface compiles in the surface's own
+    /// negotiated format. Nothing at all for a headless device.
+    fn warm_presenting_lanes(
+        &self,
+        present_format: Option<wgpu::TextureFormat>,
+    ) -> Result<(), PipelineProblem> {
+        let Some(format) = present_format else {
+            return Ok(());
+        };
+        if format != WARM_FORMAT {
+            self.get(Kind::RectOver, format)?;
+            self.get(Kind::CoverOver, format)?;
+            self.get(Kind::Blit, format)?;
+        }
+        self.get(Kind::Present, format)?;
+        Ok(())
     }
 
     /// The pipeline for a lane and target format, compiling it now if the warm
@@ -386,6 +417,11 @@ impl PipelineStore {
     /// The blit pass's bind-group layout.
     pub(crate) fn blit_layout(&self) -> wgpu::BindGroupLayout {
         self.layout(|layouts| &layouts.blit)
+    }
+
+    /// The present pass's bind-group layout (ADR 0056).
+    pub(crate) fn present_layout(&self) -> wgpu::BindGroupLayout {
+        self.layout(|layouts| &layouts.present)
     }
 
     /// The winding resolve's source layout: one sampled texture.
@@ -656,7 +692,7 @@ mod tests {
         store.warm_up_now(Some(present));
         assert!(matches!(store.warm_up(), WarmUp::Warm(_)));
         let state = store.lock();
-        for kind in [Kind::RectOver, Kind::CoverOver, Kind::Blit] {
+        for kind in [Kind::RectOver, Kind::CoverOver, Kind::Blit, Kind::Present] {
             assert!(
                 state.pipelines.contains_key(&(kind, present)),
                 "{kind:?} missing for the present format"
@@ -665,6 +701,69 @@ mod tests {
         assert!(
             !state.pipelines.contains_key(&(Kind::Composite, present)),
             "a composite never targets the surface, so warming it there is waste"
+        );
+        assert!(
+            !state.pipelines.contains_key(&(Kind::Present, WARM_FORMAT)),
+            "a presenter draws onto the surface and onto nothing else"
+        );
+    }
+
+    /// [`Kind::Present`] is the one member of the second set that is compiled even when
+    /// the surface negotiated [`WARM_FORMAT`] itself — the other three are already
+    /// built, and this one has no first set to be in (ADR 0056). This is what makes
+    /// `Device::detach_presenter` a move rather than a compile: the pipeline a presenter
+    /// needs exists before it is asked for, built by the thread nobody blocks on.
+    #[test]
+    fn the_presenting_pass_is_warmed_for_the_surfaces_format_whatever_it_is() {
+        let device = device();
+        let (gpu, _) = device.wgpu();
+        for present in [WARM_FORMAT, wgpu::TextureFormat::Bgra8Unorm] {
+            let store = PipelineStore::new(gpu.clone());
+            store.warm_up_now(Some(present));
+            assert!(matches!(store.warm_up(), WarmUp::Warm(_)));
+            assert!(
+                store
+                    .lock()
+                    .pipelines
+                    .contains_key(&(Kind::Present, present)),
+                "the present pass is missing for {present:?}"
+            );
+        }
+        // And a headless device warms none of it: there is no surface to present to.
+        let store = PipelineStore::new(gpu.clone());
+        store.warm_up_now(None);
+        assert!(
+            !store
+                .lock()
+                .pipelines
+                .keys()
+                .any(|(kind, _)| *kind == Kind::Present),
+            "a headless device has no surface, so the presenting pass is waste"
+        );
+    }
+
+    /// The other half of ADR 0043's rule, which the presenter relies on: a pipeline the
+    /// warm set did not build is built by the first ask, **inline**, and that ask says
+    /// what it cost — which is how `PresentCost::compiled` can be truthful about a
+    /// presenter detached before its device was warm.
+    #[test]
+    fn a_pipeline_the_warm_set_missed_is_compiled_by_the_first_ask_and_says_so() {
+        let device = device();
+        let (gpu, _) = device.wgpu();
+        let store = PipelineStore::new(gpu.clone());
+        let (_, compiled) = store
+            .get(Kind::Present, WARM_FORMAT)
+            .expect("the present pipeline builds for a format the adapter renders to");
+        assert!(
+            compiled.is_some(),
+            "the ask that compiled a pipeline has to be able to say so"
+        );
+        let (_, again) = store
+            .get(Kind::Present, WARM_FORMAT)
+            .expect("and the second ask finds it cached");
+        assert!(
+            again.is_none(),
+            "a cached pipeline costs nothing and must not claim a compile"
         );
     }
 
