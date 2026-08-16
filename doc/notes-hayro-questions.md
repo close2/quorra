@@ -333,3 +333,74 @@ points of some image's grid.
    exhaustive match first — which is `command.rs`'s stated promise doing its job — and the
    test's destructuring behind it.
 
+---
+
+## 4. `mul_add` (their §6, hayro #630)
+
+### The answer
+
+**Not on any hot CPU path.** `mul_add` appears in exactly two `src/` sites in this
+workspace, and both run at most once per frame:
+
+| site | why it is cold |
+|---|---|
+| `quorra-gpu/src/winding.rs`, `sample_offsets` | at most 256 offsets, built once when the winding lane's uniform buffers are made |
+| `quorra-gpu/src/mask.rs`, `transparent_value` | §11.5.3's luminosity of one backdrop colour, once per mask plan per frame |
+
+The paths a frame actually walks — `raster::flatten`, `raster::fill_mask`,
+`raster::stroke_polylines`, the whole of `encode/` — have none. The remaining occurrences
+are in `tests/` and `examples/`, laying out fixture geometry, which neither ships nor runs
+per pixel.
+
+### The target this build assumes
+
+Baseline `x86-64`, and it has no FMA. Nothing in this repository sets `target-cpu` or
+`target-feature`: there is no tracked `.cargo/config.toml`, `Cargo.toml`'s release profile
+sets only `lto` and `codegen-units`, and `rust-toolchain.toml` pins the compiler and nothing
+else. So a `mul_add` on a hot path here would be a call into `compiler-builtins`' `fma` —
+which is hayro #630 exactly.
+
+That is not inference. This tree has already measured the sibling case: the 2026-08-14
+profiling round found `floorf`, `ceilf` and `roundf` are software on this target at
+**1.29 M instructions a frame** — 25 920 floors and 12 960 rounds from `tile_side` and
+`GlyphPlacement::of` — and recorded that raising `target-cpu` was deliberately not taken,
+because it decides which processors this library runs on
+(`doc/history/2026-08-02--2026-08-14-m1-through-adr-0048.md`). hayro's #630 thread reaches
+the same conclusion about `floor` from the other direction, including a mantissa-shifting
+replacement in the comments.
+
+### The gate
+
+`crates/quorra-gpu/tests/mul_add_hazard.rs` walks every `crates/*/src/**/*.rs` and asserts
+the set of files mentioning `mul_add` is exactly the two above. It fails in both directions:
+a new site, and a listed site that has stopped calling it — because a stale exemption is one
+nobody re-read.
+
+It is deliberately not a ban. The failure message is the deliverable: whoever adds the next
+`mul_add` is writing a gradient step or a colour transform, which is #630's own function,
+and the message tells them the target has no FMA before they profile rather than after.
+
+**WGSL's `fma` is a different question and is not gated.** `reduce.wgsl` uses it and on the
+device it is an instruction the adapter has; no host target bears on it.
+
+**Verified able to fail**, three ways: `raster::direction`'s length rewritten as
+`dx.mul_add(dx, dy * dy).sqrt()` — the natural hot-path rewrite, in a per-segment function —
+is reported as a new site; a listed path renamed is reported as a new site; and a path added
+to the list that does not call it is reported as a stale exemption.
+
+---
+
+## What this round deliberately did not do
+
+- **Did not implement §8.5.3.2's disc** for a single-point closed path or coincident points.
+  §4.5 places that decision upstream and CLAUDE.md's third consequence is explicit that we
+  honour those four decisions and do not re-take them. Growing our own disc would mean two
+  implementations of one clause across a process boundary, which is the failure §4.5 exists
+  to prevent. It is now gated and written down instead, on both sides.
+- **Did not resolve the `AIS` question** in §2 above. It changes pixels, it needs the
+  caller's answer, and it needs a corpus run: an ADR and a round of its own.
+- **Did not run the caller's corpus.** Nothing in this round moves a pixel — four new test
+  files, no source edit — so there is nothing for a corpus run to compare. Every forced
+  defect was reverted and `git status` is clean apart from the four files.
+- **Did not gate the decoding half of hayro #1319.** It is not ours: this library never
+  decodes anything, and the 30× is entirely in `pdf-model`'s bit reader.
