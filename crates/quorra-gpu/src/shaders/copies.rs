@@ -1,12 +1,13 @@
 //! The WGSL helpers that promise to be copies are held to it.
 //!
-//! WGSL has no `#include`. A helper needed by five shaders is therefore written five
+//! WGSL has no `#include`. A helper needed by six shaders is therefore written six
 //! times, and each copy carries a comment saying the copies are kept textually the
 //! same — a promise that nothing enforced, so the copies could drift apart silently
-//! and the divergence would show up as one lane masking differently from the other
-//! four on some page nobody has yet. This file is the enforcement: it reads the same
-//! sources `pipeline.rs` compiles, cuts each promised function out of every shader
-//! that defines it, and requires the texts to be equal byte for byte.
+//! and the divergence would show up as one lane masking differently from the others
+//! on some page nobody has yet. This module is the enforcement: it walks
+//! [`super::ALL`] — the same sources `pipeline.rs` compiles — cuts each promised
+//! function out of every shader that defines it, and requires the texts to be equal
+//! byte for byte.
 //!
 //! Two failure modes, both deliberate:
 //!
@@ -18,7 +19,7 @@
 //!   copies to agree with each other vacuously.
 //!
 //! And one guard on the guard: every comment in every shader that makes the sameness
-//! promise must sit above a function this file knows about. A new copied helper that
+//! promise must sit above a function this module knows about. A new copied helper that
 //! promises sameness without being listed below fails the same test that would have
 //! caught it drifting.
 //!
@@ -30,34 +31,25 @@
 //! says "same formula as rect.wgsl", which is a claim about ADR 0005's arithmetic and
 //! not about the text. Only a stated promise is guarded, because only a stated promise
 //! is a thing a reader is entitled to rely on.
+//!
+//! **Why this is a unit test and not `tests/shader_copies.rs`.** It was one, with an
+//! `include_str!` list of its own, and that list silently fell one shader behind
+//! `super`'s: `function_lane.wgsl` (ADR 0053) defines a sixth `soft_mask_value` and
+//! makes the promise, and the gate went on comparing five and asserting there were
+//! five. An integration test cannot reach a private module, so the choice was between
+//! publishing the list and moving the gate to where the list already is. ADR 0059 took
+//! the second.
 
-// Integration-test files sit outside `#[cfg(test)]`, so `clippy.toml`'s
-// allow-panic-in-tests does not reach them; this is the same policy, stated here.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-
-/// Every shader source, under the name `pipeline.rs` gives its module.
-///
-/// Included with `include_str!` from the same paths that module uses, so a shader
-/// that has moved fails to compile here rather than being skipped.
-const SHADERS: &[(&str, &str)] = &[
-    ("rect", include_str!("../src/shaders/rect.wgsl")),
-    ("coverage", include_str!("../src/shaders/coverage.wgsl")),
-    ("image", include_str!("../src/shaders/image.wgsl")),
-    ("shading", include_str!("../src/shaders/shading.wgsl")),
-    ("composite", include_str!("../src/shaders/composite.wgsl")),
-    ("reduce", include_str!("../src/shaders/reduce.wgsl")),
-    ("blit", include_str!("../src/shaders/blit.wgsl")),
-    ("winding", include_str!("../src/shaders/winding.wgsl")),
-];
+use super::ALL;
 
 /// The functions that promise to be copies, and how many copies must exist.
 ///
-/// `soft_mask_value` is ADR 0037's mask lookup: the five shaders that sample a soft
-/// mask are the rectangle and coverage lanes, the image and shading passes, and the
-/// compositor. Its per-shader wrapper `soft_mask_at` is *not* listed, and must not be:
-/// each lane reads the placement from a different uniform, and pushing that difference
-/// into the wrapper is what leaves this function copyable at all.
-const PROMISED_COPIES: &[(&str, usize)] = &[("soft_mask_value", 5)];
+/// `soft_mask_value` is ADR 0037's mask lookup: the six shaders that sample a soft
+/// mask are the rectangle and coverage lanes, the image, shading and function passes,
+/// and the compositor. Its per-shader wrapper `soft_mask_at` is *not* listed, and must
+/// not be: each lane reads the placement from a different uniform, and pushing that
+/// difference into the wrapper is what leaves this function copyable at all.
+const PROMISED_COPIES: &[(&str, usize)] = &[("soft_mask_value", 6)];
 
 /// The sentence a copied helper's comment carries.
 const PROMISE: &str = "the copies are kept textually the same";
@@ -78,12 +70,12 @@ fn function_text<'a>(shader: &str, source: &'a str, name: &str) -> Option<&'a st
         .collect();
     assert!(
         starts.len() <= 1,
-        "{shader}.wgsl defines `{name}` {} times",
+        "{shader} defines `{name}` {} times",
         starts.len()
     );
     let start = *starts.first()?;
     let end = body_end(source, start).unwrap_or_else(|| {
-        panic!("{shader}.wgsl: `{name}` has no balanced body — unclosed brace?");
+        panic!("{shader}: `{name}` has no balanced body — unclosed brace?");
     });
     source.get(start..end)
 }
@@ -132,11 +124,21 @@ fn body_end(source: &str, start: usize) -> Option<usize> {
     None
 }
 
+/// A shader's text with its comment fences and line breaks taken out, so that a
+/// sentence spanning three comment lines is one sentence to search for.
+fn prose_flow(source: &str) -> String {
+    source
+        .split_whitespace()
+        .filter(|token| *token != "//")
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Every copy of every promised helper is byte-identical to every other copy.
 #[test]
 fn promised_helpers_are_textually_identical() {
     for (name, expected) in PROMISED_COPIES {
-        let copies: Vec<(&str, &str)> = SHADERS
+        let copies: Vec<(&str, &str)> = ALL
             .iter()
             .filter_map(|(shader, source)| {
                 function_text(shader, source, name).map(|text| (*shader, text))
@@ -161,21 +163,11 @@ fn promised_helpers_are_textually_identical() {
         for (shader, text) in &copies[1..] {
             assert_eq!(
                 first_text, *text,
-                "`{name}` has drifted between {first_shader}.wgsl and {shader}.wgsl.\n\
-                 --- {first_shader}.wgsl\n{first_text}\n--- {shader}.wgsl\n{text}",
+                "`{name}` has drifted between {first_shader} and {shader}.\n\
+                 --- {first_shader}\n{first_text}\n--- {shader}\n{text}",
             );
         }
     }
-}
-
-/// A shader's text with its comment fences and line breaks taken out, so that a
-/// sentence spanning three comment lines is one sentence to search for.
-fn prose_flow(source: &str) -> String {
-    source
-        .split_whitespace()
-        .filter(|token| *token != "//")
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Nothing promises sameness without being guarded above.
@@ -184,7 +176,7 @@ fn every_sameness_promise_is_guarded() {
     let guarded: Vec<&str> = PROMISED_COPIES.iter().map(|(name, _)| *name).collect();
     let mut promises = 0usize;
 
-    for (shader, source) in SHADERS {
+    for (shader, source) in ALL {
         let flow = prose_flow(source);
         for (at, _) in flow.match_indices(PROMISE) {
             promises = promises.saturating_add(1);
@@ -194,7 +186,7 @@ fn every_sameness_promise_is_guarded() {
             let declared = rest.find("fn ").map(|from| rest.split_at(from).1);
             let name = declared
                 .unwrap_or_else(|| {
-                    panic!("{shader}.wgsl promises sameness with no function below it");
+                    panic!("{shader} promises sameness with no function below it");
                 })
                 .trim_start_matches("fn ")
                 .split('(')
@@ -202,7 +194,7 @@ fn every_sameness_promise_is_guarded() {
                 .unwrap_or_default();
             assert!(
                 guarded.contains(&name),
-                "{shader}.wgsl promises that `{name}` is kept textually the same as its \
+                "{shader} promises that `{name}` is kept textually the same as its \
                  copies, but nothing checks it — add it to PROMISED_COPIES",
             );
         }

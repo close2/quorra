@@ -202,7 +202,29 @@ pub enum SceneError {
         target: u32,
     },
     /// A group's constant alpha was NaN, infinite, or outside `0..=1`.
+    ///
+    /// The range is the clause's, not ours. ISO 32000-2 §11.3.7.2:
+    ///
+    /// > All of the shape and opacity inputs shall have values in the range 0.0 to 1.0
+    /// > (inclusive), with a default value of 1.0.
+    ///
+    /// A group's alpha is one of those inputs because §11.6.4.4 puts it there: "the
+    /// nonstroking alpha constant shall also be applied when painting a transparency
+    /// group's results onto its backdrop". NaN and the infinities are ours: a PDF number
+    /// is neither, so a scene carrying one says something went wrong upstream.
     InvalidGroupAlpha {
+        /// The offending alpha.
+        alpha: f32,
+    },
+    /// An image command's constant alpha was NaN, infinite, or outside `0..=1`.
+    ///
+    /// The same quantity as [`SceneError::InvalidGroupAlpha`] — §11.6.4.4's constant
+    /// opacity, in §11.3.7.2's range — applied to an elementary object rather than to a
+    /// group's result. It is a variant of its own because the two are refused from
+    /// different calls, and a caller told a *group's* alpha was wrong by
+    /// [`SceneBuilder::image`](crate::scene::SceneBuilder::image) is sent to look at a
+    /// group it may not have.
+    InvalidImageAlpha {
         /// The offending alpha.
         alpha: f32,
     },
@@ -334,6 +356,9 @@ impl fmt::Display for SceneError {
             ),
             Self::InvalidGroupAlpha { alpha } => {
                 write!(f, "group alpha non-finite or outside 0..=1: {alpha}")
+            }
+            Self::InvalidImageAlpha { alpha } => {
+                write!(f, "image alpha non-finite or outside 0..=1: {alpha}")
             }
             Self::UnknownClip { clip, allocated } => {
                 write!(

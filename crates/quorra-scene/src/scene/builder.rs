@@ -207,7 +207,9 @@ impl SceneBuilder {
     ///
     /// # Errors
     ///
-    /// Refuses an invalid alpha, an unknown clip, nesting beyond the bound, a
+    /// Refuses an invalid alpha
+    /// ([`SceneError::InvalidGroupAlpha`](crate::error::SceneError::InvalidGroupAlpha)),
+    /// an unknown clip, nesting beyond the bound, a
     /// non-isolated group in a position §11.4.4's arithmetic cannot survive
     /// ([`SceneError::NonIsolatedGroupUnsupported`]), and whatever `body` itself
     /// refuses. On any error the group is discarded whole; the builder remains usable
@@ -217,7 +219,7 @@ impl SceneBuilder {
         spec: GroupSpec,
         body: impl FnOnce(&mut Self) -> Result<(), SceneError>,
     ) -> Result<(), SceneError> {
-        Self::check_alpha(spec.alpha)?;
+        Self::check_group_alpha(spec.alpha)?;
         self.check_clip(spec.clip)?;
         self.check_mask(spec.mask)?;
         Self::check_group_compose(&spec)?;
@@ -234,8 +236,10 @@ impl SceneBuilder {
     ///
     /// # Errors
     ///
-    /// Refuses non-finite transforms, an alpha outside `0..=1`, and clip or mask
-    /// identifiers this scene never allocated.
+    /// Refuses non-finite transforms, an alpha outside `0..=1`
+    /// ([`SceneError::InvalidImageAlpha`](crate::error::SceneError::InvalidImageAlpha) —
+    /// §11.6.4.4's constant opacity, in §11.3.7.2's range), and clip or mask identifiers
+    /// this scene never allocated.
     #[allow(clippy::too_many_arguments)] // the brief's §2.3 signature, mask last (note 8)
     pub fn image(
         &mut self,
@@ -248,7 +252,7 @@ impl SceneBuilder {
         mask: Option<MaskId>,
     ) -> Result<(), SceneError> {
         Self::check_transform(transform)?;
-        Self::check_alpha(alpha)?;
+        Self::check_image_alpha(alpha)?;
         self.check_clip(clip)?;
         self.check_mask(mask)?;
         self.push(Command::Image {
