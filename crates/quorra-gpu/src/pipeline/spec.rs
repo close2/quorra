@@ -256,11 +256,15 @@ impl<'a> Spec<'a> {
                 Self::full_screen("quorra reduce", &modules.reduce, &layouts.reduce_pipe)
             }
             Kind::Blit => Self::full_screen("quorra blit", &modules.blit, &layouts.blit_pipe),
-            // A full-screen triangle like the three above, and the one that blends:
-            // `layers` is a slice, so the second layer of a present has to land *over*
-            // the first rather than replace it, and both are premultiplied rasters —
-            // which is exactly what OVER's factors compose (ADR 0010's algebra, applied
-            // to two finished rasters rather than to a page).
+            // **Not** a full-screen triangle like the three above: a strip of four
+            // vertices, because a present draws each layer's own rectangle rather than
+            // the whole window (ADR 0058) — the rectangle is in the layer's uniform and
+            // the vertex stage picks a corner per index, so there is still no vertex
+            // buffer. The one that blends, too: `layers` is a slice, so the second layer
+            // of a present has to land *over* the first rather than replace it, and both
+            // are premultiplied rasters — which is exactly what OVER's factors compose
+            // (ADR 0010's algebra, applied to two finished rasters rather than to a
+            // page).
             Kind::Present => Spec {
                 label: "quorra present",
                 shader: &modules.present,
@@ -270,7 +274,7 @@ impl<'a> Spec<'a> {
                 blend: Some(OVER),
                 buffer: None,
                 step: wgpu::VertexStepMode::Instance,
-                strip: false,
+                strip: true,
             },
             // Additive, and that is the whole mechanism: what lands in the sheet is
             // the sum of every triangle's ±1, which is the winding number (ADR 0016).

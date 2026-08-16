@@ -37,6 +37,9 @@ struct Params {
     // a named lane is easier to check than a gap (`shaders/layout.rs` proves the
     // offsets).
     inv1: vec4f,
+    // The rectangle this pass draws, in clip space: left, top, right, bottom. The host
+    // computes it from the placement (ADR 0058); see `vs_main`.
+    bounds: vec4f,
     // The layer's extent in texels. The sample point is inside the layer exactly when it
     // is inside [0, source), and outside it this shader writes transparency.
     source: vec2f,
@@ -50,16 +53,24 @@ struct VsOut {
     @builtin(position) position: vec4f,
 }
 
-// The full-screen triangle every full-target pass in this crate uses: three vertices
-// covering clip space, no vertex buffer, no placement arithmetic in this stage. A layer
-// under an arbitrary affine has no axis-aligned quad to draw, so the fragment stage is
-// where the placement is answered — and the pass is one triangle over the window either
-// way.
+// The layer's own rectangle, as a two-triangle strip: `params.bounds` is where the
+// placement puts this layer on the window and nowhere else, so the window's other
+// pixels generate no fragment at all (ADR 0058). Four vertices, no vertex buffer, and
+// still no placement arithmetic in this stage — the host computes the rectangle,
+// because it is the side that knows how big the window is.
+//
+// **This stage is a bound and never a decision.** `params.bounds` is the layer's device
+// corners grown outward to whole pixels and clamped to the target, so every pixel whose
+// centre `layer_at` would accept is inside it; which texel a fragment gets, and whether
+// it gets one at all, stays entirely `layer_at`'s. That is what makes the pass draw the
+// same bytes as the full-screen triangle it replaces rather than nearly the same ones.
+//
+// Strip order is (left, top), (right, top), (left, bottom), (right, bottom).
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
     var out: VsOut;
-    let x = f32(i32(vertex_index & 1u) * 4 - 1);
-    let y = f32(i32(vertex_index >> 1u) * 4 - 1);
+    let x = select(params.bounds.z, params.bounds.x, (vertex_index & 1u) == 0u);
+    let y = select(params.bounds.w, params.bounds.y, vertex_index < 2u);
     out.position = vec4f(x, y, 0.0, 1.0);
     return out;
 }

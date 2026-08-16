@@ -29,7 +29,8 @@
 //! 5. The finished page goes on the window under a 2× placement offset by (64, 32),
 //!    with the chrome over it at the identity, and every sampled pixel is where those
 //!    two affines put it — including the strip the page does not reach, which is the
-//!    assertion that would pass at the identity and must not.
+//!    assertion that would pass at the identity and must not, and the page's own first
+//!    row and column, which is the rectangle ADR 0058 draws seen from both sides.
 //! 6. The same page presented under `ImageFilter::Linear` — the sampler branch, whose
 //!    normalised coordinates nothing else here exercises — still lands where the affine
 //!    says, and alone on the window, because a slice is what is shown and not what was.
@@ -274,6 +275,31 @@ fn check_the_affine_landed() {
     );
     // The chrome, over the page, at the identity.
     same(shot.at(620, 460), rgb(fixture::CHROME), "the chrome's mark");
+    check_the_pages_own_edges(&shot);
+}
+
+/// **ADR 0058's seam**: the page's first covered pixel and the one beside it.
+///
+/// The present pass draws each layer's own rectangle rather than the whole window, so
+/// there is now a boundary in the *geometry* where before there was only one in the
+/// fragment stage's arithmetic — and a rectangle one pixel too small is a page missing
+/// its outermost row, which no interior sample can see. These four points are that
+/// boundary from both sides: the placement puts page texel (0, 0) at device (64, 32), so
+/// column 64 and row 32 are the page's own first pixel and column 63 and row 31 are the
+/// window's clear.
+///
+/// It is the same argument the mark's left edge makes about the *affine*, made about the
+/// rectangle that is now drawn: the interior assertions above pass under a bound that is
+/// too small by a pixel, and these do not.
+fn check_the_pages_own_edges(shot: &xwd::Shot) {
+    same(shot.at(63, 100), [0, 0, 0], "one pixel left of the page");
+    same(
+        shot.at(64, 100),
+        rgb(fixture::FIELD),
+        "the page's left edge",
+    );
+    same(shot.at(200, 31), [0, 0, 0], "one pixel above the page");
+    same(shot.at(200, 32), rgb(fixture::FIELD), "the page's top edge");
 }
 
 /// The filter's other branch, run rather than only compiled.

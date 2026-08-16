@@ -218,6 +218,7 @@ impl Presenter {
             &self.sampler,
             &self.pipelines.present_layout(),
             layers,
+            (width, height),
         )?;
 
         let acquire_started = Instant::now();

@@ -273,14 +273,15 @@ fn bind_layouts(device: &wgpu::Device) -> BindLayouts {
         // The present pass (ADR 0056). Filterable, unlike every other sampled texture in
         // this crate except the image's: a layer is put on the surface under an affine
         // the host chose, so the sample point does not land on texel centres and the
-        // hardware sampler must be usable on it. 48 bytes: the placement's inverse (six
-        // coefficients across two vec4s, the second carrying the filter), then the
-        // layer's extent in texels. Fragment-only — the vertex stage is a full-screen
-        // triangle that reads nothing.
+        // hardware sampler must be usable on it. 64 bytes: the placement's inverse (six
+        // coefficients across two vec4s, the second carrying the filter), the rectangle
+        // the vertex stage draws, then the layer's extent in texels. **Both stages**,
+        // since ADR 0058: the vertex stage reads the rectangle and the fragment stage
+        // everything else, which is the same `QUAD_UNIFORM` shape the lanes use.
         present: make(
             "quorra present",
             &[
-                uniform_entry(0, 48, wgpu::ShaderStages::FRAGMENT),
+                uniform_entry(0, 64, QUAD_UNIFORM),
                 filterable_entry(1),
                 sampler_entry(2),
             ],

@@ -1,5 +1,5 @@
-//! What one present records: a bind group per layer, a full-screen triangle each, one
-//! submission — and the uniform bytes `present.wgsl` reads.
+//! What one present records: a bind group per layer, the layer's own rectangle drawn
+//! for each, one submission — and the uniform bytes `present.wgsl` reads.
 //!
 //! Split from [`Presenter`](super::Presenter) along the seam that matters here: this
 //! module is what a present *does to the device*, and its parent is who may ask. The
@@ -10,31 +10,64 @@
 //! [`bind_layers`] (which can refuse) takes no target, and [`record`] (which cannot)
 //! takes one.
 
-use quorra_scene::{Affine, ImageFilter};
+use quorra_scene::ImageFilter;
 
 use super::Layer;
+use super::layer::Placed;
 use crate::error::{LayerProblem, RenderError};
 use crate::pipeline::captured;
 
-/// The 48 bytes `present.wgsl`'s `Params` reads, in its order: the placement's inverse
-/// in §8.3.3's `[a b c d e f]` order across two `vec4f`s, the filter, and the layer's
-/// extent in texels.
+/// The 64 bytes `present.wgsl`'s `Params` reads, in its order: the placement's inverse
+/// in §8.3.3's `[a b c d e f]` order across two `vec4f`s, the filter, the rectangle the
+/// vertex stage draws, and the layer's extent in texels.
 ///
 /// The `vec4f` split is the shader's arithmetic written down: `inv0` is the linear part
 /// a fragment's centre is multiplied by, `inv1.xy` the translation added to it. The
 /// third lane of `inv1` is the filter as a float because a `u32` there would make the
 /// struct's uniform layout depend on a mixed-type rule for nothing gained.
-fn params_bytes(inverse: Affine, filter: ImageFilter, extent: [f32; 2]) -> [u8; 48] {
+///
+/// **`bounds` is converted to clip space here**, and this is the only place in the
+/// present path that knows how big the target is: the layer's own arithmetic is in
+/// device pixels, where a bound can be reasoned about and asserted on, and the two
+/// divisions that turn it into what a vertex stage wants live beside the write that
+/// needs them (ADR 0058).
+fn params_bytes(
+    placed: Placed,
+    filter: ImageFilter,
+    extent: [f32; 2],
+    target: (u32, u32),
+) -> [u8; 64] {
     let filter = match filter {
         ImageFilter::Linear => 1.0,
         ImageFilter::Nearest => 0.0,
     };
+    let inverse = placed.inverse;
+    let [left, top, right, bottom] = placed.bounds;
+    // Device pixels to clip space: x doubles across the target and y is inverted,
+    // because clip space puts +1 at the top where a device row 0 is. Neither divisor
+    // can be zero — a present at a target with no pixels is refused by name before any
+    // layer is looked at (`RenderError::ZeroSizeTarget`).
+    #[allow(clippy::cast_precision_loss)] // a target's extent is exact in f32
+    let (width, height) = (target.0 as f32, target.1 as f32);
+    let clip_x = |x: f32| 2.0 * x / width - 1.0;
+    let clip_y = |y: f32| 1.0 - 2.0 * y / height;
     let values = [
-        inverse.a, inverse.b, inverse.c, inverse.d, // inv0
-        inverse.e, inverse.f, filter, 0.0, // inv1
-        extent[0], extent[1], // source
+        inverse.a,
+        inverse.b,
+        inverse.c,
+        inverse.d, // inv0
+        inverse.e,
+        inverse.f,
+        filter,
+        0.0, // inv1
+        clip_x(left),
+        clip_y(top),
+        clip_x(right),
+        clip_y(bottom), // bounds
+        extent[0],
+        extent[1], // source
     ];
-    let mut bytes = [0_u8; 48];
+    let mut bytes = [0_u8; 64];
     for (slot, value) in bytes.chunks_exact_mut(4).zip(values) {
         slot.copy_from_slice(&value.to_le_bytes());
     }
@@ -56,9 +89,10 @@ fn bind_layer(
     sampler: &wgpu::Sampler,
     layout: &wgpu::BindGroupLayout,
     layer: &Layer<'_>,
-    inverse: Affine,
+    placed: Placed,
+    target: (u32, u32),
 ) -> Result<wgpu::BindGroup, LayerProblem> {
-    let bytes = params_bytes(inverse, layer.filter, layer.extent());
+    let bytes = params_bytes(placed, layer.filter, layer.extent(), target);
     let uniform = gpu.create_buffer(&wgpu::BufferDescriptor {
         label: Some("quorra present placement"),
         size: bytes.len() as u64,
@@ -108,8 +142,10 @@ fn bind_layer(
 
 /// Every layer's bind group, in the order they will be drawn, or the first refusal.
 ///
-/// Takes no target on purpose: nothing here has acquired anything, so a refusal costs
-/// the swapchain nothing.
+/// Takes the target's **size** and not the target: a rectangle in clip space is a
+/// fraction of the window and cannot be computed without one, and a number is not a
+/// swapchain texture — nothing here has acquired anything, so a refusal still costs the
+/// swapchain nothing.
 ///
 /// # Errors
 ///
@@ -120,11 +156,12 @@ pub(super) fn bind_layers(
     sampler: &wgpu::Sampler,
     layout: &wgpu::BindGroupLayout,
     layers: &[Layer<'_>],
+    target: (u32, u32),
 ) -> Result<Vec<wgpu::BindGroup>, RenderError> {
     let mut binds = Vec::with_capacity(layers.len());
     for (index, layer) in layers.iter().enumerate() {
-        let inverse = layer.check(index)?;
-        let bind = bind_layer(gpu, queue, sampler, layout, layer, inverse)
+        let placed = layer.check(index, target)?;
+        let bind = bind_layer(gpu, queue, sampler, layout, layer, placed, target)
             .map_err(|reason| RenderError::LayerRefused { index, reason })?;
         binds.push(bind);
     }
@@ -172,18 +209,27 @@ pub(super) fn record(
         pass.set_pipeline(pipeline);
         for bind in binds {
             pass.set_bind_group(0, bind, &[]);
-            pass.draw(0..3, 0..1);
+            // Four vertices, one strip: the layer's own rectangle, whose corners this
+            // layer's uniform carries (ADR 0058). A layer that reaches no pixel of the
+            // target draws an empty rectangle and no fragment, which is the same
+            // nothing the fragment stage's bounds test used to produce a window at a
+            // time.
+            pass.draw(0..4, 0..1);
         }
     }
     queue.submit(std::iter::once(recorder.finish()));
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::panic)] // test-file policy: a fixture that cannot run must fail loudly
+// Test-file policy: a fixture that cannot run must fail loudly. And the clip coordinates
+// below are asserted against the same two operations that produced them — a doubling and
+// a division by a power of two, both exact — so equality is the assertion and a tolerance
+// would weaken it.
+#[allow(clippy::expect_used, clippy::panic, clippy::float_cmp)]
 mod tests {
     use quorra_scene::{Affine, ImageFilter};
 
-    use super::{Layer, bind_layers, params_bytes};
+    use super::{Layer, Placed, bind_layers, params_bytes};
     use crate::device::Device;
     use crate::error::{LayerProblem, RenderError};
     use crate::pipeline::WARM_FORMAT;
@@ -253,6 +299,7 @@ mod tests {
                 placement: Affine::IDENTITY,
                 filter: ImageFilter::Linear,
             }],
+            (64, 64),
         )
         .map(drop)
     }
@@ -306,7 +353,13 @@ mod tests {
             e: 5.5,
             f: 6.5,
         };
-        let bytes = params_bytes(inverse, ImageFilter::Linear, [640.0, 480.0]);
+        // A target of 2×2 pixels makes each clip coordinate a distinct small number:
+        // device x 0 → −1, 1 → 0, and device y 0 → 1, 2 → −1.
+        let placed = Placed {
+            inverse,
+            bounds: [0.0, 0.0, 1.0, 2.0],
+        };
+        let bytes = params_bytes(placed, ImageFilter::Linear, [640.0, 480.0], (2, 2));
         check(
             shaders::PRESENT,
             "Params",
@@ -314,6 +367,7 @@ mod tests {
             &[
                 ("inv0", Lane::Vec4([1.5, 2.5, 3.5, 4.5])),
                 ("inv1", Lane::Vec4([5.5, 6.5, 1.0, 0.0])),
+                ("bounds", Lane::Vec4([-1.0, 1.0, 0.0, -1.0])),
                 ("source", Lane::Vec2([640.0, 480.0])),
             ],
         );
@@ -323,9 +377,56 @@ mod tests {
     /// variant is is part of the contract rather than an encoding detail.
     #[test]
     fn nearest_is_zero_and_linear_is_one() {
-        let nearest = params_bytes(Affine::IDENTITY, ImageFilter::Nearest, [1.0, 1.0]);
-        let linear = params_bytes(Affine::IDENTITY, ImageFilter::Linear, [1.0, 1.0]);
+        let placed = Placed {
+            inverse: Affine::IDENTITY,
+            bounds: [0.0, 0.0, 1.0, 1.0],
+        };
+        let nearest = params_bytes(placed, ImageFilter::Nearest, [1.0, 1.0], (1, 1));
+        let linear = params_bytes(placed, ImageFilter::Linear, [1.0, 1.0], (1, 1));
         assert_eq!(&nearest[24..28], &0.0_f32.to_le_bytes());
         assert_eq!(&linear[24..28], &1.0_f32.to_le_bytes());
+    }
+
+    /// **The whole window when the layer is the whole window, and the layer's own
+    /// rectangle when it is not** — the arithmetic ADR 0058 is, in the two bytes a host
+    /// can check it by: a corner of clip space is ±1, and a rectangle inside the window
+    /// is inside those.
+    ///
+    /// Derived rather than observed: clip space runs −1 to 1 across the target with +1
+    /// at the top, so a 640×480 layer at the identity on a 640×480 window is exactly
+    /// (−1, 1)…(1, −1) *once the outward pixel is clamped away*, and a 64×32 layer at
+    /// (320, 240) starts at 2·319/640 − 1.
+    #[test]
+    fn the_bound_reaches_the_clip_corners_only_when_the_layer_does() {
+        let placed = |bounds| Placed {
+            inverse: Affine::IDENTITY,
+            bounds,
+        };
+        let read = |bytes: [u8; 64]| {
+            let at = |i: usize| f32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+            [at(32), at(36), at(40), at(44)]
+        };
+        let whole = params_bytes(
+            placed([0.0, 0.0, 640.0, 480.0]),
+            ImageFilter::Nearest,
+            [640.0, 480.0],
+            (640, 480),
+        );
+        assert_eq!(read(whole), [-1.0, 1.0, 1.0, -1.0]);
+        let inset = params_bytes(
+            placed([319.0, 239.0, 385.0, 273.0]),
+            ImageFilter::Nearest,
+            [64.0, 32.0],
+            (640, 480),
+        );
+        assert_eq!(
+            read(inset),
+            [
+                2.0 * 319.0 / 640.0 - 1.0,
+                1.0 - 2.0 * 239.0 / 480.0,
+                2.0 * 385.0 / 640.0 - 1.0,
+                1.0 - 2.0 * 273.0 / 480.0,
+            ]
+        );
     }
 }
