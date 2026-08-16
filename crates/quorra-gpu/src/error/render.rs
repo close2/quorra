@@ -22,8 +22,10 @@ use super::layer::LayerProblem;
 use super::pipeline::PipelineProblem;
 use super::surface::SurfaceProblem;
 
-/// Why a frame was refused. A refused frame draws nothing and reports nothing as
-/// drawn; each variant names what ran out or what did not hold (§5 of the brief).
+/// Why a frame was refused — or a present, which is a frame's last step happening
+/// somewhere else (ADR 0056). A refused frame draws nothing and reports nothing as
+/// drawn, and a refused present acquires nothing; each variant names what ran out or
+/// what did not hold (§5 of the brief).
 #[derive(Debug, Error)]
 pub enum RenderError {
     /// The viewport exceeds what this adapter can render.

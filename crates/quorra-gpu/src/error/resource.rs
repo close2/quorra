@@ -53,7 +53,9 @@ pub enum ResourceProblem {
     /// Ramp stops out of ascending order.
     #[error("ramp stops are not in ascending offset order")]
     RampUnordered,
-    /// A ramp stop colour outside its range.
+    /// A ramp stop colour whose red, green, blue or alpha component is NaN, infinite, or
+    /// outside `0..=1` — the four questions
+    /// [`Color::is_valid`](quorra_scene::Color::is_valid) asks, all of them.
     #[error("ramp stop colour is non-finite or outside 0..=1")]
     RampColorInvalid,
 }

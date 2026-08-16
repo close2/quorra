@@ -14,7 +14,12 @@ use thiserror::Error;
 use super::function::FunctionProblem;
 use super::resource::ResourceProblem;
 
-/// Why a device could not be constructed. Every variant names what was unavailable.
+/// Why a device could not be constructed, or would not take or give up a resource.
+///
+/// Every variant names what was unavailable, what the budget was and what asked to
+/// exceed it, or which identifier was not resident. The first four are construction and
+/// the last five are residency; both are outside any frame, which is what makes them one
+/// enum rather than two.
 #[derive(Debug, Error)]
 pub enum DeviceError {
     /// No adapter matched the request. Carries every adapter that was available so

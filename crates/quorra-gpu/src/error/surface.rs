@@ -24,6 +24,11 @@ pub enum SurfaceProblem {
     Lost,
     /// The window is occluded; there is nothing to present to right now.
     Occluded,
-    /// The surface reported a validation problem.
+    /// `wgpu`'s validation refused the acquire itself.
+    ///
+    /// It carries no detail because `wgpu` 30's arm carries none: the message went to an
+    /// error scope or to the uncaptured-error handler at the moment it was raised, and
+    /// what reaches this call site is the bare fact that one was. That is a gap in what
+    /// this refusal can name, and it is named here rather than papered over.
     Validation,
 }
