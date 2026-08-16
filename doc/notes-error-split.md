@@ -188,7 +188,17 @@ the specification, and only a reader who already knew could tell).
    `crate::surface`.** That is deliberate — a vocabulary is named for the subsystem that
    raises it — and the paths are unambiguous, but a reader skimming a stack trace should
    know the two exist.
-4. **`SurfaceProblem` is the one type here that is not an `Error`.** It derives `Debug,
+4. **`doc/HANDOVER.md`'s list of files past the smell is stale in both directions**, and
+   this round is the reason to say so rather than the reason it happened. It names
+   `error.rs` (558 at the time, 583 when this round opened) and `encode/parallel.rs`
+   (532) as "the two". Counted whole, `raster.rs` is 1 400, `pipeline.rs` 805,
+   `resources.rs` 606, `outline.rs` 566 and `atlas.rs` 509 — none of them named. Counted
+   to the `#[cfg(test)]` module, which is the fairer measure for a file that carries its
+   own unit tests, the ranking is `raster.rs` **810**, `pipeline.rs` **573**, and nothing
+   else in the crate over 500 — `encode/parallel.rs` is 417 and is no longer on the list
+   at all. Two candidates, one of them by a wide margin, and neither has been read for
+   this purpose.
+5. **`SurfaceProblem` is the one type here that is not an `Error`.** It derives `Debug,
    Clone, Copy, PartialEq, Eq` and reaches a message through `{reason:?}` in
    `RenderError::SurfaceUnavailable`, so its five variants print as identifiers rather
    than sentences. Giving it `thiserror::Error` would change the text of a public error
