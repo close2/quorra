@@ -242,6 +242,13 @@ impl Encoder<'_> {
 
     /// A composited group's clip residue, rasterised over its visible region into
     /// the scratch image for the composite pass to sample.
+    ///
+    /// The region is [`ResolvedClip::mark_bounds`] ∩ target, which for a chain whose
+    /// links are all residues is the links' own box rather than the whole page
+    /// (ADR 0057). Outside that box the region is what the branch below calls "admit
+    /// nothing inside, nothing outside" — so shrinking it drops the group nowhere it
+    /// would have contributed, and a group under one curve clip stops costing a
+    /// page-sized mask.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
     pub(super) fn plan_group_residue(
@@ -251,10 +258,11 @@ impl Encoder<'_> {
         let Some(_) = resolved.residues else {
             return Ok(([0.0; 4], [0.0; 2]));
         };
-        let vx0 = resolved.rect.min.x.max(0.0);
-        let vy0 = resolved.rect.min.y.max(0.0);
-        let vx1 = resolved.rect.max.x.min(self.viewport.width as f32);
-        let vy1 = resolved.rect.max.y.min(self.viewport.height as f32);
+        let region = resolved.mark_bounds();
+        let vx0 = region.min.x.max(0.0);
+        let vy0 = region.min.y.max(0.0);
+        let vx1 = region.max.x.min(self.viewport.width as f32);
+        let vy1 = region.max.y.min(self.viewport.height as f32);
         if vx0 >= vx1 || vy0 >= vy1 {
             // Clipped to nothing: an empty region, which the composite reads as
             // "admit nothing inside, nothing outside" — the group vanishes, as an

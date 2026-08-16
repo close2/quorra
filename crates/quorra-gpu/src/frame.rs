@@ -147,6 +147,58 @@ impl Timings {
     }
 }
 
+/// What a frame's coverage sheet holds — the scratch R8 image every rasterised mark's
+/// tile is packed into (ADR 0021, ADR 0034).
+///
+/// **The same four numbers whether the frame was drawn or refused**:
+/// [`Counters::coverage`] on a drawn one, and inside
+/// [`RenderError::ScratchExhausted`] on a frame the sheet's own ceiling refused. That
+/// pairing is the point of the type. Until
+/// ADR 0057 a refused frame carried no accounting at all, so "this page asks for more
+/// coverage than any adapter would hold" and "this adapter's texture limit is small"
+/// were the same message; they are now the same *comparison*, made on the same fields,
+/// in both states.
+///
+/// Counts and not ratios, for CLAUDE.md's reason: an occupancy figure is a statement
+/// about the sheet you packed, never about the coverage you should not have asked for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoverageSheet {
+    /// Coverage tiles seated on the sheet.
+    ///
+    /// On a drawn frame this is [`Counters::tiles`], reached from the sheet's side; it
+    /// is repeated here so that a refusal — which has no `Counters` — can report it too.
+    pub tiles: u32,
+    /// Texels those tiles hold: **what the frame rasterised, uploaded and sampled**.
+    ///
+    /// The number a clip that bounds its mark's tile moves, and the one no counter had
+    /// before ADR 0057 — [`tiles`](CoverageSheet::tiles) is a count of tiles and says
+    /// nothing about how large one was, so a page whose coverage fell by 402× reported
+    /// exactly the same figures as before.
+    pub texels: u64,
+    /// The sheet's width, once every tile has a shelf.
+    pub width: u32,
+    /// The sheet's height, which is the sum of the shelf heights it opened.
+    ///
+    /// `width × height` is what was *allocated*; the difference from
+    /// [`texels`](CoverageSheet::texels) is what shelf packing left empty. This is also
+    /// the extent
+    /// [`RenderError::ScratchExhausted`]
+    /// bounds: an adapter's per-side texture limit is reached on this axis first,
+    /// because a shelf fills in width before the sheet grows tall.
+    pub height: u32,
+}
+
+impl std::fmt::Display for CoverageSheet {
+    /// As it reads inside a refusal: extent, then what is on it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}x{} holding {} tiles and {} texels",
+            self.width, self.height, self.tiles, self.texels
+        )
+    }
+}
+
 /// What this frame did, in counts (§8 of the brief).
 ///
 /// The atlas and tiling counters exist from M1 with honest zeros: the fields are the
@@ -227,6 +279,14 @@ pub struct Counters {
     /// milestones after the lane that fills it shipped, which is the shape of counter a
     /// `Frame` must not have.
     pub tiles: u32,
+    /// What this frame's coverage cost: the sheet's extent and the texels its tiles hold
+    /// (ADR 0057).
+    ///
+    /// [`tiles`](Counters::tiles) says how many marks reached the sheet and never how
+    /// large one was, which is why the two rounds before ADR 0057 could measure a
+    /// four-hundred-fold change in a page's coverage and move no counter at all. This is
+    /// that number.
+    pub coverage: CoverageSheet,
     /// Path segments processed (M5; 0 until then).
     pub segments: u32,
     /// Commands rejected for reaching no pixel of the target — outside it, or clipped

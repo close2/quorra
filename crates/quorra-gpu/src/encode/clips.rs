@@ -7,6 +7,9 @@
 //! alone (ADR 0007); a link that is anything else is kept as a residue and rasterised at
 //! draw time, where the links intersect rather than multiply (ADR 0030) and where the
 //! chain covers the region it occupies rather than the mark that asked (ADR 0049).
+//! **A residue link is not a rectangle and cannot replace the clip rectangle, but it
+//! still has one** — its control hull's device box, which bounds every pixel it can
+//! admit and so bounds every coverage tile drawn under it (ADR 0057).
 //! Chains are memoised across shared prefixes, because a page shares them: the caller's
 //! worst holds 3 608.
 //!
@@ -18,13 +21,14 @@
 
 use std::sync::Arc;
 
-use quorra_scene::{ClipId, FillRule, Point, Rect, Scene};
+use quorra_scene::{ClipId, FillRule, OutlineId, Point, Rect, Scene, Segment};
 
 use super::Encoder;
 use super::device_space::{apply, compose, transform_preserves_axes};
+use super::hull::HullMemo;
 use super::residue::Verdict;
 use crate::error::RenderError;
-use crate::raster::{self, Rule};
+use crate::raster::{self, DeviceTransform, Rule};
 use crate::resources::ResourceStore;
 use crate::viewport::Viewport;
 
@@ -37,6 +41,38 @@ pub(super) const OPEN_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
 pub(super) struct ResolvedClip {
     pub(super) rect: Rect,
     pub(super) residues: Option<Arc<ResidueLink>>,
+    /// The device box the residue links admit: their control hulls' boxes intersected,
+    /// open when the chain has no residue link (ADR 0057).
+    ///
+    /// Separate from `rect` because the two are read for different things. `rect` is the
+    /// clip *rectangle* — what the shader clips a quad to, and what
+    /// `Counters::clip_distinct_regions` counts — and §8.5.4's rectangular links are the
+    /// whole of it. This is a **bound**, derived from a curve's control hull rather than
+    /// from the curve, and it is what a rasterised coverage tile is sized by
+    /// ([`ResolvedClip::mark_bounds`]).
+    residue_bounds: Rect,
+}
+
+impl ResolvedClip {
+    /// The device rectangle a mark under this chain can reach: the rectangular links'
+    /// intersection, held further by the box the residue links admit.
+    ///
+    /// **Every rasterised coverage tile is sized by this and not by `rect`** (ADR 0057).
+    /// Removing pixels outside the residue box removes nothing: ISO 32000-2 §8.5.4 makes
+    /// the chain one region arrived at by intersection (ADR 0030), and outside a closed
+    /// link's own bounds that link winds nothing — so the chain's coverage there is zero
+    /// and the product a tile carries is zero with it. Before this the pixels were
+    /// rasterised, shelf-packed, uploaded and sampled to no effect: at 4× the caller's
+    /// `bug1703683_page2_reduced.pdf` asked for 1 008 561 911 texels where its chains
+    /// admit 2 297 897.
+    ///
+    /// The box is the links' **control hulls**, so it is an upper bound on the flattened
+    /// bounds [`chain_region`] computes for the region actually rasterised. Conservative
+    /// in the only direction that is safe: a tile may be larger than the chain needs,
+    /// never smaller.
+    pub(super) fn mark_bounds(&self) -> Rect {
+        self.rect.intersection(self.residue_bounds)
+    }
 }
 
 #[derive(Debug)]
@@ -45,13 +81,19 @@ pub(super) struct ResidueLink {
     parent: Option<Arc<ResidueLink>>,
 }
 
+/// The rectangle that admits everything, as a [`Rect`].
+fn open_rect() -> Rect {
+    Rect::new(
+        Point::new(OPEN_CLIP[0], OPEN_CLIP[1]),
+        Point::new(OPEN_CLIP[2], OPEN_CLIP[3]),
+    )
+}
+
 pub(super) fn open_clip() -> ResolvedClip {
     ResolvedClip {
-        rect: Rect::new(
-            Point::new(OPEN_CLIP[0], OPEN_CLIP[1]),
-            Point::new(OPEN_CLIP[2], OPEN_CLIP[3]),
-        ),
+        rect: open_rect(),
         residues: None,
+        residue_bounds: open_rect(),
     }
 }
 
@@ -77,6 +119,7 @@ impl ClipResolver {
         scene: &Scene,
         viewport: &Viewport<'_>,
         resources: &ResourceStore,
+        hulls: &mut HullMemo,
     ) -> Result<ResolvedClip, RenderError> {
         let mut pending: Vec<ClipId> = Vec::new();
         let mut cursor = Some(id);
@@ -104,26 +147,27 @@ impl ClipResolver {
                 None
             };
             current = match rect_link {
-                Some(rect) => {
-                    let p0 = apply(&to_device, rect.min);
-                    let p1 = apply(&to_device, rect.max);
-                    let device_rect = Rect::new(
-                        Point::new(p0.x.min(p1.x), p0.y.min(p1.y)),
-                        Point::new(p0.x.max(p1.x), p0.y.max(p1.y)),
-                    );
-                    ResolvedClip {
-                        rect: current.rect.intersection(device_rect),
-                        residues: current.residues.clone(),
-                    }
-                }
+                Some(rect) => ResolvedClip {
+                    rect: current.rect.intersection(rect_link_box(&to_device, rect)),
+                    residues: current.residues.clone(),
+                    residue_bounds: current.residue_bounds,
+                },
                 // Not a rectangle under this transform: a residue link, multiplied
-                // into coverage masks at draw time (M5).
+                // into coverage masks at draw time (M5). Its *rectangle* is untouched,
+                // because a curve is not one — but its own device box intersects into
+                // the bound every tile drawn under this chain is sized by (ADR 0057).
                 None => ResolvedClip {
                     rect: current.rect,
                     residues: Some(Arc::new(ResidueLink {
                         clip: link,
                         parent: current.residues.clone(),
                     })),
+                    residue_bounds: current.residue_bounds.intersection(hull_box(
+                        hulls,
+                        def.outline,
+                        &stored.segments,
+                        &to_device,
+                    )),
                 },
             };
             self.resolved[link.0 as usize] = Some(current.clone());
@@ -256,6 +300,47 @@ impl Encoder<'_> {
 /// are scene-derived: a product that could not fit is one the budget below refuses.
 fn area(width: u32, height: u32) -> u64 {
     u64::from(width).saturating_mul(u64::from(height))
+}
+
+/// The device rectangle a rectangular link marks, corners ordered.
+fn rect_link_box(to_device: &DeviceTransform, rect: Rect) -> Rect {
+    let p0 = apply(to_device, rect.min);
+    let p1 = apply(to_device, rect.max);
+    Rect::new(
+        Point::new(p0.x.min(p1.x), p0.y.min(p1.y)),
+        Point::new(p0.x.max(p1.x), p0.y.max(p1.y)),
+    )
+}
+
+/// The device box of a residue link: the pixels it can admit, from its control hull.
+///
+/// The **hull** and not the flattened outline, for two reasons that point the same way.
+/// It is free — [`HullMemo`] is asked once per `(outline, linear part)` and a page's
+/// clips share those keys with its marks (ADR 0045), so a chain resolved here costs one
+/// probe and no flattening, and a page with no residue clip never reaches this line. And
+/// it is an upper bound by the convex-hull property of Béziers, which is the only safe
+/// direction: a tile sized by a box the curve could leave would lose coverage the chain
+/// admits.
+///
+/// Empty when the outline has no points at all — a link that winds nothing anywhere, and
+/// so a chain that admits nothing. That is a region, not a missing one: every mark under
+/// it draws nothing, which is what the residue product already computed for it.
+fn hull_box(
+    hulls: &mut HullMemo,
+    outline: OutlineId,
+    segments: &[Segment],
+    to_device: &DeviceTransform,
+) -> Rect {
+    hulls
+        .bounds(outline, segments, to_device)
+        .map_or_else(empty_rect, |(x0, y0, x1, y1)| {
+            Rect::new(Point::new(x0, y0), Point::new(x1, y1))
+        })
+}
+
+/// The rectangle that admits nothing.
+fn empty_rect() -> Rect {
+    Rect::new(Point::new(0.0, 0.0), Point::new(0.0, 0.0))
 }
 
 /// One residue link, flattened into device space.

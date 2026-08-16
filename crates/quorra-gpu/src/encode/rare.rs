@@ -213,13 +213,16 @@ impl Encoder<'_> {
             .map(|p| p.y)
             .fold(f32::NEG_INFINITY, f32::max);
         // The quad drawn: footprint ∩ clip ∩ target, expanded to pixel bounds so
-        // partially covered edge pixels get their fragments.
-        let vx0 = bx0.max(resolved.rect.min.x).max(0.0);
-        let vy0 = by0.max(resolved.rect.min.y).max(0.0);
-        let vx1 = bx1.min(resolved.rect.max.x).min(self.viewport.width as f32);
-        let vy1 = by1
-            .min(resolved.rect.max.y)
-            .min(self.viewport.height as f32);
+        // partially covered edge pixels get their fragments. `mark_bounds` and not
+        // `rect`, so that a residue clip bounds the residue tile this quad samples the
+        // way it bounds every other rasterised tile (ADR 0057) — outside the chain's own
+        // box that tile is zero, and a zero-weighted image texel is an image texel not
+        // drawn.
+        let clip_bounds = resolved.mark_bounds();
+        let vx0 = bx0.max(clip_bounds.min.x).max(0.0);
+        let vy0 = by0.max(clip_bounds.min.y).max(0.0);
+        let vx1 = bx1.min(clip_bounds.max.x).min(self.viewport.width as f32);
+        let vy1 = by1.min(clip_bounds.max.y).min(self.viewport.height as f32);
         if vx0 >= vx1 || vy0 >= vy1 {
             // Clipped to nothing or off the target: draws nothing, legitimately.
             // Exact, like the analytic rectangle lane — this *is* the region drawn.

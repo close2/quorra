@@ -326,6 +326,7 @@ impl Device {
             atlas_repacked: false,
             segments: encoded.segments,
             tiles: encoded.tiles,
+            coverage: encoded.coverage,
             commands_culled: encoded.commands_culled,
             layers_culled: encoded.layers_culled,
             bytes_uploaded: upload_bytes,

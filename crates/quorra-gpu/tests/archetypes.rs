@@ -484,30 +484,49 @@ fn render(device: &mut Device, scene: &Scene) -> (Counters, Duration) {
 /// baseline nobody can account for is a baseline nobody can defend.
 ///
 /// `(commands, culled, distinct outlines, atlas keys, clip regions, tiles, layer
-/// textures, residue regions, residue tiles)`. Every field is an exact function of the
-/// scene and the viewport, so these compare by equality on any machine and any adapter.
-/// Recorded 2026-08-12; the last two joined it on 2026-08-15 (ADR 0049).
+/// textures, residue regions, residue tiles, coverage texels)`. Every field is an exact
+/// function of the scene and the viewport, so these compare by equality on any machine
+/// and any adapter. Recorded 2026-08-12; the residue pair joined it on 2026-08-15
+/// (ADR 0049) and the coverage texels on 2026-08-17 (ADR 0057), which also moved three
+/// rows — see the two entries below that say why.
+///
+/// **`coverage texels` is what the tiles on the sheet hold**, and it is here because two
+/// rounds in a row measured a change this signature could not see: `tiles` is a count of
+/// tiles and says nothing about how large one was, so a page whose coverage fell by 402×
+/// printed the same row as before. It is a count, not a ratio (CLAUDE.md).
 ///
 /// - **median page** — twelve fills over nine outlines at twelve distinct sub-pixel
 ///   phases, so twelve keys; all cached, so no tile touches the sheet.
 /// - **dense text** — 4 320 placements over 818 outlines collapse to 2 164 keys, which
-///   is the quantised phase doing its job. The **40 tiles** are the 40 commands under a
-///   *curve* clip: each multiplies the clip's residue into a coverage tile of its own.
-///   The two clips resolve to one rectangle, the shape living in the residue. Those two
-///   chains are **2 residue regions** and no residue tile: each is rasterised once and
-///   the 40 commands take windows on it (ADR 0049).
+///   is the quantised phase doing its job.
+///
+///   **Its two curve clips overlap none of the forty marks they clip**, which ADR 0057
+///   made visible and did not cause: the clip curve is placed on a grid of `side × 6` and
+///   the marks on a grid of `side`, and counting the boxes says **0 of 40** meet. Until a
+///   clipped mark's tile was bounded by its chain, those forty drew a tile each anyway —
+///   coverage rasterised, packed, uploaded and multiplied by a residue of zero — so this
+///   row read **40 tiles and 2 residue regions** for a page that marks nothing under a
+///   clip. It now reads zero for both, which is what the page is. **The fixture owes a
+///   round**: as it stands, nothing here exercises the residue lane, and
+///   `tests/tiling_ceiling.rs` is where that property is held instead.
 /// - **artwork** — 684 top-level nodes are 676 draws plus 8 groups (`Counters::commands`
-///   counts the scene's top level). **600 tiles** are the 600 curve-clipped commands,
-///   and **3 layer textures** are the root's accumulator, one group's at a time, and the
-///   copy of the pixels that group's composite covers — ADR 0020's depth pricing showing
-///   its work on eight sibling groups, at ADR 0038's one texture per plan. It was 4 while
-///   a plan ping-ponged between two. **185 residue regions against 600 tiles** is
-///   ADR 0049's whole subject: 185 chains, 600 commands under them, and one
-///   rasterisation each rather than one per command. A residue-tile count above zero
-///   here would mean the admission rule had changed its mind about this page.
+///   counts the scene's top level). **3 layer textures** are the root's accumulator, one
+///   group's at a time, and the copy of the pixels that group's composite covers —
+///   ADR 0020's depth pricing showing its work on eight sibling groups, at ADR 0038's one
+///   texture per plan. It was 4 while a plan ping-ponged between two.
+///
+///   **8 tiles, not 600, and the same fixture defect is why**: of the 600 curve-clipped
+///   commands, **8** have a mark whose box meets its clip's box, counted from the
+///   generator's own arithmetic and confirmed to the unit by this row. The other 592 were
+///   rasterising a mark-sized tile and multiplying it by zero. So the **185 residue
+///   regions against 600 tiles** this row carried for ADR 0049 was 185 regions serving 8
+///   marks; what is left is 2 regions and 6 per-tile rasterisations, and
+///   `examples/residue_clip.rs` — the instrument ADR 0049 measured on — copies this page
+///   and so measured the same thing.
 /// - **image page** — 200 fills and 32 images under *rectangular* clips: **no tiles at
-///   all**, against dense text's 40. That contrast is ADR 0007's whole claim, and it is
-///   the reason `rect_clips` is a field of the archetype.
+///   all**. Where dense text's clips leave a residue this one's resolve to a rectangle,
+///   which is ADR 0007's whole claim and the reason `rect_clips` is a field of the
+///   archetype.
 /// - **clip mountain** — twelve hundred rectangular clips resolve to twelve hundred
 ///   distinct regions and cost **nothing else**: no tile, no layer, nothing culled. The
 ///   800 atlas keys are the 1 200 placements over 200 outlines collapsing by phase.
@@ -523,34 +542,42 @@ fn render(device: &mut Device, scene: &Scene) -> (Counters, Duration) {
 ///   rather than hiding: what differs is the *segments* behind the numbers — 62 400
 ///   against giant's 12 000, for a ninth of the tile area — and `Counters` has no field
 ///   for it. So this row gates that the page still draws and still caches; what it
-///   exists for is the cost shape, which `examples/encode_threads.rs` measures.
-const BASELINE: [(&str, [u32; 9]); 7] = [
-    ("median page", [12, 0, 9, 12, 0, 0, 0, 0, 0]),
-    ("dense text", [4320, 0, 818, 2164, 1, 40, 0, 2, 0]),
-    ("artwork", [684, 0, 300, 300, 1, 600, 3, 185, 0]),
-    ("image page", [232, 0, 60, 158, 4, 0, 0, 0, 0]),
-    ("clip mountain", [1200, 0, 200, 800, 1200, 0, 0, 0, 0]),
-    ("giant", [1500, 0, 1500, 1500, 0, 0, 0, 0, 0]),
-    ("drawing", [1200, 0, 1200, 1194, 0, 6, 0, 0, 0]),
+///   exists for is the cost shape, which `examples/encode_threads.rs` measures. Its
+///   **245 coverage texels** are those six strokes' expansions and nothing else.
+const BASELINE: [(&str, [u64; 10]); 7] = [
+    ("median page", [12, 0, 9, 12, 0, 0, 0, 0, 0, 0]),
+    ("dense text", [4320, 0, 818, 2164, 1, 0, 0, 0, 0, 0]),
+    ("artwork", [684, 0, 300, 300, 1, 8, 3, 2, 6, 12_284]),
+    ("image page", [232, 0, 60, 158, 4, 0, 0, 0, 0, 0]),
+    ("clip mountain", [1200, 0, 200, 800, 1200, 0, 0, 0, 0, 0]),
+    ("giant", [1500, 0, 1500, 1500, 0, 0, 0, 0, 0, 0]),
+    ("drawing", [1200, 0, 1200, 1194, 0, 6, 0, 0, 0, 245]),
 ];
 
-fn signature(counters: &Counters) -> [u32; 9] {
+fn signature(counters: &Counters) -> [u64; 10] {
     [
-        counters.commands,
-        counters.commands_culled,
-        counters.distinct_outlines,
-        counters.atlas_distinct_keys,
-        counters.clip_distinct_regions,
-        counters.tiles,
-        counters.layer_textures,
-        counters.clip_residue_regions,
-        counters.clip_residue_tiles,
+        u64::from(counters.commands),
+        u64::from(counters.commands_culled),
+        u64::from(counters.distinct_outlines),
+        u64::from(counters.atlas_distinct_keys),
+        u64::from(counters.clip_distinct_regions),
+        u64::from(counters.tiles),
+        u64::from(counters.layer_textures),
+        u64::from(counters.clip_residue_regions),
+        u64::from(counters.clip_residue_tiles),
+        counters.coverage.texels,
     ]
 }
 
 /// The gate: what each archetype costs, in quantities that cannot flake.
+///
+/// **Every archetype is measured before any of them is judged.** A loop that asserts as
+/// it goes reports the first row that moved and hides the rest, which is the wrong shape
+/// for a signature: a change that moves one row and a change that moves five are
+/// different changes, and the second must not read as the first.
 #[test]
 fn the_archetypes_cost_what_they_are_recorded_to_cost() {
+    let mut moved = Vec::new();
     for shape in ARCHETYPES {
         let mut device = cold_device();
         let scene = build(&mut device, shape);
@@ -558,21 +585,20 @@ fn the_archetypes_cost_what_they_are_recorded_to_cost() {
         let Some((_, expected)) = BASELINE.iter().find(|(name, _)| *name == shape.name) else {
             panic!("no baseline recorded for {}", shape.name)
         };
-        eprintln!(
-            "{:14} {:?} in {elapsed:?}",
-            shape.name,
-            signature(&counters)
-        );
-        assert_eq!(
-            signature(&counters),
-            *expected,
-            "{} changed shape: (commands, culled, outlines, atlas keys, clip regions, \
-             tiles, layer textures). Every one is an exact function of the scene and the \
-             viewport, so this is a change in what the library does — explain it, then \
-             record it",
-            shape.name
-        );
+        let actual = signature(&counters);
+        eprintln!("{:14} {actual:?} in {elapsed:?}", shape.name);
+        if actual != *expected {
+            moved.push(format!("{}: {actual:?} against {expected:?}", shape.name));
+        }
     }
+    assert!(
+        moved.is_empty(),
+        "the archetype signature moved — (commands, culled, outlines, atlas keys, clip \
+         regions, tiles, layer textures, residue regions, residue tiles, coverage \
+         texels). Every one is an exact function of the scene and the viewport, so this \
+         is a change in what the library does — explain it, then record it:\n  {}",
+        moved.join("\n  ")
+    );
 }
 
 /// The scenes are what the profile says they are: the generator cannot drift from the

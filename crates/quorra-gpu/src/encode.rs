@@ -399,9 +399,13 @@ impl Encoder<'_> {
 
     fn resolve_clip(&mut self, clip: Option<ClipId>) -> Result<ResolvedClip, RenderError> {
         match clip {
-            Some(id) => self
-                .clips
-                .resolve(id, self.scene, self.viewport, self.resources),
+            Some(id) => self.clips.resolve(
+                id,
+                self.scene,
+                self.viewport,
+                self.resources,
+                &mut self.hulls,
+            ),
             None => Ok(open_clip()),
         }
     }

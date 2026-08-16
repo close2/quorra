@@ -21,6 +21,8 @@
 
 use thiserror::Error;
 
+use crate::frame::CoverageSheet;
+
 /// Why a device could not be constructed. Every variant names what was unavailable.
 #[derive(Debug, Error)]
 pub enum DeviceError {
@@ -387,12 +389,35 @@ pub enum RenderError {
     /// device dimension bounds on each side. Distinct from the byte budget on
     /// purpose: the two run out independently, and a refusal that names the wrong
     /// one costs the reader the diagnosis.
+    ///
+    /// **It names the frame as well as the wall** (ADR 0057). `limit` alone is a
+    /// property of the adapter, so a caller reading it could not tell a page that asks
+    /// for a gigabyte of coverage from an adapter whose textures are small — and a
+    /// refused frame has no [`Frame`](crate::frame::Frame), so no
+    /// [`Counters`](crate::frame::Counters) either. `sheet` is what the frame had placed
+    /// when the tile below would not fit, in the same fields
+    /// [`Counters::coverage`](crate::frame::Counters::coverage) reports on a drawn one.
+    ///
+    /// This is the one budget principle 6's "discoverable before the frame" does not
+    /// reach, and saying so is better than implying otherwise: the sheet's height is a
+    /// function of the *viewport*, which a `Scene` does not have, so no
+    /// [`Scene::cost`](quorra_scene::Scene::cost) can answer it and
+    /// [`Limits`](crate::device::Limits) can only state the wall.
     #[error(
-        "the frame's rasterised coverage outgrew the {limit}x{limit} scratch image this adapter allows"
+        "the frame's rasterised coverage outgrew the {limit}x{limit} scratch image this \
+         adapter allows: a {tile_width}x{tile_height} tile would not fit a sheet at {sheet}"
     )]
     ScratchExhausted {
         /// The device's per-side texture limit, which bounds the scratch sheet.
         limit: u32,
+        /// What the sheet held when the tile below was refused.
+        sheet: CoverageSheet,
+        /// Width of the tile that did not fit.
+        tile_width: u32,
+        /// Height of the tile that did not fit. Compare `sheet.height + tile_height`
+        /// against `limit` to see the overshoot, and `sheet.width` against `limit` to
+        /// see that the other axis is rarely the binding one.
+        tile_height: u32,
     },
     /// The frame's scene-derived allocations would exceed the stated budget. Raised
     /// for instance data (at encode) and for the compositor's internal textures
