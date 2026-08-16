@@ -281,8 +281,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let inside = all(child >= vec2f(0.0)) && all(child < params.child_size);
     var s = select(vec4f(0.0), textureLoad(src_tex, vec2i(child), 0), inside);
 
-    // §11.4.5: the group's constant alpha; §11.6.4.3: its soft mask; ADR 0007: its
-    // clip. All scale the group's premultiplied contribution uniformly.
+    // §11.6.4.4: the group's constant alpha — "the nonstroking alpha constant shall
+    // also be applied when painting a transparency group's results onto its backdrop";
+    // §11.6.4.3: its soft mask; ADR 0007: its clip. All scale the group's
+    // premultiplied contribution uniformly.
     let w = params.alpha * soft_mask_at(p) * clip_coverage(p) * residue_value(p);
 
     // The staged stages, before §11.4.4's interpolation and §11.3.6's formula, because

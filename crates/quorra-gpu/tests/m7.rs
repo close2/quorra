@@ -668,7 +668,7 @@ fn released_images_do_not_linger_on_the_device() {
 }
 
 /// The rare-case lanes ride the clause 11 machinery like every other draw: an
-/// opaque image inside a group at α 0.5 composites at half opacity (§11.4.5), which
+/// opaque image inside a group at α 0.5 composites at half opacity (§11.6.4.4), which
 /// is derivable without reference to any other renderer.
 #[test]
 fn image_inside_a_group_takes_the_group_alpha() {

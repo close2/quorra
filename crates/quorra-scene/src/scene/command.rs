@@ -45,7 +45,12 @@ pub const MAX_GROUP_DEPTH: usize = 16;
 /// before the builder will accept it (ADR 0019).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroupSpec {
-    /// The group's constant alpha, `0..=1` (§11.4.5's group alpha).
+    /// The group's constant alpha, `0..=1`.
+    ///
+    /// §11.6.4.4's nonstroking alpha constant, which "shall also be applied when
+    /// painting a transparency group's results onto its backdrop", in the range
+    /// §11.3.7.2 states for every shape and opacity input: "values in the range 0.0 to
+    /// 1.0 (inclusive), with a default value of 1.0".
     pub alpha: f32,
     /// How the finished group combines with its backdrop (§11.3.5).
     pub blend: BlendMode,
