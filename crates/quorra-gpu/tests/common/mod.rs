@@ -6,17 +6,21 @@
 //! is what each caller already built** — a fixture generalised on the way in would change
 //! what somebody's assertion means without anybody deciding to.
 //!
-//! Three parts, along what each is about:
+//! Four parts, along what each is about:
 //!
 //! - [`headless`] — the device this suite renders through, and the pixels it hands back;
 //! - [`scene`] — the scene pieces more than one file draws;
 //! - [`retained`] — the two pages and the render helper the `retained_*.rs` family shares,
-//!   as `tests/function_support/` is shared by the `function_*.rs` family.
+//!   as `tests/function_support/` is shared by the `function_*.rs` family;
+//! - [`clause`] — §11.4.6's line, which four files measure a frame against.
 //!
 //! Some fixtures with two copies are deliberately still apart, and `doc/HANDOVER.md` says
 //! which: each of them indexes a raster through its own file's `SIZE`, so one home for
 //! them means one home for `SIZE`, and that would tie five files' probe dimensions
 //! together. Unifying them is a decision about what those probes are, not a refactor.
+//! [`clause`] is the one that *was* unified, and only because that objection did not
+//! survive being read: the clause's arithmetic runs over every pixel of the rasters it is
+//! handed and needs no dimension at all, where a probe needs one to name a pixel.
 
 #![allow(
     dead_code,
@@ -37,6 +41,7 @@
               module is compiled into binaries that do not all state it themselves"
 )]
 
+pub mod clause;
 pub mod headless;
 pub mod retained;
 pub mod scene;

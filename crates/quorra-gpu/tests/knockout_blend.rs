@@ -55,6 +55,7 @@ use quorra_scene::{
 
 mod common;
 
+use common::clause::deviation_from_the_clause;
 use common::headless::device;
 
 const SIZE: u32 = 64;
@@ -181,33 +182,6 @@ fn stroked(
         blend,
         None,
     )
-}
-
-/// Worst premultiplied deviation from §11.4.6's line `P' = (1 − f) × P + S`, and how many
-/// pixels of the fixture are partially covered.
-fn deviation_from_the_clause(
-    before: &[u8],
-    shape: &[u8],
-    deposit: &[u8],
-    actual: &[u8],
-) -> (f32, u32) {
-    let premul = |raster: &[u8], at: usize, channel: usize| {
-        f32::from(raster[at + channel]) * f32::from(raster[at + 3]) / 255.0
-    };
-    let (mut worst, mut partial) = (0.0_f32, 0_u32);
-    for pixel in 0..(SIZE * SIZE) as usize {
-        let at = pixel * 4;
-        let f = f32::from(shape[at + 3]) / 255.0;
-        if f > 0.0 && f < 1.0 {
-            partial += 1;
-        }
-        for channel in 0..3 {
-            let expected =
-                (1.0 - f).mul_add(premul(before, at, channel), premul(deposit, at, channel));
-            worst = worst.max((premul(actual, at, channel) - expected).abs());
-        }
-    }
-    (worst, partial)
 }
 
 /// The measurement both lane tests make: the element inside a knockout group against
