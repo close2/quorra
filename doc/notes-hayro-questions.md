@@ -117,3 +117,131 @@ the outline built by hand:
 `stroke_polylines` made to deposit a pair of caps at a lone point — hayro #296's exact
 hazard — five of the six fail and the control passes.
 
+---
+
+## 2. A "no ink" paint (their §6, hayro #4)
+
+### What is ours and what is not
+
+`/None` is a colourant name, and §8.6.6.4 is unusually direct about it:
+
+> The special colourant name None shall not produce any visible output. Painting
+> operations in a Separation space with this colourant name shall have no effect on the
+> current page.
+
+Colour is not ours (`PLAN.md` integration note 6: `ColourSpace::to_rgb` upstream is the
+only place a colour becomes RGB, and a second one is forbidden), so `/None` never reaches
+this library as a colourant. What reaches us is the caller's decision not to issue the
+command. The property their note calls "the cheapest possible test of whether a 'no ink'
+path in a compositor is really a no-op" *is* ours, and it is the question this gate asks.
+
+### The clause splits "nothing" in two, and the two answers differ
+
+§11.6.4.2 keeps an object's **shape** apart from its **opacity**, and §11.4.6 says why in a
+sentence ADR 0025 already quotes: "The existence of the knockout feature is the main reason
+for maintaining a separate shape value rather than only a single alpha that combines shape
+and opacity."
+
+**No shape** — an empty clip, a zero-area outline, a transparent soft mask read as shape.
+§11.4.6's NOTE 5 is unconditional:
+
+> The extreme values of the source shape produce the straightforward knockout effect. That
+> is, a shape value of 1.0 (inside) yields the colour and opacity that result from
+> compositing the object with the initial backdrop. A shape value of 0.0 (outside) leaves
+> the previous group results unchanged.
+
+"Unchanged" is byte identity, and it holds in every kind of group.
+
+**No opacity** — a fill whose paint alpha is 0 has shape 1 inside its path (§11.6.4.2: "the
+shape shall always be 1.0 inside and 0.0 outside the path") and constant opacity 0
+(§11.6.4.4). Outside a knockout group §11.3.6's formula leaves the backdrop. **Inside one it
+must not**: §11.4.6 composites the element with the group's *initial* backdrop — transparent,
+for an isolated knockout group — and then replaces a shape-fraction of the accumulated
+group with the result, so a transparent element with shape 1 clears what it covers. A
+compositor that made that a no-op would be wrong.
+
+### What this tree does
+
+Both, correctly.
+
+- Shape-zero: byte-identical in all four contexts (root, isolated group, knockout group,
+  non-isolated group), for four independent routes into the target — an empty clip chain
+  (culled at encode), a zero-area rectangle (the analytic rect lane), a zero-area outline
+  (the coverage lane), a transparent soft mask (sampled in the fragment shader).
+- Opacity-zero: byte-identical at the root, in an isolated group and in a non-isolated
+  group; and inside a knockout group it clears the group's own content and leaves the page
+  showing through, which is §11.4.6.
+
+The mechanism is `fs_shape` in each lane returning coverage and ignoring the paint (ADR
+0010's erase/add pair, ADR 0025's reasoning) — so the erase pass scales the backdrop by
+`1 − shape`, which is exactly 1 when the shape is 0, and the add pass adds a premultiplied
+zero.
+
+### The thing worth handing back to the caller
+
+**`/None` cannot be modelled as a zero-alpha paint.** The two are the same everywhere
+except inside a knockout group, where one is required to change nothing and the other is
+required to erase. So a painting operation in a `/None` Separation space has to be a
+command that is never issued — which is what `pdf-model` already does by deciding the
+colourant before the alternate space and tint transform are read, and their §6 records that
+getting it wrong once made a page come out red. This note is only to say that the choice is
+load-bearing for a reason beyond the tint transform, and that quorra would faithfully erase
+if a `/None` mark ever arrived as `Color { a: 0.0 }` inside a knockout group.
+
+### The gate
+
+`crates/quorra-gpu/tests/no_ink.rs`, five tests over a page with three kinds of backdrop
+pixel on purpose — opaque, half-transparent premultiplied, and an antialiased diagonal edge
+— because byte identity over a flat opaque region is a weak claim.
+
+- `a_mark_with_no_shape_leaves_the_target_byte_identical` — 4 kinds × 4 contexts, all 16
+  reported rather than the first failure, because the four kinds are answered at four
+  different depths and which one broke is the finding;
+- `a_mark_with_no_opacity_leaves_the_target_byte_identical_outside_a_knockout_group` —
+  2 kinds × 3 contexts;
+- `a_mark_with_no_opacity_knocks_out_inside_a_knockout_group` — the discriminating half:
+  the knockout page differs from the plain one at the covered pixel, and what is left there
+  equals the page without the group at all;
+- `the_marks_this_file_asserts_are_invisible_are_visible_when_they_are_given_ink` — the
+  control, and the reason the rest are measurements: each of the six kinds with its one
+  nothing-making property restored and nothing else changed must reach the target;
+- `a_group_that_marks_nothing_leaves_the_target_byte_identical` — the same question one
+  level up, where §11.4.4's Result step could turn a nothing into a rounding.
+
+**Verified able to fail**, twice, and the second attempt is why the control test exists:
+
+1. An ink floor of 0.02 planted in `coverage_at` in both `coverage.wgsl` and `rect.wgsl`
+   failed `TransparentSoftMask` in all four contexts — and left `EmptyClip`,
+   `ZeroAreaRect` and `ZeroAreaFill` passing, because those three never reach a fragment
+   shader at all. That is a true statement about the tree and a warning about the gate,
+   which is what the control test now answers permanently.
+2. `encode/layer.rs`'s `spec.knockout` forced to `false` failed
+   `a_mark_with_no_opacity_knocks_out_inside_a_knockout_group` and nothing else.
+
+### One thing found by reading, not by a failure, and deliberately not changed
+
+`fs_shape` in `rect.wgsl`, `coverage.wgsl` and `image.wgsl` multiplies the mark's soft mask
+into the **shape** it returns. ADR 0025's own text says the opposite reading — "§11.6.4.2
+gives an object's shape from its geometry alone; §11.6.4.3's soft mask and §11.6.4.4's
+constant alpha are *opacity*" — and `doc/notes-function-tests.md` §4.5 already flags the
+same thing for the function lane ("`fs_shape` weights by `base_weight`, which includes the
+mask"). It is true of all five lanes, not only that one.
+
+§11.6.4.3 is where the answer is, and it does not settle it by itself:
+
+> The mask may serve as a source of either shape ( fm ) or opacity ( qm ) values, depending
+> on the setting of the alpha source parameter in the graphics state
+
+with NOTE 1 naming that parameter as the `AIS` entry, "true if the soft mask contains shape
+values, false for opacity". Nothing in this tree carries `AIS`, and nothing in the caller's
+display list does either. So the current behaviour is §11.6.4.3's `AIS = true` reading
+applied unconditionally, and ADR 0025's prose is its `AIS = false` reading applied
+unconditionally, and the two disagree only for a masked element inside a knockout group.
+
+**Not resolved here, on purpose.** It is a clause decision that changes pixels, it needs
+the caller's answer about whether `AIS` survives their interpreter, and it needs a corpus
+run — which makes it an ADR and a round of its own rather than an edit inside a round about
+something else. It does not affect this question's answer: under either reading a *fully
+transparent* mask is a no-op, because either the shape or the opacity is zero and both
+routes leave the backdrop.
+
