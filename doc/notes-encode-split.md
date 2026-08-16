@@ -227,10 +227,15 @@ round's note, and each item below carries its own outcome line. Items 7, 8 and 9
    `visible_tile`'s comment says so. Before this round they were 60 lines apart in a
    2 421-line file; they are now adjacent, which is the first time the duplication is
    visible in one screen. Factoring it is behaviour-preserving but it is not a move.
-   **Closed 2026-08-16, in a commit of its own that can be dropped**: `coverage_tile` asks
+   **Written 2026-08-16 and deliberately not on `main` yet**: `coverage_tile` asks
    `visible_tile` for the bound, so the module comment's invariant — "the two branches have
-   to agree, to the pixel, about the tile they produce" — holds by construction. It is
-   separate because a sibling round is changing what a coverage tile is bounded by.
+   to agree, to the pixel, about the tile they produce" — holds by construction. It waits
+   on the sibling round that bounds a clipped mark's tile by its chain's own device box,
+   and the reason is sharper than a merge conflict: this change makes `visible_tile` the
+   **one** place a tile's bound is stated, so applying it *after* a change that bounds
+   `coverage_tile` alone would delete that bound silently and leave every test green. It
+   goes on top of that round, and what must be checked when it does is that both lanes
+   still get the chain box.
 7. **`encode/rare.rs`'s module comment says "What the ops mean to the device that draws
    them is `device.rs`'s half".** Since the `device.rs` split that half is
    `device/rare.rs`, and `device/rare.rs`'s own comment says the same thing about

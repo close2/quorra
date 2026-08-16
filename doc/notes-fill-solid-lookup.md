@@ -168,15 +168,21 @@ Four comments, all recorded by `doc/notes-encode-split.md` §5 and none of them 
    its comment described a state of the walk that has moved on. Deleted;
    `RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets` is clean without it.
 
-And **§5.6's duplicated arithmetic was taken, in its own commit and flagged for dropping**:
-`coverage_tile` and `visible_tile` held the same ten lines of `shape ∩ clip ∩ target`
-rounded out to whole pixels, and `coverage_tile` now asks `visible_tile` for it. The
-module comment already stated the invariant this creates — *"the two branches have to
-agree, to the pixel, about the tile they produce"* — as something a reader had to check by
-holding both in front of them; it is now true by construction. **A sibling round is
-changing what a coverage tile is bounded by and `coverage_tile` is at the centre of it**,
-so this is a separate commit that can be dropped or re-applied at merge without touching
-anything else in this round.
+And **§5.6's duplicated arithmetic was written, in its own commit, and held back from
+`main`**: `coverage_tile` and `visible_tile` held the same ten lines of
+`shape ∩ clip ∩ target` rounded out to whole pixels, and the commit makes `coverage_tile`
+ask `visible_tile` for it. The module comment already stated the invariant this creates —
+*"the two branches have to agree, to the pixel, about the tile they produce"* — as
+something a reader had to check by holding both in front of them; the commit makes it true
+by construction.
+
+It was held at merge rather than dropped, and the reason is worth more than the change:
+**a sibling round bounds a clipped mark's tile by its chain's own device box, and this
+commit makes `visible_tile` the one place a tile's bound is stated.** Applied *after* a
+change that bounds `coverage_tile` alone, it would delete that bound silently — the
+delegation reads as a tidy-up, every unit test stays green, and only the corpus would see
+it. So it goes on top of that round rather than beside it, and the check when it lands is
+that both lanes still get the chain box.
 
 ## 6. Verification
 
