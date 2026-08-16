@@ -16,6 +16,8 @@
 //! first drew 136 410 texels of another shape's coverage across a page (the caller's
 //! `QUORRA_FEEDBACK.md` §20.4.1).
 
+use crate::error::RenderError;
+use crate::frame::CoverageSheet;
 use crate::raster;
 
 /// The frame's scratch coverage image: every uncached mask, shelf-packed into one
@@ -38,8 +40,9 @@ pub(super) struct ScratchPacker {
     /// Tiles placed on the sheet, for `Counters::tiles` — the count both lanes feed,
     /// since `reserve` is the one door onto the sheet.
     pub(super) placed: u32,
-    /// Tile texels placed so far, and the widest tile seen — the two inputs to
-    /// [`ScratchPacker::shelf_target`].
+    /// Tile texels seated so far, and the widest tile seated — the two inputs to
+    /// [`ScratchPacker::shelf_target`], and two of the four
+    /// [`CoverageSheet`] reports.
     tile_area: u64,
     widest: u32,
 }
@@ -72,11 +75,48 @@ impl ScratchPacker {
     /// Online, `A` is what has been placed so far, so the target grows with the frame and
     /// a shelf packed under an earlier, smaller one is never invalidated: a cursor that
     /// has stopped growing only leaves room a later tile may still take.
-    fn shelf_target(&self) -> u32 {
+    ///
+    /// `placed` is the area of every tile seated so far **plus the candidate's**, which
+    /// is the sum this has always been asked about: a tile widens the target it is then
+    /// measured against, and passing it in is what lets [`ScratchPacker::reserve`] charge
+    /// the sum only once the tile has a seat.
+    fn shelf_target(&self, placed: u64, widest: u32) -> u32 {
         #[allow(clippy::cast_possible_truncation)] // isqrt of an area bounded by the
         // device dimension squared, which is inside u32 after the root
-        let square = self.tile_area.saturating_mul(2).isqrt() as u32;
-        square.max(self.widest).clamp(1, self.width)
+        let square = placed.saturating_mul(2).isqrt() as u32;
+        square.max(widest).clamp(1, self.width)
+    }
+
+    /// What the sheet holds right now, in the shape a drawn frame and a refused one both
+    /// report it (ADR 0057).
+    ///
+    /// `width` is the width [`ScratchPacker::finish`] would commit — every tile sits left
+    /// of the widest shelf cursor, so everything right of it is a texture nobody wrote —
+    /// which is what makes this the same number in both states rather than two numbers
+    /// that happen to agree.
+    pub(super) fn state(&self) -> CoverageSheet {
+        CoverageSheet {
+            tiles: self.placed,
+            texels: self.tile_area,
+            width: self
+                .shelves
+                .iter()
+                .map(|(_, _, cursor)| *cursor)
+                .max()
+                .unwrap_or(0),
+            height: self.next_y,
+        }
+    }
+
+    /// The refusal a tile that will not fit earns: the wall, the sheet that met it, and
+    /// the tile itself (ADR 0057).
+    pub(super) fn exhausted(&self, width: u32, height: u32) -> RenderError {
+        RenderError::ScratchExhausted {
+            limit: self.max_height,
+            sheet: self.state(),
+            tile_width: width,
+            tile_height: height,
+        }
     }
 
     /// Reserve a tile's place on the sheet, without writing anything into it.
@@ -85,18 +125,25 @@ impl ScratchPacker {
     /// copies its bytes in, the GPU lane hands the position to a pass that draws there
     /// — which is what lets one sheet hold both kinds of tile without either knowing
     /// the other exists (ADR 0016).
+    ///
+    /// **A tile that does not fit is not charged to the sheet.** The candidate width
+    /// still raises the shelf target for its own placement, exactly as before — that is
+    /// what the target is for — but `placed` and `tile_area` move only on success, so
+    /// the [`ScratchPacker::state`] a refusal reports is what the frame *placed* rather
+    /// than what it asked for. For a drawn frame this changes nothing: every reservation
+    /// succeeded.
     #[allow(clippy::arithmetic_side_effects)] // bounded by width/max_height checks
     pub(super) fn reserve(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
         if width == 0 || height == 0 || width > self.width {
             return None;
         }
-        self.widest = self.widest.max(width);
-        let target = self.shelf_target();
-        self.placed = self.placed.saturating_add(1);
-        self.tile_area = self
+        let widest = self.widest.max(width);
+        let area = self
             .tile_area
             .saturating_add(u64::from(width).saturating_mul(u64::from(height)));
-        self.shelves
+        let target = self.shelf_target(area, widest);
+        let seat = self
+            .shelves
             .iter_mut()
             .find(|(_, shelf_height, cursor)| {
                 *shelf_height >= height
@@ -117,7 +164,13 @@ impl ScratchPacker {
                 } else {
                     None
                 }
-            })
+            });
+        if seat.is_some() {
+            self.widest = widest;
+            self.placed = self.placed.saturating_add(1);
+            self.tile_area = area;
+        }
+        seat
     }
 
     /// Pack a mask's bytes; `None` when the frame's scratch would outgrow the
@@ -154,13 +207,11 @@ impl ScratchPacker {
         if self.next_y == 0 {
             return None;
         }
-        let used = self
-            .shelves
-            .iter()
-            .map(|(_, _, cursor)| *cursor)
-            .max()
-            .unwrap_or(self.width)
-            .clamp(1, self.width);
+        // The same width [`ScratchPacker::state`] reports, so that what a drawn frame
+        // says its sheet was and what the sheet is cannot come apart. A sheet with rows
+        // has a shelf, and a shelf's cursor is at least its first tile's width, so the
+        // clamp is a guard rather than a correction.
+        let used = self.state().width.clamp(1, self.width);
         if !self.data.is_empty() {
             // Rows the CPU lane actually wrote, counted in the *packing* stride before
             // compaction restrides them.

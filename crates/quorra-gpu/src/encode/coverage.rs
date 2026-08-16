@@ -109,32 +109,22 @@ impl Encoder<'_> {
 
     /// Rasterise the visible coverage of these polylines — shape ∩ clip ∩ target,
     /// residue clips multiplied in — or `None` when nothing is visible.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
+    #[allow(clippy::cast_possible_truncation)] // the residue product, below
+    #[allow(clippy::arithmetic_side_effects)] // the residue product, below
     pub(super) fn coverage_tile(
         &mut self,
         polylines: &[Polyline],
         rule: Rule,
         resolved: &ResolvedClip,
     ) -> Result<Option<raster::CoverageMask>, RenderError> {
-        let Some((x0, y0, x1, y1)) = raster::polyline_bounds(polylines) else {
+        let Some(bounds) = raster::polyline_bounds(polylines) else {
             return Ok(None);
         };
-        // The visible region: shape ∩ clip rectangle ∩ target.
-        let vx0 = x0.max(resolved.rect.min.x).max(0.0);
-        let vy0 = y0.max(resolved.rect.min.y).max(0.0);
-        let vx1 = x1.min(resolved.rect.max.x).min(self.viewport.width as f32);
-        let vy1 = y1.min(resolved.rect.max.y).min(self.viewport.height as f32);
-        if vx0 >= vx1 || vy0 >= vy1 {
+        // The tile, from the one place that computes one — so that what is rasterised
+        // here and what the GPU lane draws cannot come apart.
+        let Some((left, top, width, height)) = self.visible_tile(bounds, resolved) else {
             return Ok(None);
-        }
-        let left = vx0.floor() as i32;
-        let top = vy0.floor() as i32;
-        let width = (vx1.ceil() as i32 - left).max(0) as u32;
-        let height = (vy1.ceil() as i32 - top).max(0) as u32;
-        if width == 0 || height == 0 {
-            return Ok(None);
-        }
+        };
         self.charge_tile(width, height)?;
         let span = self.clock.start();
         let mut tile = raster::fill_mask(polylines, rule, left, top, width, height);
@@ -162,8 +152,14 @@ impl Encoder<'_> {
     /// The tile a shape with these device bounds occupies: shape ∩ clip ∩ target,
     /// rounded out to whole pixels.
     ///
-    /// The same arithmetic `coverage_tile` does, without rasterising — which is what
-    /// the GPU lane needs, since its coverage is drawn rather than computed.
+    /// **The one place a coverage tile's extent is decided**, for both lanes: the CPU
+    /// lane rasterises exactly this rectangle and the GPU lane draws into exactly this
+    /// reservation, and the module comment above says why the two may not come apart.
+    ///
+    /// `clip` here is [`ResolvedClip::mark_bounds`] and not `rect`: a residue link is
+    /// not a rectangle, but the box its control hull traces bounds every pixel it can
+    /// admit, and outside that box the chain's coverage — and so this mark's — is zero
+    /// (ADR 0057).
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
     pub(super) fn visible_tile(
@@ -172,10 +168,11 @@ impl Encoder<'_> {
         resolved: &ResolvedClip,
     ) -> Option<(i32, i32, u32, u32)> {
         let (x0, y0, x1, y1) = bounds;
-        let vx0 = x0.max(resolved.rect.min.x).max(0.0);
-        let vy0 = y0.max(resolved.rect.min.y).max(0.0);
-        let vx1 = x1.min(resolved.rect.max.x).min(self.viewport.width as f32);
-        let vy1 = y1.min(resolved.rect.max.y).min(self.viewport.height as f32);
+        let clip = resolved.mark_bounds();
+        let vx0 = x0.max(clip.min.x).max(0.0);
+        let vy0 = y0.max(clip.min.y).max(0.0);
+        let vx1 = x1.min(clip.max.x).min(self.viewport.width as f32);
+        let vy1 = y1.min(clip.max.y).min(self.viewport.height as f32);
         if vx0 >= vx1 || vy0 >= vy1 {
             return None;
         }
@@ -279,12 +276,8 @@ impl Encoder<'_> {
         // so anything queued takes its place first (`parallel`).
         self.drain_queue()?;
         let (left, top, width, height) = tile;
-        let (sx, sy) =
-            self.scratch
-                .reserve(width, height)
-                .ok_or(RenderError::ScratchExhausted {
-                    limit: self.scratch.max_height,
-                })?;
+        let seat = self.scratch.reserve(width, height);
+        let (sx, sy) = seat.ok_or_else(|| self.scratch.exhausted(width, height))?;
         let origin = [sx as f32 - left as f32, sy as f32 - top as f32];
         let clip = [
             sx as f32,
@@ -325,9 +318,7 @@ impl Encoder<'_> {
         let span = self.clock.start();
         let packed = self.scratch.pack(tile);
         self.clock.staging(span);
-        packed.ok_or(RenderError::ScratchExhausted {
-            limit: self.scratch.max_height,
-        })
+        packed.ok_or_else(|| self.scratch.exhausted(tile.width, tile.height))
     }
 
     #[allow(clippy::cast_precision_loss)]

@@ -44,6 +44,8 @@ pub(crate) struct Encoded {
     pub commands: u32,
     /// Coverage tiles this frame placed on the scratch sheet, both lanes.
     pub tiles: u32,
+    /// The same tiles priced: the sheet's extent and the texels on it (ADR 0057).
+    pub coverage: crate::frame::CoverageSheet,
     pub clip_distinct_regions: u32,
     /// Residue clip regions this frame rasterised once and cut every tile from, and
     /// residue rasterisations a single command's tile paid for (ADR 0049).
@@ -146,6 +148,7 @@ pub(super) fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encode
     let mut winding = std::mem::take(&mut encoder.winding);
     let packer = std::mem::replace(&mut encoder.scratch, ScratchPacker::new(1, 1));
     let tiles = packer.placed;
+    let coverage = packer.state();
     let scratch = packer.finish();
     if let Some(sheet) = scratch.as_ref() {
         winding.width = sheet.width;
@@ -179,6 +182,7 @@ pub(super) fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encode
         used_functions: sorted(encoder.used_functions),
         encode_phases: encoder.clock,
         tiles,
+        coverage,
         commands: u32::try_from(commands).unwrap_or(u32::MAX),
         clip_distinct_regions: distinct_clip_regions(&encoder.clips),
         clip_residue_regions: encoder.residue.regions,

@@ -64,7 +64,7 @@ pub use device::{Device, Limits};
 pub use error::{
     DeviceError, LayerProblem, PipelineProblem, RenderError, ResourceProblem, SurfaceProblem,
 };
-pub use frame::{Counters, EncodeSource, Frame, Raster, TimingProvenance, Timings};
+pub use frame::{Counters, CoverageSheet, EncodeSource, Frame, Raster, TimingProvenance, Timings};
 pub use present::{ForeignPresenter, Layer, PresentCost, Presenter};
 pub use report::{Report, ReportKind};
 pub use retained::RetainedScene;
