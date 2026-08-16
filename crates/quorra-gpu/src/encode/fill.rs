@@ -31,8 +31,21 @@ use crate::raster::{self, DeviceTransform, Rule};
 /// question and then hands the same fill to whichever of three lanes answers, and
 /// threading the fill's own description through each of them by hand is how two of them
 /// come to disagree about it.
-struct SolidFill {
+///
+/// The lifetime is the **resource store's**, not the encoder's borrow: it carries the
+/// outline the caller already looked up, which is what keeps the hottest walk in the
+/// tree to one hash probe per solid fill instead of two ([`Encoder::fill_solid`]).
+struct SolidFill<'a> {
     outline: OutlineId,
+    /// The outline's resident geometry, looked up once by [`Encoder::encode_fill`].
+    ///
+    /// `&'a StoredOutline` and not a second `OutlineId` lookup: this is a borrow of the
+    /// store, which the encoder holds as `&'a ResourceStore` for the whole frame, so it
+    /// is independent of the `&mut self` the three lanes below need. Measured on the
+    /// caller's 58 009-mark page (callgrind, `doc/notes-fill-solid-lookup.md`): the
+    /// second probe was **9.5 M instructions, 2.3 % of that page's `recording`**, and
+    /// **5.8 % of the dense-text archetype's**.
+    stored: &'a crate::resources::StoredOutline,
     /// The scene's transform, which is what the census counted by.
     transform: Affine,
     /// The same transform composed with the viewport, which is what the tile is
@@ -60,7 +73,7 @@ fn linear_bits(transform: Affine) -> [u32; 4] {
     ]
 }
 
-impl Encoder<'_> {
+impl<'a> Encoder<'a> {
     /// The fill arm of the command walk: pick the glyph or path lane by device size
     /// and residue state; route non-Normal blends through an implicit child layer;
     /// mark `Compose::Src` for the knockout two-pass (§4.1).
@@ -160,6 +173,7 @@ impl Encoder<'_> {
             }
             let placement = SolidFill {
                 outline,
+                stored,
                 transform,
                 to_device,
                 rule,
@@ -200,13 +214,17 @@ impl Encoder<'_> {
     /// one it will hold and re-read, the scratch path for everything left — a residue
     /// clip, or a tile too large for the atlas whose triangles cost more than its
     /// coverage.
-    fn fill_solid(&mut self, fill: &SolidFill, resolved: &ResolvedClip) -> Result<(), RenderError> {
-        let stored = self
-            .resources
-            .outline(fill.outline)
-            .ok_or(RenderError::UnknownOutline {
-                outline: fill.outline,
-            })?;
+    ///
+    /// The outline arrives inside the [`SolidFill`] rather than being looked up again:
+    /// [`Encoder::encode_fill`] has already taken the `UnknownOutline` refusal for this
+    /// id, so a second lookup here could only ever succeed — and did, once per solid
+    /// fill, on the hottest walk in the tree.
+    fn fill_solid(
+        &mut self,
+        fill: &SolidFill<'a>,
+        resolved: &ResolvedClip,
+    ) -> Result<(), RenderError> {
+        let stored = fill.stored;
         let (bx0, by0, bx1, by1) = fill.bounds;
         let (tile_width, tile_height) = (tile_side(bx0, bx1), tile_side(by0, by1));
         // What the cache would do with this placement, asked once and answered by the
