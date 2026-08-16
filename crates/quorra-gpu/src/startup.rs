@@ -99,11 +99,23 @@ pub const DEFAULT_ATLAS_BUDGET: u64 = 8 * 1024 * 1024;
 /// a dense page and left its oracle's verdicts unmoved; 1/8 contradicted pages.
 pub const DEFAULT_GLYPH_QUANTUM: u16 = 16;
 
-/// Which producer makes coverage bytes for fills and strokes.
+/// Which producer makes coverage bytes for a **solid** fill or stroke.
 ///
 /// The two lanes hand the same artefact — an R8 tile in the frame's scratch sheet — to
 /// the same quad lane, so nothing downstream of coverage can tell them apart. What
 /// differs is where the cost falls, and the curves are opposite (ADR 0016).
+///
+/// **What this setting does not reach**, stated here because a caller cannot see it from
+/// the outside: a fill or stroke whose paint is *not* a solid colour — a shading, an
+/// image, a mesh, or §7.10.5's `Paint::Function` — rasterises its coverage on the CPU
+/// whichever value this holds. The lane is chosen in the solid arm alone, and a rare
+/// paint reaches the scratch sheet by a path that never asks. So a page of large
+/// shading-filled paths pays the CPU rasteriser under `Gpu`, and a zoom of one does not
+/// get the magnification independence the `Gpu` variant describes below.
+/// `tests/function_coverage.rs` holds that equality in the pixels rather than leaving it
+/// to be inferred from the code. Whether the rare lane *should* be able to take the
+/// device is an open question with a measurement in front of it, not a decision that has
+/// been taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Coverage {
     /// The CPU scanline rasteriser of ADR 0008, with the glyph atlas in front of it.
