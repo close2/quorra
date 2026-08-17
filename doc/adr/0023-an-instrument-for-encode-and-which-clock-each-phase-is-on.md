@@ -149,7 +149,7 @@ rasterises a tile under a residue chain**, and only when `Options::instrument_en
 on. Nothing for a page with no curve clip, and nothing at all when the switch is off,
 where `EncodeClock::start` is a branch on a `bool` that returns `None`. On the artwork
 archetype, whose 600 clipped commands are the most residue-heavy page in the tree, that is
-1 200 clock reads, ~24 µs on an encode of ~96 ms: **0.03 %**, against a seam that was
+1 200 clock reads, ~24 µs on an encode of ~53 ms: **0.05 %**, against a seam that was
 mislabelling 13.7 % of that page's `recording`.
 
 ### What moved, measured
@@ -167,7 +167,7 @@ artwork archetype at 1191 × 1684, one cold-atlas encode, counters checked again
 
 So the product is **13.7 % of what `recording` was** on the most clipped page this tree
 has, and 600 calls over 3 542 360 tile pixels put it at 7 806 instructions a tile and
-about 1.3 an pixel. The wall-clock reading of the same change is in
+about 1.3 a pixel. The wall-clock reading of the same change is in
 `doc/notes-clipped-instrument.md` §2, and it is the weaker instrument on purpose.
 
 ### The published number this corrects
