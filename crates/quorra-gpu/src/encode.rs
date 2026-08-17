@@ -118,6 +118,7 @@ use parallel::Job;
 use crate::atlas::{AtlasStore, GlyphKey};
 use crate::census::Census;
 use crate::error::RenderError;
+use crate::frame::LaneCounts;
 use crate::instrument::EncodeClock;
 use crate::keyhash::FastSet;
 use crate::resources::ResourceStore;
@@ -172,6 +173,11 @@ struct Encoder<'a> {
     mask_plans: Vec<Option<MaskPlan>>,
     /// The active drawing style, set by the enclosing knockout group.
     style: DrawStyle,
+    /// Which lane made each mark's coverage (§1.1, `Counters::lanes`). Accumulated at
+    /// the two seams a mark becomes drawable at — `instance` and `plan`'s `append_op` —
+    /// rather than at the arms that *choose* a lane, because a choice can still change
+    /// afterwards: a glyph tile the atlas refuses falls through to the sheet at commit.
+    lanes: LaneCounts,
     budget: u64,
     spent: u64,
     /// The `distinct_outlines` counter's working set. [`FastSet`] and not the standard
@@ -305,6 +311,7 @@ pub(crate) fn encode(
         layers: Vec::new(),
         mask_plans: (0..scene.masks().len()).map(|_| None).collect(),
         style: DrawStyle::Over,
+        lanes: LaneCounts::default(),
         budget: frame_budget_bytes,
         spent: needed,
         distinct_outlines: FastSet::default(),

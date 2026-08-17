@@ -12,6 +12,12 @@
 //! *extending* — a switch of any of the three breaks the batch and starts another — so
 //! the painter's algorithm survives as the order the instances were written in, and
 //! nothing here ever reorders a mark.
+//!
+//! Three of [`LaneCounts`](crate::LaneCounts)' four fields are counted here, and here is
+//! the only place they could honestly be: which lane a mark *asked* for is decided across
+//! five arms and can still change afterwards — a glyph tile the atlas refuses falls
+//! through to the sheet at commit — while the instance is written exactly once, by the
+//! lane that actually drew it.
 
 use quorra_scene::{Point, Rect};
 
@@ -32,6 +38,31 @@ pub(crate) const QUAD_INSTANCE_STRIDE: u64 = 64;
 pub(crate) enum BatchKind {
     Rect,
     Quad,
+}
+
+/// Where a coverage quad's texels come from — the glyph lane's atlas, or the frame's
+/// own sheet.
+///
+/// A named pair rather than the `0.0`/`1.0` this used to be passed as, because the two
+/// are the same fact twice over: `coverage.wgsl` selects its texture by the number, and
+/// [`LaneCounts`](crate::LaneCounts) counts the mark by the lane. A float parameter could
+/// carry a third value that means nothing to either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoverageSource {
+    /// The persistent R8 glyph atlas (ADR 0008).
+    Atlas,
+    /// The frame's coverage sheet, whichever lane filled it (ADR 0021, ADR 0016).
+    Sheet,
+}
+
+impl CoverageSource {
+    /// The selector `coverage.wgsl` reads out of the instance's fifth float.
+    fn selector(self) -> f32 {
+        match self {
+            Self::Atlas => 0.0,
+            Self::Sheet => 1.0,
+        }
+    }
 }
 
 /// How a batch composites: ordinary premultiplied over, or the knockout two-pass
@@ -104,6 +135,7 @@ impl Encoder<'_> {
         for value in premultiplied {
             self.rect_instances.extend_from_slice(&value.to_le_bytes());
         }
+        self.lanes.rectangle = self.lanes.rectangle.saturating_add(1);
         self.note_batch(BatchKind::Rect, style, mask);
         Ok(())
     }
@@ -116,7 +148,7 @@ impl Encoder<'_> {
         height: f32,
         tex_x: f32,
         tex_y: f32,
-        source: f32,
+        source: CoverageSource,
         color: quorra_scene::Color,
         clip: Rect,
         style: DrawStyle,
@@ -139,7 +171,7 @@ impl Encoder<'_> {
             height,
             tex_x,
             tex_y,
-            source,
+            source.selector(),
             0.0,
             premultiplied[0],
             premultiplied[1],
@@ -153,6 +185,11 @@ impl Encoder<'_> {
         for value in values {
             self.quad_instances.extend_from_slice(&value.to_le_bytes());
         }
+        let lane = match source {
+            CoverageSource::Atlas => &mut self.lanes.glyph,
+            CoverageSource::Sheet => &mut self.lanes.path,
+        };
+        *lane = lane.saturating_add(1);
         self.note_batch(BatchKind::Quad, style, mask);
         Ok(())
     }

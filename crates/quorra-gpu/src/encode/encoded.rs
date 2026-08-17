@@ -18,6 +18,7 @@ use super::{
     Encoder, FunctionOp, ImageOp, LayerPlan, MaskPlan, Op, Scratch, ScratchPacker, ShadedOp,
 };
 use crate::error::RenderError;
+use crate::frame::LaneCounts;
 use crate::instrument::EncodeClock;
 
 /// The encoded frame.
@@ -42,6 +43,8 @@ pub(crate) struct Encoded {
     /// this is the list that says which (ADR 0053).
     pub used_functions: Vec<u32>,
     pub commands: u32,
+    /// Which lane made each mark's coverage (§1.1).
+    pub lanes: LaneCounts,
     /// Coverage tiles this frame placed on the scratch sheet, both lanes.
     pub tiles: u32,
     /// The same tiles priced: the sheet's extent and the texels on it (ADR 0057).
@@ -181,6 +184,7 @@ pub(super) fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encode
         used_meshes: sorted(encoder.used_meshes),
         used_functions: sorted(encoder.used_functions),
         encode_phases: encoder.clock,
+        lanes: encoder.lanes,
         tiles,
         coverage,
         commands: u32::try_from(commands).unwrap_or(u32::MAX),

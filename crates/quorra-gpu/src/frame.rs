@@ -199,6 +199,68 @@ impl std::fmt::Display for CoverageSheet {
     }
 }
 
+/// Which lane made the coverage for each mark this frame drew (`doc/PLAN.md` §1.1).
+///
+/// §1.1's premise — that most of a page is repeated glyph outlines and axis-aligned
+/// rectangles, and that general curve filling is the *rare* case — is the assumption the
+/// whole architecture is arranged around, and until this struct existed there was no
+/// instrument in the tree that could say whether a given page agrees with it. The brief's
+/// §11 question 2 asks for the number over a real corpus; this is what answers it, per
+/// frame, for any page a caller cares to ask about.
+///
+/// **Marks, not commands.** A group is a command that draws none of its own, a culled
+/// command draws none at all ([`Counters::commands_culled`]), a command inside a group is
+/// counted where it draws, and a clip residue is coverage no command asked for by name.
+/// So these four sum to the marks the frame put on a target — at most
+/// [`Counters::commands`], and on a real page usually fewer.
+///
+/// **Counts, never a rate.** The share is the reader's arithmetic and depends on which
+/// denominator the question wants; a ratio computed here would fix that choice for
+/// everybody.
+///
+/// # Why four lanes, where §1.1's table names five
+///
+/// The plan's table sorts by *what a command is*. The encoder sorts by **how a mark's
+/// coverage is made**, which is the thing that costs, and the two part company on one
+/// entry: a mesh — like every other non-solid paint — is a *paint* over a quad whose
+/// coverage came from the rectangle lane or the path lane, so it is counted in whichever
+/// of those two made it. There is no fifth coverage mechanism for it to have.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LaneCounts {
+    /// Marks drawn with **analytic** coverage evaluated in the fragment shader: an
+    /// axis-aligned rectangle under an axis-preserving transform inside a rectangular
+    /// clip (ADR 0007), whether it arrived as a `Rect` command or as the fill of a
+    /// four-edged outline (ADR 0047).
+    ///
+    /// The lane that allocates no coverage memory at all, which is why §6.4 of the brief
+    /// is blunt that a rectangular clip must never become a mask texture.
+    pub rectangle: u32,
+    /// Marks drawn as one quad over a tile of the persistent R8 glyph atlas (ADR 0008,
+    /// ADR 0009) — the lane §1.1 calls the dominant case.
+    ///
+    /// One per *placement*, not per distinct tile: a page that draws one letterform two
+    /// hundred times reports 200 here and one key in
+    /// [`atlas_distinct_keys`](Counters::atlas_distinct_keys).
+    pub glyph: u32,
+    /// Marks drawn as one quad over a tile of the **frame's coverage sheet** — the path
+    /// lane, and the population §11.2's census exists to size.
+    ///
+    /// Everything that is neither of the two above: a fill whose device tile the atlas
+    /// will not admit, a stroke's expansion, any mark under a non-rectangular clip
+    /// residue, and any shape carrying a shading, mesh or function paint. Both ways of
+    /// filling that sheet are counted here — the host rasteriser and, under
+    /// [`Coverage::Gpu`](crate::startup::Coverage::Gpu), the winding lane of ADR 0016 —
+    /// because they produce the same tile on the same sheet and differ only in who drew
+    /// it.
+    pub path: u32,
+    /// Image placements drawn as a textured quad (ISO 32000-2 §8.9.5, ADR 0011).
+    ///
+    /// The quad's own coverage is analytic where the placement preserves axes; a residue
+    /// clip over one still costs a sheet tile, and that tile is counted in
+    /// [`tiles`](Counters::tiles) without moving this mark out of the image lane.
+    pub image: u32,
+}
+
 /// What this frame did, in counts (§8 of the brief).
 ///
 /// The atlas and tiling counters exist from M1 with honest zeros: the fields are the
@@ -207,6 +269,9 @@ impl std::fmt::Display for CoverageSheet {
 pub struct Counters {
     /// Scene commands encoded into this frame.
     pub commands: u32,
+    /// Which lane made the coverage for each mark this frame drew — §1.1's sorter,
+    /// counted rather than assumed.
+    pub lanes: LaneCounts,
     /// Distinct outlines referenced (M2 onwards; 0 until then).
     pub distinct_outlines: u32,
     /// Entries resident in the glyph atlas after this frame (M4; 0 until then).

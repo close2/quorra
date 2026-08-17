@@ -25,6 +25,7 @@ use quorra_scene::{Point, Rect};
 
 use super::clips::ResolvedClip;
 use super::device_space::tile_side;
+use super::instance::CoverageSource;
 use super::{DrawStyle, Encoder};
 use crate::atlas::CacheProspect;
 use crate::error::RenderError;
@@ -301,7 +302,7 @@ impl Encoder<'_> {
             height as f32,
             sx as f32,
             sy as f32,
-            1.0, // source: scratch, whichever lane drew it
+            CoverageSource::Sheet, // whichever lane drew it
             color,
             resolved.rect,
             style,
@@ -345,7 +346,7 @@ impl Encoder<'_> {
             tile.height as f32,
             sx as f32,
             sy as f32,
-            1.0, // source: scratch
+            CoverageSource::Sheet,
             color,
             clip,
             style,

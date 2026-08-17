@@ -90,9 +90,24 @@ impl Encoder<'_> {
     /// rectangles are the instances'.
     pub(super) fn append_op(&mut self, op: Op) {
         match &op {
-            Op::Image(image) => self.plan_mut().mark(image.dest),
-            Op::Shaded(shaded) => self.plan_mut().mark(shaded.dest),
-            Op::Function(function) => self.plan_mut().mark(function.placement.dest),
+            Op::Image(image) => {
+                self.lanes.image = self.lanes.image.saturating_add(1);
+                self.plan_mut().mark(image.dest);
+            }
+            // The fourth lane counting site, and the reason it reads a placement rather
+            // than a paint: a shading, a mesh and a §7.10.5 program are all one quad over
+            // a coverage source, and which source it is *is* the lane. `coverage_origin`
+            // is `Some` exactly when the mark took a tile of the frame's sheet, and `None`
+            // exactly when its shape was a rectangle the shader can evaluate (ADR 0011's
+            // twin of ADR 0007's fast path).
+            Op::Shaded(shaded) => {
+                self.note_rare_lane(shaded.coverage_origin.is_some());
+                self.plan_mut().mark(shaded.dest);
+            }
+            Op::Function(function) => {
+                self.note_rare_lane(function.placement.coverage_origin.is_some());
+                self.plan_mut().mark(function.placement.dest);
+            }
             // A child is the one op that may not be appended at all, so it goes through
             // the method that decides — from here, so that no call site can reach the
             // plain append and skip the decision. `ChildOp` is `Copy`.
@@ -100,5 +115,15 @@ impl Encoder<'_> {
             Op::Draw(_) => {}
         }
         self.plan_mut().ops.push(op);
+    }
+
+    /// Count a rare-paint quad in the lane that made its coverage.
+    fn note_rare_lane(&mut self, from_sheet: bool) {
+        let lane = if from_sheet {
+            &mut self.lanes.path
+        } else {
+            &mut self.lanes.rectangle
+        };
+        *lane = lane.saturating_add(1);
     }
 }
