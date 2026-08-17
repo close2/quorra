@@ -31,14 +31,14 @@ row, since a number without one is not evidence.
 
 | | | measured on |
 |---|---:|---|
-| dense text, presenting, steady — §6.2's bar is 2.0 ms | **1.816 ms** `wall − acquire` | `examples/surface_measure.rs`, RADV at the real display, 2026-08-14 |
-| — encode | 1.126 ms | same |
-| — recording, which is most of that encode | 1.130 ms of a 1.348 ms *instrumented* encode | same; the instrument costs a clock read per seam (ADR 0023) |
-| — geometry | 0.161 ms | same; ADR 0044's chord floor costs nothing visible here |
-| — execute: the GPU is about 4 % of the frame | 0.071 ms | same |
+| dense text, presenting, steady — §6.2's bar is 2.0 ms | **1.420 ms** `wall − acquire` | `examples/surface_measure.rs`, RADV at the real display, **2026-08-17**, load 3.09, minima of 80 frames over 2 rounds, `MESA_SHADER_CACHE_DISABLE` |
+| — encode | 1.020 ms | same |
+| — recording, which is still most of that encode | 0.926 ms of a 1.179 ms *instrumented* encode | same; the instrument costs a clock read per seam (ADR 0023) |
+| — geometry | 0.206 ms | same — **up from 0.161 on the pre-re-cut page**, which is the 40 residue-clipped tiles that page now actually rasterises (ADR 0057 found the clips met none of their marks) |
+| — execute: the GPU is about 5 % of the frame | 0.073 ms | same |
 | the same frame, unchanged, replayed rather than encoded | **0.174 ms** against 1.107 | `examples/retained.rs`, headless RADV, ADR 0048 |
 | — and now also when the page's glyph tiles overflow the atlas | 1 encode per page, not 1 per frame | `examples/retained.rs`'s overflow section, ADR 0050 |
-| artwork — the corpus's p99 clip shape — steady | 43.3 ms, geometry 35.4 of it | `surface_measure`, RADV at the real display, 2026-08-14 — **stale in two ways**: before ADR 0049, and on the page as it was before its curve clips were cut around its marks (2026-08-17). Owed a re-run on the display |
+| artwork — the corpus's p99 clip shape — steady | **45.765 ms**, geometry **36.013** of it, staging 2.631, recording 2.870 | `surface_measure`, RADV at the real display, **2026-08-17** — the re-run the previous row was owed, and the first taken on a page whose curve clips meet the marks they clip. **Not comparable with the 43.3 ms it replaces**: that was a different page. Recording is 6.9 % of this encode, which is what ADR 0023's amendment looks like once the residue multiply is counted as geometry |
 | — the same page's encode, before → after ADR 0049 | geometry **37.8 → 28.9 ms**, encode 46.3 → 37.2 | `examples/residue_clip.rs`, 2026-08-15 — **a number about a page whose clips met 8 of the 600 marks they clipped.** The mechanism and the saving were real; the fixture was re-cut on 2026-08-17 and no number taken on it before that date is comparable with one taken after (`doc/notes-clipped-instrument.md`) |
 | — what the residue multiply costs that page, and where the clock puts it | **4 683 942 Ir, 0.62 % of the encode**; inside `geometry` since ADR 0023's amendment | callgrind on the re-cut page, counters checked against `tests/archetypes.rs`, 2026-08-17. It was reported as `recording` until then, so every `recording` share published for a clipped page was too large by it |
 | the artwork and dense-text archetypes' curve clips, before the re-cut | overlapped **8 of 600** and **0 of 40** of the marks they clipped | counted from the generator's own arithmetic, 2026-08-17 (ADR 0057 found it) — a mark whose chain admits nothing still got a mark-sized tile multiplied by zero, so the rows looked like they gated the residue lane for two ADRs |
