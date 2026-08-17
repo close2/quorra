@@ -11,9 +11,18 @@
 //! Every test here therefore states its claim as equality against the one-threaded
 //! frame, at several thread counts including one far above what the divided work needs.
 //! The fixtures are chosen so that a *missing* one of the encoder's drain points would
-//! move a pixel: marks overlap, so draw order is visible; a rectangle, an image-free
-//! rare paint and a group sit between runs of fills, so a queue that survived one of them
-//! would reorder the page.
+//! move a pixel: marks overlap, so draw order is visible; a rectangle, a stroke, a
+//! blended fill, a curve-clipped fill and a group sit between runs of fills, so a queue
+//! that survived one of them would reorder the page.
+//!
+//! **One drain point is not among them, and this file cannot reach it.** Every op
+//! `busy_page` pushes follows a `plan_child` that has drained already, so
+//! `Encoder::push_op`'s own drain can be deleted and all four tests below go on passing —
+//! measured by forcing exactly that, 2026-08-17. Reaching it needs a **rare-lane** command
+//! (an image, a shading, a function paint) in the middle of a run of queued fills, which
+//! is what `tests/encode_threads_nested.rs` puts there. An earlier version of this
+//! paragraph claimed "an image-free rare paint" was already among the fixtures; there is
+//! no rare paint in this file at all.
 //!
 //! `llvmpipe` by name, as most of this suite does, so CI on a software rasteriser reads
 //! the same numbers.
