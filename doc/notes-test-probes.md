@@ -1,6 +1,6 @@
-# The shared probes get a home
+# The shared probes, and dividing `raster/tests.rs`
 
-Round one of two in this document; §2 below is `raster/tests.rs`. Neither moves behaviour,
+Two rounds in one document, both about the test suite holding the bar it holds the source
 to. Neither moves behaviour, and each says how that is proved rather than asserting it.
 
 Base: `6ee3072`, current `main`. **The worktree this round was handed started at
@@ -171,3 +171,90 @@ rather than only `Finished`.
   duplicated as a named helper*; an index written inside one test function is that test's own
   arithmetic and sweeping it is a different round with a different justification. Stated as a
   choice rather than an oversight, which is the difference this list exists to make.
+
+
+---
+
+## 2. `raster/tests.rs` divides, and the seam is the parent's after all
+
+ADR 0061 put all eighteen cases in one file when `raster.rs` was split, so the split could be
+proved by an identical list of test names, and wrote the cost down: 704 lines, past the
+smell, dividing them a round of its own. This is that round. **Its whole visible effect is
+that every one of those eighteen tests gains one path segment**, and the mapping is below.
+
+### Whether the source's seam fits the tests
+
+ADR 0061 said it does not, and gave the reason: almost every case goes through all three
+parts, so a file per source module would put most of them in the wrong one. That is true of
+the *call graphs* and it does not decide anything, because `fill_mask` is the **instrument**
+almost all of them observe through — `stroke` takes polylines and returns polylines, and
+`flatten` returns polylines too, so filling is the only way to see either. An instrument is
+not a subject.
+
+Asked instead *which clause is this test a statement about*, the eighteen divide with
+nothing left over: 3 / 9 / 6. And the parent's own module comment is the check, because it
+already attributes each of this code's three arithmetic defects to one part — so each
+defect's regression test lands in its defect's file without anyone choosing that. ADR 0062
+records the rule and the four agreements.
+
+### The mapping — every name that changed, and to what
+
+Eighteen renames, each exactly one inserted path segment, nothing else:
+
+| was | is |
+|---|---|
+| `raster::tests::collinear_cubic_equals_the_line` | `raster::tests::flatten::collinear_cubic_equals_the_line` |
+| `raster::tests::a_circle_deposits_its_own_area_at_every_size` | `raster::tests::flatten::a_circle_deposits_its_own_area_at_every_size` |
+| `raster::tests::a_large_curve_keeps_the_segment_count_it_had` | `raster::tests::flatten::a_large_curve_keeps_the_segment_count_it_had` |
+| `raster::tests::aligned_rectangle_is_exact` | `raster::tests::fill::aligned_rectangle_is_exact` |
+| `raster::tests::fractional_rectangle_covers_halves` | `raster::tests::fill::fractional_rectangle_covers_halves` |
+| `raster::tests::diagonal_covers_by_area` | `raster::tests::fill::diagonal_covers_by_area` |
+| `raster::tests::nested_same_winding_separates_the_rules` | `raster::tests::fill::nested_same_winding_separates_the_rules` |
+| `raster::tests::geometry_outside_the_region_still_winds` | `raster::tests::fill::geometry_outside_the_region_still_winds` |
+| `raster::tests::a_tile_is_the_crop_of_the_region_that_contains_it` | `raster::tests::fill::a_tile_is_the_crop_of_the_region_that_contains_it` |
+| `raster::tests::a_tile_whose_geometry_enters_from_outside_is_exact` | `raster::tests::fill::a_tile_whose_geometry_enters_from_outside_is_exact` |
+| `raster::tests::the_region_and_the_tile_agree_on_a_pixel_whose_area_is_known` | `raster::tests::fill::the_region_and_the_tile_agree_on_a_pixel_whose_area_is_known` |
+| `raster::tests::an_edge_whose_slope_leaves_f32_deposits_nothing` | `raster::tests::fill::an_edge_whose_slope_leaves_f32_deposits_nothing` |
+| `raster::tests::butt_stroke_of_a_horizontal_line_is_a_rectangle` | `raster::tests::stroke::butt_stroke_of_a_horizontal_line_is_a_rectangle` |
+| `raster::tests::square_caps_extend_by_half_the_width` | `raster::tests::stroke::square_caps_extend_by_half_the_width` |
+| `raster::tests::miter_join_fills_the_corner` | `raster::tests::stroke::miter_join_fills_the_corner` |
+| `raster::tests::each_cap_deposits_the_area_table_53_gives_it` | `raster::tests::stroke::each_cap_deposits_the_area_table_53_gives_it` |
+| `raster::tests::a_stroke_spanning_the_coordinate_range_is_not_drawn_as_nothing` | `raster::tests::stroke::a_stroke_spanning_the_coordinate_range_is_not_drawn_as_nothing` |
+| `raster::tests::a_segment_below_the_float_grid_produces_finite_geometry` | `raster::tests::stroke::a_segment_below_the_float_grid_produces_finite_geometry` |
+
+**The three defect tests, by name, because they cover arithmetic that drew wrong pages:**
+`a_stroke_spanning_the_coordinate_range_is_not_drawn_as_nothing` and
+`a_segment_below_the_float_grid_produces_finite_geometry` are in `raster/tests/stroke.rs`
+(`stroke::direction` and `stroke_polylines`' float-equality dedupe);
+`an_edge_whose_slope_leaves_f32_deposits_nothing` is in `raster/tests/fill.rs`
+(`fill::accumulate_edge`). None lost an assertion, a comment or a line — see below.
+
+### That nothing else moved
+
+Three instruments, and each is exact rather than a reading:
+
+1. **The whole workspace list, stripped.** `cargo test --workspace -- --list` gives 554
+   names before and after. Removing the one inserted segment from each of the after names
+   reproduces the before list **byte for byte** — `diff` is empty. So no name changed in any
+   way other than gaining a segment, and none appeared or disappeared.
+2. **The multiset of every non-comment, non-blank line**, the instrument the `raster` split
+   trap names, run over the old file against the four new ones. It differs in exactly: three
+   `mod` declarations; the import blocks (one `use` became six, spread over four files); and
+   one call that lost its `super::` prefix, `super::polyline_bounds(&lines)` →
+   `polyline_bounds(&lines)`, because the name is now imported. **Every other line is
+   identical.** That is ADR 0061 cost 3's prediction — *the imports change even though the
+   tests do not* — holding one level down.
+3. **The counts.** 551 passing and 3 ignored before and after; 550 `#[test]` attributes
+   before and after.
+
+### Sizes
+
+| file | lines | holds |
+|---|---|---|
+| `raster/tests.rs` | 80 | the map, and the three fixtures more than one file builds |
+| `raster/tests/flatten.rs` | 184 | 3 cases, plus `circle_path` and its two derived constants |
+| `raster/tests/fill.rs` | 266 | 9 cases |
+| `raster/tests/stroke.rs` | 261 | 6 cases, plus `hairline` and `LARGEST_DEVICE_COORDINATE` |
+
+Everything used by exactly one file moved into that file, where its reasons are; `IDENTITY`,
+`cov` and `rect_path` stayed in the parent, which is the only thing three of the four share.
