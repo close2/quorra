@@ -28,12 +28,8 @@ use quorra_scene::{
 mod common;
 
 use common::headless::{device, render};
+use common::probe::pixel;
 use common::scene::rect_outline;
-
-fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
-    let at = ((y * width + x) * 4) as usize;
-    [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
-}
 
 fn rgba(width: u32, height: u32, texels: &[[u8; 4]]) -> ImageSpec {
     assert_eq!(texels.len(), (width * height) as usize);

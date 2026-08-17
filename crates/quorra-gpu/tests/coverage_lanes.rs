@@ -32,6 +32,7 @@ use quorra_scene::{
 
 mod common;
 
+use common::probe::alpha;
 use common::scene::black;
 
 /// The fixtures are written in a 48-unit square and drawn at [`MAGNIFY`] times it, so
@@ -77,15 +78,15 @@ fn render(coverage: Coverage, build: impl Fn(&mut Device) -> Scene) -> Vec<u8> {
         .into_pixels()
 }
 
-/// The alpha of one device pixel.
-fn alpha(pixels: &[u8], x: u32, y: u32) -> u8 {
-    pixels[((y * SIZE + x) * 4 + 3) as usize]
-}
-
 /// A probe written in fixture units: the raster is [`MAGNIFY`] times larger, and the
 /// middle of unit cell `(x, y)` is the same place in the shape at either scale.
 fn at_unit(pixels: &[u8], x: u32, y: u32) -> u8 {
-    alpha(pixels, x * MAGNIFY + MAGNIFY / 2, y * MAGNIFY + MAGNIFY / 2)
+    alpha(
+        pixels,
+        SIZE,
+        x * MAGNIFY + MAGNIFY / 2,
+        y * MAGNIFY + MAGNIFY / 2,
+    )
 }
 
 /// A curved blob big enough to leave the atlas, so the CPU lane takes its path lane
@@ -141,7 +142,7 @@ fn the_lanes_agree_exactly_where_no_edge_crosses() {
     let mut exterior = 0;
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let (a, b) = (alpha(&cpu, x, y), alpha(&gpu, x, y));
+            let (a, b) = (alpha(&cpu, SIZE, x, y), alpha(&gpu, SIZE, x, y));
             if a == 255 {
                 assert_eq!(
                     b, 255,
@@ -226,7 +227,10 @@ fn compare(cpu: &[u8], gpu: &[u8]) -> (u32, i32, i32) {
     let (mut edges, mut worst_edge, mut worst) = (0, 0_i32, 0_i32);
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let (a, b) = (i32::from(alpha(cpu, x, y)), i32::from(alpha(gpu, x, y)));
+            let (a, b) = (
+                i32::from(alpha(cpu, SIZE, x, y)),
+                i32::from(alpha(gpu, SIZE, x, y)),
+            );
             if a > 0 && a < 255 {
                 edges += 1;
                 worst_edge = worst_edge.max((a - b).abs());

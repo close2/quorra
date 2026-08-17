@@ -41,6 +41,7 @@ use quorra_scene::{
 mod common;
 
 use common::headless::device;
+use common::probe::alpha;
 use common::scene::{black, rect_outline};
 
 const SIZE: u32 = 32;
@@ -55,10 +56,6 @@ fn render(device: &mut Device, scene: &Scene) -> (Vec<u8>, Counters) {
         .expect("renders");
     let counters = frame.counters();
     (frame.into_raster().unwrap().into_pixels(), counters)
-}
-
-fn alpha_at(pixels: &[u8], x: u32, y: u32) -> u8 {
-    pixels[((y * SIZE + x) * 4 + 3) as usize]
 }
 
 /// One rectangle inside the target, plus commands of every lane placed far outside
@@ -189,17 +186,17 @@ fn a_stroke_reaching_in_from_outside_still_draws() {
         "a stroke whose width reaches the target is not culled"
     );
     assert_eq!(
-        alpha_at(&pixels, 0, 16),
+        alpha(&pixels, SIZE, 0, 16),
         255,
         "column 0 lies inside the stroked band"
     );
     assert_eq!(
-        alpha_at(&pixels, 1, 16),
+        alpha(&pixels, SIZE, 1, 16),
         255,
         "column 1 lies inside the stroked band"
     );
     assert_eq!(
-        alpha_at(&pixels, 2, 16),
+        alpha(&pixels, SIZE, 2, 16),
         0,
         "the band ends at x = 2, so column 2 is untouched"
     );
@@ -246,11 +243,15 @@ fn a_fill_straddling_the_edge_keeps_its_coverage() {
 
         assert_eq!(counters.commands_culled, 0, "the fill reaches column 0");
         assert_eq!(
-            alpha_at(&pixels, 0, 16),
+            alpha(&pixels, SIZE, 0, 16),
             128,
             "half of column 0 is covered: round(0.5 × 255)"
         );
-        assert_eq!(alpha_at(&pixels, 1, 16), 0, "the fill ends inside column 0");
+        assert_eq!(
+            alpha(&pixels, SIZE, 1, 16),
+            0,
+            "the fill ends inside column 0"
+        );
     }
 }
 
@@ -521,12 +522,12 @@ fn a_staged_group_its_clip_empties_neither_erases_nor_deposits() {
 
     assert_eq!(control.layers_culled, 0);
     assert_eq!(
-        alpha_at(&erased, 10, 10),
+        alpha(&erased, SIZE, 10, 10),
         0,
         "an erase by an opaque shape leaves nothing behind it"
     );
     assert_eq!(
-        alpha_at(&want, 10, 10),
+        alpha(&want, SIZE, 10, 10),
         255,
         "which is a change, because the page is opaque there"
     );

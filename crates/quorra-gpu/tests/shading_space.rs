@@ -76,6 +76,7 @@ use quorra_scene::{
 mod common;
 
 use common::headless::device;
+use common::probe::pixel;
 use common::scene::rect_outline;
 
 /// The target every frame in this file is drawn into. 64 × 4 = 256 bytes a row, which is
@@ -133,11 +134,6 @@ fn grey_ramp(device: &mut Device) -> RampId {
 fn clause_grey_at(x: u32) -> u8 {
     let t = (x as f32 + 0.5) / SIZE as f32;
     (t * 255.0).round() as u8
-}
-
-fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
-    let at = ((y * SIZE + x) * 4) as usize;
-    [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
 }
 
 /// Draw `scene` and hand back its pixels together with the counters that say which lane
@@ -306,7 +302,7 @@ fn a_rect_fill_reads_the_ramp_at_the_page_position_however_it_was_placed() {
     // times: the mark spans device columns 32..40 and each column carries its own t.
     for x in 32..40 {
         let expected = clause_grey_at(x);
-        let actual = pixel(&frames[0], x, 36);
+        let actual = pixel(&frames[0], SIZE, x, 36);
         assert!(
             i32::from(actual[0]).abs_diff(i32::from(expected)) <= 1,
             "column {x}: the ramp reads {} where §8.7.4.5.3 with t = (x + 0.5)/{SIZE} \
@@ -447,7 +443,7 @@ fn a_shaded_glyph_run_sweeps_across_the_page_not_within_each_glyph() {
     let mut seen = Vec::new();
     for x in GLYPH_RUN {
         let column = x as u32 + 3;
-        let probe = pixel(&pixels, column, 29);
+        let probe = pixel(&pixels, SIZE, column, 29);
         assert_eq!(probe[3], 255, "column {column} is inside its glyph");
         let expected = clause_grey_at(column);
         assert!(
@@ -541,7 +537,7 @@ fn one_shading_sweeps_continuously_across_two_separate_marks() {
     let (pixels, _) = render(&mut device, &builder.finish());
 
     for x in [5_u32, 19, 45, 59] {
-        let probe = pixel(&pixels, x, 32);
+        let probe = pixel(&pixels, SIZE, x, 32);
         assert_eq!(probe[3], 255, "column {x} is inside one of the two marks");
         let expected = clause_grey_at(x);
         assert!(
@@ -552,7 +548,7 @@ fn one_shading_sweeps_continuously_across_two_separate_marks() {
         );
     }
     assert_eq!(
-        pixel(&pixels, 32, 32)[3],
+        pixel(&pixels, SIZE, 32, 32)[3],
         0,
         "the gap between the two marks is unpainted: a shading paints where the mark is, \
          even though it is measured from the page"

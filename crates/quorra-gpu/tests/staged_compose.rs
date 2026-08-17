@@ -29,31 +29,18 @@
     clippy::arithmetic_side_effects
 )]
 
-use quorra_gpu::{Device, Target, Viewport};
+use quorra_gpu::Device;
 use quorra_scene::{
     Affine, BlendMode, Color, Compose, FillRule, GroupComposeReason, GroupSpec, MaskKind,
-    OutlineId, Paint, Point, Scene, SceneBuilder, SceneError, Segment, StagedComposeReason,
+    OutlineId, Paint, Point, SceneBuilder, SceneError, Segment, StagedComposeReason,
 };
 
 mod common;
 
 use common::clause::{deviation_from_the_clause, premul};
-use common::headless::device;
+use common::headless::{device, render};
 
 const SIZE: u32 = 64;
-
-fn render(device: &mut Device, scene: &Scene) -> Vec<u8> {
-    device
-        .render(
-            scene,
-            &Viewport::full(SIZE, SIZE, Affine::IDENTITY),
-            Target::Readback,
-        )
-        .expect("renders")
-        .into_raster()
-        .unwrap()
-        .into_pixels()
-}
 
 /// A triangle with a diagonal edge, so half-covered pixels exist: axis-aligned
 /// rectangles would agree while being wrong, which is the trap `Compose`'s own doc
@@ -118,14 +105,14 @@ fn the_pair_is_the_clause_and_source_over_is_not() {
     let onto_transparency = |device: &mut Device, colour: Color| {
         let mut builder = SceneBuilder::new();
         fill(&mut builder, outline, colour, Compose::SrcOver).unwrap();
-        render(device, &builder.finish())
+        render(device, &builder.finish(), SIZE, SIZE)
     };
     let shape = onto_transparency(&mut device, Color::new(1.0, 1.0, 1.0, 1.0));
     let deposit = onto_transparency(&mut device, object);
 
     let mut plain = SceneBuilder::new();
     backdrop(&mut plain);
-    let plain = render(&mut device, &plain.finish());
+    let plain = render(&mut device, &plain.finish(), SIZE, SIZE);
 
     let mut staged_scene = SceneBuilder::new();
     backdrop(&mut staged_scene);
@@ -137,12 +124,12 @@ fn the_pair_is_the_clause_and_source_over_is_not() {
     )
     .unwrap();
     fill(&mut staged_scene, outline, object, Compose::Plus).unwrap();
-    let staged = render(&mut device, &staged_scene.finish());
+    let staged = render(&mut device, &staged_scene.finish(), SIZE, SIZE);
 
     let mut over_scene = SceneBuilder::new();
     backdrop(&mut over_scene);
     fill(&mut over_scene, outline, object, Compose::SrcOver).unwrap();
-    let over = render(&mut device, &over_scene.finish());
+    let over = render(&mut device, &over_scene.finish(), SIZE, SIZE);
 
     let (mut worst_staged, mut worst_over) = (0.0_f32, 0.0_f32);
     let mut partial_pixels = 0_u32;
@@ -196,7 +183,7 @@ fn dest_out_weights_by_shape_and_not_by_opacity() {
             Compose::DestOut,
         )
         .unwrap();
-        render(device, &builder.finish())
+        render(device, &builder.finish(), SIZE, SIZE)
     };
 
     let opaque = erase_with(&mut device, 1.0);
@@ -380,13 +367,13 @@ fn the_pair_inside_a_knockout_group_is_the_clause() {
             Ok(())
         })
         .unwrap();
-    let before = render(&mut device, &before.finish());
+    let before = render(&mut device, &before.finish(), SIZE, SIZE);
 
     // The two quantities the clause's line is written in, read from the device.
     let onto_transparency = |device: &mut Device, colour: Color, compose: Compose| {
         let mut builder = SceneBuilder::new();
         fill(&mut builder, outline, colour, compose).unwrap();
-        render(device, &builder.finish())
+        render(device, &builder.finish(), SIZE, SIZE)
     };
     let shape = onto_transparency(
         &mut device,
@@ -408,7 +395,7 @@ fn the_pair_inside_a_knockout_group_is_the_clause() {
             fill(body, outline, object, Compose::Plus)
         })
         .unwrap();
-    let staged = render(&mut device, &staged.finish());
+    let staged = render(&mut device, &staged.finish(), SIZE, SIZE);
 
     // And the same element written the way a caller has to write it without the pair:
     // one mark, which reads its shape off the alpha it is drawn with.
@@ -420,7 +407,7 @@ fn the_pair_inside_a_knockout_group_is_the_clause() {
             masked(body, outline, object, mask, Compose::SrcOver)
         })
         .unwrap();
-    let plain = render(&mut device, &plain.finish());
+    let plain = render(&mut device, &plain.finish(), SIZE, SIZE);
 
     let (worst_staged, partial_pixels) =
         deviation_from_the_clause(&before, &shape, &deposit, &staged);
@@ -492,14 +479,14 @@ fn a_group_can_be_one_stage_of_the_clause() {
         builder
             .group(stage(Compose::SrcOver), |body| content(body, colour))
             .unwrap();
-        render(device, &builder.finish())
+        render(device, &builder.finish(), SIZE, SIZE)
     };
     let shape = onto_transparency(&mut device, opaque);
     let deposit = onto_transparency(&mut device, object);
 
     let mut before = SceneBuilder::new();
     backdrop(&mut before);
-    let before = render(&mut device, &before.finish());
+    let before = render(&mut device, &before.finish(), SIZE, SIZE);
 
     let mut staged = SceneBuilder::new();
     backdrop(&mut staged);
@@ -509,14 +496,14 @@ fn a_group_can_be_one_stage_of_the_clause() {
     staged
         .group(stage(Compose::Plus), |body| content(body, object))
         .unwrap();
-    let staged = render(&mut device, &staged.finish());
+    let staged = render(&mut device, &staged.finish(), SIZE, SIZE);
 
     let mut plain = SceneBuilder::new();
     backdrop(&mut plain);
     plain
         .group(stage(Compose::SrcOver), |body| content(body, object))
         .unwrap();
-    let plain = render(&mut device, &plain.finish());
+    let plain = render(&mut device, &plain.finish(), SIZE, SIZE);
 
     let (worst_staged, partial) = deviation_from_the_clause(&before, &shape, &deposit, &staged);
     let (worst_plain, _) = deviation_from_the_clause(&before, &shape, &deposit, &plain);

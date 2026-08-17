@@ -63,6 +63,7 @@
 mod common;
 
 use common::headless::{device, render};
+use common::probe::alpha;
 use quorra_scene::{
     Affine, BlendMode, Color, Command, ImageFilter, ImageSpec, MaskKind, Point, Rect, SceneBuilder,
 };
@@ -115,10 +116,6 @@ fn image_of(w: u32, h: u32, samples: &[[u8; 4]]) -> ImageSpec {
                 .into_boxed_slice(),
         ),
     }
-}
-
-fn alpha_at(pixels: &[u8], x: u32, y: u32) -> u8 {
-    pixels[((y * SIZE + x) * 4 + 3) as usize]
 }
 
 fn rgb_at(pixels: &[u8], x: u32, y: u32) -> [u8; 3] {
@@ -246,19 +243,23 @@ fn a_soft_mask_edge_lands_on_the_device_grid_not_the_images() {
 
     let edge = MASK_EDGE as u32;
     assert_eq!(
-        alpha_at(&pixels, edge - 1, ROW),
+        alpha(&pixels, SIZE, edge - 1, ROW),
         255,
         "the last device pixel the mask admits is painted"
     );
     assert_eq!(
-        alpha_at(&pixels, edge, ROW),
+        alpha(&pixels, SIZE, edge, ROW),
         0,
         "the first device pixel outside the mask is not"
     );
     // The two texel boundaries the edge is *not* on, in both directions: if the mask had
     // been sampled on the image's 4 × 4 grid, the transition would be at one of these.
-    assert_eq!(alpha_at(&pixels, 21, ROW), 255, "not quantised down to 20");
-    assert_eq!(alpha_at(&pixels, 33, ROW), 0, "not quantised up to 32");
+    assert_eq!(
+        alpha(&pixels, SIZE, 21, ROW),
+        255,
+        "not quantised down to 20"
+    );
+    assert_eq!(alpha(&pixels, SIZE, 33, ROW), 0, "not quantised up to 32");
 }
 
 /// The other side of the same mapping: an image's own texel boundary lands where

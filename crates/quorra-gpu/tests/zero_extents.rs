@@ -43,9 +43,13 @@
 
 use quorra_gpu::{Device, Options, RenderError, Target, Viewport};
 use quorra_scene::{
-    Affine, BlendMode, Color, Compose, FillRule, GroupSpec, MaskKind, Paint, Point, Scene,
-    SceneBuilder, Segment,
+    Affine, BlendMode, Color, Compose, FillRule, GroupSpec, MaskKind, Paint, Point, SceneBuilder,
+    Segment,
 };
+
+mod common;
+
+use common::headless::render;
 
 const SIZE: u32 = 32;
 
@@ -55,19 +59,6 @@ fn device() -> Device {
         ..Options::default()
     })
     .expect("llvmpipe is present wherever this suite runs")
-}
-
-fn render(device: &mut Device, scene: &Scene) -> Vec<u8> {
-    device
-        .render(
-            scene,
-            &Viewport::full(SIZE, SIZE, Affine::IDENTITY),
-            Target::Readback,
-        )
-        .expect("the frame draws")
-        .into_raster()
-        .unwrap()
-        .into_pixels()
 }
 
 fn is_blank(pixels: &[u8]) -> bool {
@@ -198,7 +189,7 @@ fn a_soft_mask_whose_group_marks_nothing_masks_everything() {
             Some(mask),
         )
         .unwrap();
-    let pixels = render(&mut device, &builder.finish());
+    let pixels = render(&mut device, &builder.finish(), SIZE, SIZE);
     assert!(
         is_blank(&pixels),
         "a mark under an empty alpha mask deposits nothing"
@@ -246,7 +237,7 @@ fn a_mark_with_a_zero_extent_axis_draws_nothing_and_stops_no_frame() {
             None,
         )
         .unwrap();
-    let pixels = render(&mut device, &builder.finish());
+    let pixels = render(&mut device, &builder.finish(), SIZE, SIZE);
     let at = |x: u32, y: u32| pixels[((y * SIZE + x) * 4 + 3) as usize];
     assert_eq!(at(16, 10), 0, "the flat path inks no pixel of its own row");
     assert_eq!(at(16, 9), 0, "nor the row above it");

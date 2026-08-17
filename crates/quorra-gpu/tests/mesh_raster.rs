@@ -60,6 +60,7 @@ use quorra_scene::{
 mod common;
 
 use common::headless::device;
+use common::probe::pixel;
 use common::scene::rect_outline;
 
 /// The target every frame here is drawn into. 64 × 4 = 256 bytes a row, the buffer-copy
@@ -151,18 +152,13 @@ fn render_at(device: &mut Device, scene: &Scene, scale: f32) -> (Vec<u8>, Counte
     (frame.into_raster().unwrap().into_pixels(), counters)
 }
 
-fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
-    let at = ((y * SIZE + x) * 4) as usize;
-    [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
-}
-
 /// Assert the whole raster, texel for texel, at the anchor the upload named.
 fn assert_the_raster_is_reproduced(pixels: &[u8], what: &str) {
     for y in 0..MESH {
         for x in 0..MESH {
             let at = (ANCHOR.0 as u32 + x, ANCHOR.1 as u32 + y);
             assert_eq!(
-                pixel(pixels, at.0, at.1),
+                pixel(pixels, SIZE, at.0, at.1),
                 numbered_texel(x, y),
                 "{what}: texel ({x}, {y}) is not what was uploaded, at device {at:?}"
             );
@@ -200,32 +196,32 @@ fn the_raster_has_hard_edges_at_its_own_extent() {
 
     let (left, top) = (ANCHOR.0 as u32, ANCHOR.1 as u32);
     assert_eq!(
-        pixel(&pixels, left, top),
+        pixel(&pixels, SIZE, left, top),
         numbered_texel(0, 0),
         "the control: the first texel is drawn"
     );
     assert_eq!(
-        pixel(&pixels, left + MESH - 1, top + MESH - 1),
+        pixel(&pixels, SIZE, left + MESH - 1, top + MESH - 1),
         numbered_texel(MESH - 1, MESH - 1),
         "the control: the last texel is drawn"
     );
     assert_eq!(
-        pixel(&pixels, left - 1, top)[3],
+        pixel(&pixels, SIZE, left - 1, top)[3],
         0,
         "one pixel left of the raster is unpainted"
     );
     assert_eq!(
-        pixel(&pixels, left + MESH, top)[3],
+        pixel(&pixels, SIZE, left + MESH, top)[3],
         0,
         "one pixel right of the raster is unpainted"
     );
     assert_eq!(
-        pixel(&pixels, left, top - 1)[3],
+        pixel(&pixels, SIZE, left, top - 1)[3],
         0,
         "one pixel above the raster is unpainted"
     );
     assert_eq!(
-        pixel(&pixels, left, top + MESH)[3],
+        pixel(&pixels, SIZE, left, top + MESH)[3],
         0,
         "one pixel below the raster is unpainted"
     );
@@ -343,7 +339,12 @@ fn no_colour_appears_that_the_upload_did_not_contain() {
     let mut seen = BTreeSet::new();
     for y in 0..MESH {
         for x in 0..MESH {
-            seen.insert(pixel(&pixels, ANCHOR.0 as u32 + x, ANCHOR.1 as u32 + y));
+            seen.insert(pixel(
+                &pixels,
+                SIZE,
+                ANCHOR.0 as u32 + x,
+                ANCHOR.1 as u32 + y,
+            ));
         }
     }
     assert_eq!(
@@ -377,7 +378,7 @@ fn a_samples_own_alpha_reaches_the_target_as_shape() {
     let scene = covering_fill(&mut device, mesh, 1.0);
     let (pixels, _) = render_at(&mut device, &scene, 1.0);
 
-    let probe = pixel(&pixels, ANCHOR.0 as u32 + 4, ANCHOR.1 as u32 + 4);
+    let probe = pixel(&pixels, SIZE, ANCHOR.0 as u32 + 4, ANCHOR.1 as u32 + 4);
     for channel in 0..4 {
         assert!(
             i32::from(probe[channel]).abs_diff(i32::from(partial[channel])) <= 1,

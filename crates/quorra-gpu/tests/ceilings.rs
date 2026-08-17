@@ -45,6 +45,10 @@ use quorra_scene::{
     Scene, SceneBuilder, Segment, Stroke,
 };
 
+mod common;
+
+use common::probe::alpha;
+
 const SIZE: u32 = 64;
 
 fn device() -> Device {
@@ -68,10 +72,6 @@ fn render(device: &mut Device, scene: &Scene, transform: Affine) -> Vec<u8> {
         .into_raster()
         .unwrap()
         .into_pixels()
-}
-
-fn alpha(pixels: &[u8], x: u32, y: u32) -> u8 {
-    pixels[((y * SIZE + x) * 4 + 3) as usize]
 }
 
 fn black() -> Paint {
@@ -137,8 +137,8 @@ fn a_viewport_transform_at_the_coordinate_bound_still_draws() {
         &builder.finish(),
         Affine::scale(MAX_COORDINATE, MAX_COORDINATE),
     );
-    assert_eq!(alpha(&pixels, 32, 32), 255, "the rectangle is drawn");
-    assert_eq!(alpha(&pixels, 2, 2), 0, "and the corner is not");
+    assert_eq!(alpha(&pixels, SIZE, 32, 32), 255, "the rectangle is drawn");
+    assert_eq!(alpha(&pixels, SIZE, 2, 2), 0, "and the corner is not");
 }
 
 /// **A stroke across the whole coordinate range draws its band**, rather than being drawn
@@ -194,9 +194,21 @@ fn a_stroke_across_the_coordinate_range_still_draws_its_band() {
         &builder.finish(),
         Affine::scale(MAX_COORDINATE, MAX_COORDINATE),
     );
-    assert_eq!(alpha(&pixels, 32, 32), 255, "the band's own row is inked");
-    assert_eq!(alpha(&pixels, 8, 31), 255, "and it runs across the page");
-    assert_eq!(alpha(&pixels, 32, 8), 0, "the rows away from it are not");
+    assert_eq!(
+        alpha(&pixels, SIZE, 32, 32),
+        255,
+        "the band's own row is inked"
+    );
+    assert_eq!(
+        alpha(&pixels, SIZE, 8, 31),
+        255,
+        "and it runs across the page"
+    );
+    assert_eq!(
+        alpha(&pixels, SIZE, 32, 8),
+        0,
+        "the rows away from it are not"
+    );
 }
 
 /// **A mark thinner than the float grid paints nothing, not a solid row.**
@@ -292,15 +304,19 @@ fn a_stroke_segment_below_the_float_grid_still_draws_its_cap() {
     // Probe pixels whose *whole cell* is inside the disc, so the answer does not depend on
     // the arc's chords: at radius 4 a chord of `ARC_STEP` cuts 0.06 px inside the circle,
     // and each cell below is more than half a pixel clear of it.
-    assert_eq!(alpha(&pixels, 0, 32), 255, "the disc's own centre is inked");
     assert_eq!(
-        alpha(&pixels, 2, 32),
+        alpha(&pixels, SIZE, 0, 32),
+        255,
+        "the disc's own centre is inked"
+    );
+    assert_eq!(
+        alpha(&pixels, SIZE, 2, 32),
         255,
         "and a cell 2.6 px along its radius"
     );
-    assert_eq!(alpha(&pixels, 0, 30), 255, "and a cell 1.6 px up it");
+    assert_eq!(alpha(&pixels, SIZE, 0, 30), 255, "and a cell 1.6 px up it");
     assert_eq!(
-        alpha(&pixels, 0, 22),
+        alpha(&pixels, SIZE, 0, 22),
         0,
         "while 9.5 px away is outside a radius of 4"
     );
@@ -329,7 +345,7 @@ fn no_batch_is_noted_before_its_instance_is_written() {
         .unwrap();
     let pixels = render(&mut device, &builder.finish(), Affine::IDENTITY);
     assert_eq!(
-        alpha(&pixels, 16, 16),
+        alpha(&pixels, SIZE, 16, 16),
         255,
         "the only mark on the page draws"
     );

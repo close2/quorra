@@ -47,16 +47,16 @@
     clippy::arithmetic_side_effects
 )]
 
-use quorra_gpu::{Device, Target, Viewport};
+use quorra_gpu::Device;
 use quorra_scene::{
     Affine, BlendMode, Color, Compose, FillRule, GroupSpec, LineCap, LineJoin, OutlineId, Paint,
-    Point, Rect, Scene, SceneBuilder, SceneError, Segment, Stroke,
+    Point, Rect, SceneBuilder, SceneError, Segment, Stroke,
 };
 
 mod common;
 
 use common::clause::deviation_from_the_clause;
-use common::headless::device;
+use common::headless::{device, render};
 
 const SIZE: u32 = 64;
 
@@ -83,19 +83,6 @@ const OBJECT: Color = Color {
     b: 0.9,
     a: 0.5,
 };
-
-fn render(device: &mut Device, scene: &Scene) -> Vec<u8> {
-    device
-        .render(
-            scene,
-            &Viewport::full(SIZE, SIZE, Affine::IDENTITY),
-            Target::Readback,
-        )
-        .expect("renders")
-        .into_raster()
-        .unwrap()
-        .into_pixels()
-}
 
 /// A triangle with two diagonal edges, so partially covered pixels exist: axis-aligned
 /// rectangles would agree while being wrong (§4.1 of the brief).
@@ -198,14 +185,14 @@ fn measure(device: &mut Device, outline: OutlineId, element: Element) -> (f32, f
             Ok(())
         })
         .unwrap();
-    let before = render(device, &before.finish());
+    let before = render(device, &before.finish(), SIZE, SIZE);
 
     // f and S, read from the device rather than assumed. The deposit is drawn under
     // Normal because that is what §11.3.6 leaves of any mode against `ab = 0`.
     let onto_transparency = |device: &mut Device, colour: Color| {
         let mut builder = SceneBuilder::new();
         element(&mut builder, outline, colour, BlendMode::Normal).unwrap();
-        render(device, &builder.finish())
+        render(device, &builder.finish(), SIZE, SIZE)
     };
     let shape = onto_transparency(device, Color::new(1.0, 1.0, 1.0, 1.0));
     let deposit = onto_transparency(device, OBJECT);
@@ -218,7 +205,7 @@ fn measure(device: &mut Device, outline: OutlineId, element: Element) -> (f32, f
                 element(body, outline, OBJECT, MODE)
             })
             .unwrap();
-        render(device, &builder.finish())
+        render(device, &builder.finish(), SIZE, SIZE)
     };
     let knocked = in_group(device, true);
     let ordinary = in_group(device, false);
@@ -260,7 +247,7 @@ fn every_mode_degenerates_against_the_transparent_initial_backdrop() {
         let onto_transparency = |device: &mut Device, blend: BlendMode| {
             let mut builder = SceneBuilder::new();
             element(&mut builder, outline, OBJECT, blend).unwrap();
-            render(device, &builder.finish())
+            render(device, &builder.finish(), SIZE, SIZE)
         };
         let normal = onto_transparency(&mut device, BlendMode::Normal);
         for mode in BlendMode::ALL {

@@ -22,6 +22,7 @@ use quorra_scene::{Affine, BlendMode, Color, Compose, Point, Rect, Scene, SceneB
 mod common;
 
 use common::headless::device;
+use common::probe::pixel;
 
 /// 64 pixels wide on purpose: 64 × 4 bytes = 256, the buffer-copy row alignment.
 const SIZE: u32 = 64;
@@ -85,11 +86,6 @@ fn read_texture(device: &Device, texture: &wgpu::Texture) -> Vec<u8> {
     pixels
 }
 
-fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
-    let at = ((y * SIZE + x) * 4) as usize;
-    [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
-}
-
 /// A full-target wash of one colour.
 fn wash(color: Color) -> Scene {
     let mut builder = SceneBuilder::new();
@@ -151,13 +147,13 @@ fn damage_patch_touches_only_the_damage() {
             let inside = (16..32).contains(&x) && (8..24).contains(&y);
             if inside {
                 assert_eq!(
-                    pixel(&got, x, y),
-                    pixel(&want_inside, x, y),
+                    pixel(&got, SIZE, x, y),
+                    pixel(&want_inside, SIZE, x, y),
                     "inside damage at ({x}, {y}): must equal a full redraw"
                 );
             } else {
                 assert_eq!(
-                    pixel(&got, x, y),
+                    pixel(&got, SIZE, x, y),
                     [255, 0, 0, 255],
                     "outside damage at ({x}, {y}): the previous contents must survive"
                 );
@@ -195,10 +191,18 @@ fn multiple_damage_rects_patch_independently() {
         )
         .expect("patched");
     let got = read_texture(&device, &texture);
-    assert_eq!(pixel(&got, 4, 4), [0, 0, 0, 255], "first rect patched");
-    assert_eq!(pixel(&got, 44, 50), [0, 0, 0, 255], "second rect patched");
     assert_eq!(
-        pixel(&got, 20, 20),
+        pixel(&got, SIZE, 4, 4),
+        [0, 0, 0, 255],
+        "first rect patched"
+    );
+    assert_eq!(
+        pixel(&got, SIZE, 44, 50),
+        [0, 0, 0, 255],
+        "second rect patched"
+    );
+    assert_eq!(
+        pixel(&got, SIZE, 20, 20),
         [0, 255, 0, 255],
         "the gap between rects is untouched"
     );
@@ -261,12 +265,12 @@ fn layered_scenes_patch_too() {
     let got = read_texture(&device, &patched);
     let want = read_texture(&device, &reference);
     assert_eq!(
-        pixel(&got, 16, 16),
-        pixel(&want, 16, 16),
+        pixel(&got, SIZE, 16, 16),
+        pixel(&want, SIZE, 16, 16),
         "inside: the composited group, exactly as a full redraw makes it"
     );
     assert_eq!(
-        pixel(&got, 40, 40),
+        pixel(&got, SIZE, 40, 40),
         [255, 255, 255, 255],
         "outside: the previous frame survives"
     );
@@ -336,13 +340,13 @@ fn a_group_smaller_than_the_damage_patches_too() {
     let want = read_texture(&device, &reference);
     for (x, y) in [(4, 4), (11, 11), (16, 16)] {
         assert_eq!(
-            pixel(&got, x, y),
-            pixel(&want, x, y),
+            pixel(&got, SIZE, x, y),
+            pixel(&want, SIZE, x, y),
             "inside damage at ({x}, {y}): must equal a full redraw"
         );
     }
     assert_eq!(
-        pixel(&got, 40, 40),
+        pixel(&got, SIZE, 40, 40),
         [255, 255, 255, 255],
         "outside: the previous frame survives"
     );
@@ -377,7 +381,7 @@ fn targets_without_retained_contents_redraw_fully_and_report() {
     );
     // And the frame really is the full redraw it claims.
     let pixels = frame.into_raster().unwrap().into_pixels();
-    assert_eq!(pixel(&pixels, 60, 60)[3], 255);
+    assert_eq!(pixel(&pixels, SIZE, 60, 60)[3], 255);
 }
 
 /// §4.7 at the damage boundary: a NaN or inverted rectangle is refused by index,
@@ -441,7 +445,7 @@ fn offscreen_damage_touches_nothing() {
     for y in 0..SIZE {
         for x in 0..SIZE {
             assert_eq!(
-                pixel(&got, x, y),
+                pixel(&got, SIZE, x, y),
                 [255, 128, 0, 255],
                 "({x}, {y}) must be untouched"
             );

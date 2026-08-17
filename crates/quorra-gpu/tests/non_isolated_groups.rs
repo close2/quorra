@@ -36,11 +36,10 @@ use quorra_scene::{
     SceneBuilder, SceneError,
 };
 
-use quorra_gpu::{Device, Target, Viewport};
-
 mod common;
 
-use common::headless::device;
+use common::headless::{device, render};
+use common::probe::pixel;
 
 // ---------------------------------------------------------------- the clause itself
 
@@ -233,24 +232,6 @@ fn the_interpolation_is_the_clause_exactly_and_only_under_normal() {
 const W: u32 = 32;
 const H: u32 = 16;
 
-fn render(device: &mut Device, scene: &Scene) -> Vec<u8> {
-    device
-        .render(
-            scene,
-            &Viewport::full(W, H, Affine::IDENTITY),
-            Target::Readback,
-        )
-        .expect("renders")
-        .into_raster()
-        .unwrap()
-        .into_pixels()
-}
-
-fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
-    let at = ((y * W + x) * 4) as usize;
-    [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
-}
-
 fn full_rect() -> Rect {
     Rect::new(Point::new(0.0, 0.0), Point::new(W as f32, H as f32))
 }
@@ -346,8 +327,13 @@ fn a_non_isolated_group_matches_clause_11_4_4() {
     let element = Color::new(0.3, 0.7, 0.85, 0.75);
 
     for alpha in [1.0_f32, 0.5, 0.25] {
-        let pixels = render(&mut device, &scene_with(false, alpha, backdrop, element));
-        let got = pixel(&pixels, W / 2, H / 2);
+        let pixels = render(
+            &mut device,
+            &scene_with(false, alpha, backdrop, element),
+            W,
+            H,
+        );
+        let got = pixel(&pixels, W, W / 2, H / 2);
         let want = clause_answer(false, f64::from(alpha), backdrop, element);
         for ch in 0..4 {
             let diff = (i32::from(got[ch]) - i32::from(want[ch])).abs();
@@ -371,12 +357,19 @@ fn isolation_changes_the_picture_and_both_match_their_clause() {
     let element = Color::new(0.3, 0.7, 0.85, 0.75);
 
     let isolated = pixel(
-        &render(&mut device, &scene_with(true, 1.0, backdrop, element)),
+        &render(&mut device, &scene_with(true, 1.0, backdrop, element), W, H),
+        W,
         W / 2,
         H / 2,
     );
     let non_isolated = pixel(
-        &render(&mut device, &scene_with(false, 1.0, backdrop, element)),
+        &render(
+            &mut device,
+            &scene_with(false, 1.0, backdrop, element),
+            W,
+            H,
+        ),
+        W,
         W / 2,
         H / 2,
     );
@@ -427,7 +420,12 @@ fn the_seed_is_the_group_backdrop_not_the_page() {
             })
         })
         .unwrap();
-    let got = pixel(&render(&mut device, &builder.finish()), W / 2, H / 2);
+    let got = pixel(
+        &render(&mut device, &builder.finish(), W, H),
+        W,
+        W / 2,
+        H / 2,
+    );
 
     // Multiply against a white backdrop is the element itself (§11.3.5: b × s with
     // b = 1), opaque.
