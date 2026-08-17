@@ -36,11 +36,11 @@ the atlas; **`recording` is the remainder**, computed rather than measured.
 `encode/coverage.rs::coverage_tile` opened a geometry span around `raster::fill_mask` and
 closed it immediately after. The next statement multiplied the chain's residue into the
 tile just rasterised — one multiply, one add and one divide per pixel — with no span open.
-Everything else on that path was already spanned: the links' flatten, their `min`, and a
-region's crop all sit inside `clock.geometry` spans in `encode/clips.rs`. So the residue
-product was the **only** unattributed per-pixel work on the clipped path, and every
-`recording` figure this project has published for a page with a curve clip on it was too
-large by exactly it.
+Almost everything else on that path was already spanned: the links' flatten, their `min`
+and a region's crop sit inside `clock.geometry` spans in `encode/clips.rs`. So the residue
+product was effectively the whole of the unattributed per-pixel work on the clipped path,
+and every `recording` figure this project has published for a page with a curve clip on it
+was too large by it.
 
 The fix is one seam: the loop is `residue_product`, a function of its own, inside its own
 `clock.geometry` span. A second, much smaller one goes with it, found while partitioning
