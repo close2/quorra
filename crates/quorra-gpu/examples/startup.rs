@@ -69,7 +69,14 @@ fn main() {
     // filter. No adapter filter means `request_adapter` chooses — a different code
     // path with a different cost, and the one a caller taking `Options::default`
     // pays, so it must be measurable without inventing a name to filter on.
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--check` is accepted and changes nothing: this example *is* one bring-up, so the
+    // smallest run that reaches every `expect` in it is the run itself. It is accepted
+    // so that CI can invoke every example the same way (ADR 0060), and filtered out
+    // here so it is not mistaken for an adapter name.
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| arg != "--check")
+        .collect();
     let hoisted = args.iter().any(|arg| arg == "hoisted");
     let adapter = args.into_iter().find(|arg| arg != "hoisted");
     let options = Options {

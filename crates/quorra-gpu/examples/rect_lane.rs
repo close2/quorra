@@ -269,8 +269,21 @@ fn measure_size(device: &mut Device, target: &wgpu::Texture, n: u32, rounds: u32
     }
 }
 
+/// `--check`: the smallest run that reaches every scene and every `expect` this file
+/// has — one adapter, both sizes, one round each.
+///
+/// `cargo test` neither builds nor runs an example (ADR 0060); CI runs `--check` for
+/// every example named in `.github/workflows/ci.yml`. A single round is not a
+/// measurement and the numbers it prints are not one; the sweep's own rounds (400 and
+/// 60) are what `doc/PLAN.md`'s rows are read from.
 fn main() {
-    for adapter in ["llvmpipe", "RADV"] {
+    let check = std::env::args().any(|arg| arg == "--check");
+    let adapters: &[&str] = if check {
+        &["llvmpipe"]
+    } else {
+        &["llvmpipe", "RADV"]
+    };
+    for adapter in adapters.iter().copied() {
         let Ok(mut device) = Device::headless(&Options {
             adapter: Some(adapter.into()),
             ..Options::default()
@@ -300,7 +313,13 @@ fn main() {
         for n in SIZES {
             // Enough rounds for the minimum to settle, and fewer of the dense one
             // because each of its frames also draws 4 320 marks.
-            let rounds = if n > 1_000 { 60 } else { 400 };
+            let rounds = if check {
+                1
+            } else if n > 1_000 {
+                60
+            } else {
+                400
+            };
             measure_size(&mut device, &target, n, rounds);
         }
     }

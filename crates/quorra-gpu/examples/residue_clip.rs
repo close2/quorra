@@ -36,193 +36,47 @@
 
 use std::time::{Duration, Instant};
 
-use quorra_gpu::{Device, Options, Target, Viewport};
-use quorra_scene::{
-    Affine, BlendMode, Color, Compose, FillRule, GroupSpec, LineCap, LineJoin, OutlineId, Paint,
-    Point, Scene, SceneBuilder, Segment, Stroke,
-};
+use quorra_gpu::{Counters, Device, Options, Target, Viewport};
+use quorra_pages::{ARTWORK, Archetype, Recorded};
+use quorra_scene::{Affine, Scene};
 
 /// The brief's window scale (§6.2), which is what the archetype's counts were taken at.
 const WIDTH: u32 = 1191;
 const HEIGHT: u32 = 1684;
 
-/// `tests/archetypes.rs`'s artwork row, and the fields this binary needs of it. The
-/// geometry that realises it is shared with the gate by construction rather than by
-/// import — an example cannot reach a test's module — so the counters below are what
-/// says this encoded that page.
-const COMMANDS: u32 = 900;
-const DISTINCT: u32 = 300;
-const SEGMENTS: u32 = 24;
-const SIDE: f32 = 60.0;
-const STROKES: u32 = 405;
-const CLIPS: u32 = 185;
-const CLIPPED: u32 = 600;
-const GROUPS: u32 = 8;
-const BLENDED_GROUPS: u32 = 4;
-
-fn outline_of(segments: u32, side: f32) -> Vec<Segment> {
-    let radius = side * 0.5;
-    let mut path = vec![Segment::MoveTo(Point::new(-radius, 0.0))];
-    let steps = segments.max(3);
-    for step in 0..steps {
-        let from = (step as f32) / (steps as f32) * std::f32::consts::TAU;
-        let to = ((step + 1) as f32) / (steps as f32) * std::f32::consts::TAU;
-        let point = |angle: f32| Point::new(radius * angle.cos(), radius * angle.sin() * 1.3);
-        let (a, b) = (point(from), point(to));
-        path.push(Segment::CubicTo {
-            c1: Point::new(a.x + (b.x - a.x) * 0.35, a.y + (b.y - a.y) * 0.1),
-            c2: Point::new(a.x + (b.x - a.x) * 0.65, a.y + (b.y - a.y) * 0.9),
-            to: b,
-        });
-    }
-    path.push(Segment::Close);
-    path
-}
-
-fn position(index: u32, side: f32) -> Affine {
-    let step = side + 3.5;
-    let columns = ((WIDTH as f32 - 16.0) / step).max(1.0) as u32;
-    let x = 8.0 + (index % columns) as f32 * step + side * 0.5;
-    let y = 12.0 + (index / columns) as f32 * (side + 4.25) + side * 0.5;
-    Affine::translate(x, y % (HEIGHT as f32 - 24.0))
-}
-
-/// The side of the `i`th outline, and the one statement of it: the clip cutter below
-/// sizes a clip from the marks it will clip, and a second copy of this is how the two
-/// come apart.
-fn outline_side(i: u32) -> f32 {
-    SIDE * (1.0 + (i % 5) as f32 * 0.05)
-}
-
-/// Which clip the `index`th command draws under: a run of consecutive marks in reading
-/// order, so a clip and its marks are in the same part of the page.
+/// The page: `quorra_pages::ARTWORK`, the same definition `tests/archetypes.rs` gates.
 ///
-/// **The same mapping as `tests/archetypes.rs`, and the reason this file was re-cut on
-/// 2026-08-17.** The page it measured before placed its clips on a grid of `side × 6`
-/// and its marks on a grid of `side`, and 8 of the 600 clipped commands had a mark that
-/// met the clip clipping it — so ADR 0049's 37.8 → 28.9 ms was taken on a page that
-/// rasterised 592 tiles only to multiply them by zero (`doc/notes-tiling-bound.md` §3).
-fn clip_of(index: u32) -> usize {
-    ((index as usize) * (CLIPS as usize)) / (CLIPPED as usize)
-}
+/// **It used to be a private copy of the generator in this file**, and re-cutting the
+/// page meant editing it here as well as in the test and in three other examples
+/// (ADR 0060). The counters printed below are no longer what says this encoded that
+/// page — that is true by construction now — but they are still printed, because they
+/// are exact functions of the scene and are what makes two runs on a loaded machine
+/// comparable at all.
+const SHAPE: &Archetype = &ARTWORK;
 
-/// The device box the marks under clip `j` occupy, from this file's own arithmetic.
-fn marks_box(j: usize) -> (f32, f32, f32, f32) {
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for index in 0..CLIPPED {
-        if clip_of(index) != j {
-            continue;
-        }
-        let at = position(index, SIDE);
-        let side = outline_side(index % DISTINCT);
-        let (hx, hy) = (side * 0.5, side * 0.65);
-        x0 = x0.min(at.e - hx);
-        y0 = y0.min(at.f - hy);
-        x1 = x1.max(at.e + hx);
-        y1 = y1.max(at.f + hy);
-    }
-    (x0, y0, x1, y1)
-}
-
-/// The transform that puts clip `j`'s ellipse over the marks it clips: three or four
-/// marks across, a fraction of the page, and cutting every one of them.
-fn curve_clip(j: u32) -> Affine {
-    let (x0, y0, x1, y1) = marks_box(j as usize);
-    let side = outline_side(j % DISTINCT);
-    Affine::scale((x1 - x0) / side, (y1 - y0) / (side * 1.3))
-        .then(Affine::translate((x0 + x1) * 0.5, (y0 + y1) * 0.5))
-}
-
-fn emit(
-    builder: &mut SceneBuilder,
-    outlines: &[OutlineId],
-    clips: &[quorra_scene::ClipId],
-    index: u32,
-) {
-    let outline = outlines[(index as usize) % outlines.len()];
-    let clip = (index < CLIPPED && !clips.is_empty()).then(|| clips[clip_of(index)]);
-    let ink = Color::new(0.12, 0.13, 0.16, 1.0);
-    if index < STROKES {
-        builder
-            .stroke(
-                outline,
-                position(index, SIDE),
-                Stroke {
-                    width: 1.5,
-                    cap: LineCap::Butt,
-                    join: LineJoin::Miter,
-                    miter_limit: 4.0,
-                },
-                Paint::Solid(ink),
-                clip,
-                BlendMode::Normal,
-                None,
-            )
-            .unwrap();
-    } else {
-        builder
-            .fill(
-                outline,
-                position(index, SIDE),
-                FillRule::NonZero,
-                Paint::Solid(ink),
-                clip,
-                BlendMode::Normal,
-                Compose::SrcOver,
-                None,
-            )
-            .unwrap();
-    }
-}
-
+/// Build the page on this device.
 fn build(device: &mut Device) -> Scene {
-    let outlines: Vec<OutlineId> = (0..DISTINCT.max(1))
-        .map(|i| {
-            device
-                .upload_outline(&outline_of(SEGMENTS, outline_side(i)))
-                .unwrap()
-        })
+    let outlines: Vec<quorra_scene::OutlineId> = quorra_pages::outlines(SHAPE)
+        .iter()
+        .map(|path| device.upload_outline(path).expect("an archetype outline"))
         .collect();
-    let mut builder = SceneBuilder::new();
-    let clips: Vec<quorra_scene::ClipId> = (0..CLIPS)
-        .map(|i| {
-            let outline = outlines[(i as usize) % outlines.len()];
-            builder
-                .clip(outline, curve_clip(i), FillRule::NonZero, None)
-                .unwrap()
-        })
-        .collect();
-    let per_group = (COMMANDS / 4)
-        .checked_div(GROUPS)
-        .map_or(0, |per| per.max(1));
-    let grouped = per_group * GROUPS;
-    for group in 0..GROUPS {
-        let spec = GroupSpec {
-            alpha: 0.8,
-            blend: if group < BLENDED_GROUPS {
-                BlendMode::Multiply
-            } else {
-                BlendMode::Normal
-            },
-            clip: None,
-            knockout: false,
-            mask: None,
-            isolated: true,
-            compose: Compose::SrcOver,
-        };
-        builder
-            .group(spec, |body| {
-                for step in 0..per_group {
-                    emit(body, &outlines, &clips, group * per_group + step);
-                }
-                Ok(())
-            })
-            .unwrap();
+    quorra_pages::scene(SHAPE, &outlines, None).expect("the artwork archetype builds")
+}
+
+/// The frame's counters as the row `quorra-pages` records, field by named field.
+fn recorded(counters: &Counters) -> Recorded {
+    Recorded {
+        commands: u64::from(counters.commands),
+        commands_culled: u64::from(counters.commands_culled),
+        distinct_outlines: u64::from(counters.distinct_outlines),
+        atlas_distinct_keys: u64::from(counters.atlas_distinct_keys),
+        clip_distinct_regions: u64::from(counters.clip_distinct_regions),
+        tiles: u64::from(counters.tiles),
+        layer_textures: u64::from(counters.layer_textures),
+        clip_residue_regions: u64::from(counters.clip_residue_regions),
+        clip_residue_tiles: u64::from(counters.clip_residue_tiles),
+        coverage_texels: counters.coverage.texels,
     }
-    for index in grouped..COMMANDS {
-        emit(&mut builder, &outlines, &clips, index);
-    }
-    builder.finish()
 }
 
 /// The measurement target, created once: a frame that allocated one would be measuring
@@ -257,10 +111,24 @@ fn load_average() -> String {
     )
 }
 
+/// `--check`: the smallest run that executes every assertion this example makes.
+///
+/// `cargo test` neither builds nor runs an example, so an assertion here is a comment
+/// until something runs it (ADR 0060). CI runs `--check` for every example named in
+/// `.github/workflows/ci.yml`, and `tests/example_checks.rs` fails if an example exists
+/// that the workflow does not name. It prints one `check:` line and no statistics: a
+/// one-round measurement is not a measurement, and must not read like one.
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let check = args.iter().any(|arg| arg == "--check");
+    args.retain(|arg| arg != "--check");
+    let mut args = args.into_iter();
     let adapter = args.next();
-    let rounds: usize = args.next().and_then(|n| n.parse().ok()).unwrap_or(20);
+    let rounds: usize = if check {
+        1
+    } else {
+        args.next().and_then(|n| n.parse().ok()).unwrap_or(20)
+    };
 
     let mut device = Device::headless(&Options {
         adapter,
@@ -296,6 +164,16 @@ fn main() {
         if round == 0 {
             let counters = frame.counters();
             first = Some((elapsed, timings.encode, phase("encode: geometry")));
+            // The signature gate. It cannot rot into the defect ADR 0060 exists for —
+            // the row it compares against is `quorra-pages`', the same one
+            // `tests/archetypes.rs` compares against — but it still catches the frame
+            // that drew something else than the encode this file's numbers are
+            // attributed to.
+            assert_eq!(
+                recorded(&counters),
+                SHAPE.recorded.expect("artwork is a priced page"),
+                "this frame is not the artwork archetype as `quorra-pages` records it",
+            );
             println!("coverage: {} texels on the sheet", counters.coverage.texels);
             println!(
                 "counters: {} commands, {} tiles, {} residue regions, {} residue tiles, \
@@ -315,33 +193,55 @@ fn main() {
         }
     }
 
-    let min = |v: &[Duration]| v.iter().copied().min().unwrap_or_default();
-    let median = |v: &mut Vec<Duration>| {
-        v.sort_unstable();
-        v[v.len() / 2]
-    };
-    let (fw, fe, fg) = first.unwrap();
+    if check {
+        println!("check: the artwork archetype drew and its counters are the recorded row");
+        return;
+    }
+
+    let (fw, fe, fg) = first.expect("round 0 ran");
     println!("load average: {}", load_average());
     println!("first frame:  wall {fw:?}, encode {fe:?}, geometry {fg:?}");
+    report(&mut Steady {
+        wall,
+        encode,
+        geometry,
+        staging,
+        recording,
+    });
+}
+
+/// The steady-state rounds, one column per phase.
+struct Steady {
+    wall: Vec<Duration>,
+    encode: Vec<Duration>,
+    geometry: Vec<Duration>,
+    staging: Vec<Duration>,
+    recording: Vec<Duration>,
+}
+
+/// Minima, the fastest frame's phase shares, and medians.
+fn report(steady: &mut Steady) {
+    let min = |v: &[Duration]| v.iter().copied().min().unwrap_or_default();
     println!(
         "steady min:   wall {:?}, encode {:?}, geometry {:?}, staging {:?}, recording {:?}",
-        min(&wall),
-        min(&encode),
-        min(&geometry),
-        min(&staging),
-        min(&recording)
+        min(&steady.wall),
+        min(&steady.encode),
+        min(&steady.geometry),
+        min(&steady.staging),
+        min(&steady.recording)
     );
     // The three phases are the point of this instrument since ADR 0023's 2026-08-17
     // amendment, so it prints all three rather than leaving `recording` to be inferred
     // from a subtraction the reader has to do — and prints the *same* frame's three, at
     // the frame whose encode was the fastest, so the shares below sum to that encode.
-    let fastest = encode
+    let fastest = steady
+        .encode
         .iter()
         .enumerate()
         .min_by_key(|(_, d)| **d)
         .map_or(0, |(i, _)| i);
     let share = |part: Duration| {
-        let whole = encode[fastest].as_secs_f64();
+        let whole = steady.encode[fastest].as_secs_f64();
         if whole > 0.0 {
             100.0 * part.as_secs_f64() / whole
         } else {
@@ -350,17 +250,21 @@ fn main() {
     };
     println!(
         "fastest encode {:?}: geometry {:.1} %, staging {:.1} %, recording {:.1} %",
-        encode[fastest],
-        share(geometry[fastest]),
-        share(staging[fastest]),
-        share(recording[fastest]),
+        steady.encode[fastest],
+        share(steady.geometry[fastest]),
+        share(steady.staging[fastest]),
+        share(steady.recording[fastest]),
     );
+    let median = |v: &mut Vec<Duration>| {
+        v.sort_unstable();
+        v[v.len() / 2]
+    };
     println!(
         "steady median: wall {:?}, encode {:?}, geometry {:?}, staging {:?}, recording {:?}",
-        median(&mut wall),
-        median(&mut encode),
-        median(&mut geometry),
-        median(&mut staging),
-        median(&mut recording)
+        median(&mut steady.wall),
+        median(&mut steady.encode),
+        median(&mut steady.geometry),
+        median(&mut steady.staging),
+        median(&mut steady.recording)
     );
 }

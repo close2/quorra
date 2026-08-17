@@ -1393,10 +1393,18 @@ dependencies = [
  "png",
  "pollster",
  "quorra-function-conformance",
+ "quorra-pages",
  "quorra-scene",
  "thiserror 2.0.19",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "quorra-pages"
+version = "0.1.0"
+dependencies = [
+ "quorra-scene",
 ]
 
 [[package]]

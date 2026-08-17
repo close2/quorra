@@ -29,60 +29,28 @@
 use std::time::Duration;
 
 use quorra_gpu::{Coverage, Device, Options, Target, Viewport, wgpu};
-use quorra_scene::{Affine, Color, Point, Scene, SceneBuilder, Segment};
+use quorra_pages::{GLYPH_PAGE, GlyphPage};
+use quorra_scene::{OutlineId, Scene};
 
 /// A real window, which is what the zoom is relative to.
 const WIDTH: u32 = 1191;
 const HEIGHT: u32 = 1684;
 
-/// 5 933 glyph-lane fills over 107 distinct outlines: `floor.rs`'s dense page, at
-/// integer phases so the atlas helps as much as it can at 1×.
-fn glyph_page(device: &mut Device) -> Scene {
-    let mut outlines = Vec::new();
-    for i in 0..107_u32 {
-        let w = 6.0 + (i % 5) as f32;
-        let h = 8.0 + (i % 7) as f32;
-        outlines.push(
-            device
-                .upload_outline(&[
-                    Segment::MoveTo(Point::new(0.3, 0.2)),
-                    Segment::LineTo(Point::new(w, 0.0)),
-                    Segment::CubicTo {
-                        c1: Point::new(w + 1.0, h * 0.3),
-                        c2: Point::new(w + 1.0, h * 0.7),
-                        to: Point::new(w * 0.8, h),
-                    },
-                    Segment::LineTo(Point::new(0.0, h * 0.9)),
-                    Segment::Close,
-                ])
-                .unwrap(),
-        );
-    }
-    let mut builder = SceneBuilder::new();
-    for i in 0..5_933_u32 {
-        builder
-            .fill(
-                outlines[(i % 107) as usize],
-                Affine::translate((i % 80) as f32 * 14.5, (i / 80) as f32 * 15.25),
-                quorra_scene::FillRule::NonZero,
-                quorra_scene::Paint::Solid(Color::new(0.1, 0.1, 0.1, 1.0)),
-                None,
-                quorra_scene::BlendMode::Normal,
-                quorra_scene::Compose::SrcOver,
-                None,
-            )
-            .unwrap();
-    }
-    builder.finish()
-}
+/// 5 933 glyph-lane fills over 107 distinct outlines at integer phases, so the atlas
+/// helps as much as it can at 1×.
+///
+/// **`quorra_pages::GLYPH_PAGE`** — the definition `examples/floor.rs` and
+/// `examples/retained.rs` also draw. Each of the three carried its own copy until
+/// 2026-08-17, and one of them differed (ADR 0060).
+const PAGE: &GlyphPage = &GLYPH_PAGE;
 
-/// The viewport a viewer zoomed to `magnification` about the page's centre would ask
-/// for: the window is the same size, the page is larger, and most of it is outside.
-fn zoomed(magnification: f32) -> Affine {
-    let (centre_x, centre_y) = (580.0, 565.0); // the dense page's middle
-    Affine::translate(-centre_x, -centre_y)
-        .then(Affine::scale(magnification, magnification))
-        .then(Affine::translate(WIDTH as f32 / 2.0, HEIGHT as f32 / 2.0))
+/// The page, built on this device.
+fn glyph_page(device: &mut Device) -> Scene {
+    let outlines: Vec<OutlineId> = quorra_pages::glyph_outlines(PAGE)
+        .iter()
+        .map(|path| device.upload_outline(path).expect("a letterform"))
+        .collect();
+    quorra_pages::glyph_scene(PAGE, &outlines).expect("the glyph page builds")
 }
 
 fn milliseconds(duration: Duration) -> f64 {
@@ -97,7 +65,7 @@ fn frame(
     texture: &wgpu::Texture,
     magnification: f32,
 ) -> (Duration, Duration, Duration, u32, u32, Duration) {
-    let viewport = Viewport::full(WIDTH, HEIGHT, zoomed(magnification));
+    let viewport = Viewport::full(WIDTH, HEIGHT, quorra_pages::zoomed(PAGE, magnification));
     let started = std::time::Instant::now();
     let drawn = device
         .render(scene, &viewport, Target::Texture(texture))
@@ -115,7 +83,15 @@ fn frame(
     )
 }
 
+/// `--check`: the smallest run that exercises every path this example has.
+///
+/// Two magnifications, one frame each, and no gesture sweep — enough to reach both
+/// regimes (a page the atlas answers, and one past `MAX_GLYPH_DIM` where every visible
+/// glyph rasterises) and every `expect` between them. `cargo test` neither builds nor
+/// runs an example (ADR 0060); CI runs `--check` for every example named in
+/// `.github/workflows/ci.yml`.
 fn main() {
+    let check = std::env::args().any(|arg| arg == "--check");
     let coverage = if std::env::args().any(|arg| arg == "gpu") {
         Coverage::Gpu
     } else {
@@ -147,6 +123,16 @@ fn main() {
         "dense glyph page at {WIDTH}x{HEIGHT} on {}, coverage {coverage:?}",
         device.description()
     );
+    if check {
+        for magnification in [1.0_f32, 20.0] {
+            let (_, _, _, culled, segments, _) =
+                frame(&mut device, &scene, &texture, magnification);
+            println!("  {magnification:>5.0}  {culled} culled, {segments} segments");
+        }
+        println!("check: the glyph page drew at 1x and at 20x");
+        return;
+    }
+
     println!("held at one magnification (fastest of five, after a warm-up frame)");
     println!("  zoom   encode      execute     upload      wall      culled  segments");
     for magnification in [1.0_f32, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 20.0, 100.0] {
