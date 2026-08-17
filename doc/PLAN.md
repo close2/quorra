@@ -70,6 +70,42 @@ with no signal. Three examples gained an assertion they never had — including
 `surface_measure`, which is where this section's real-display row comes from and which until
 now asserted nothing about the page it drew.
 
+**The release matrix for `a4380e2 → 1cd74c9`** — fifteen rounds, one copy of their tree, all
+eight runs inside half an hour on 2026-08-17 against their `22ab57d4`, RADV, both lanes, both
+scales (`doc/notes-release-matrix.md`):
+
+| lane, scale | base `a4380e2` | merged `1cd74c9` |
+|---|---|---|
+| CPU, scale 1 | 931 / 23 / 2 / 18 | **931 / 23 / 2 / 18** |
+| GPU, scale 1 | 929 / 25 / 2 / 18 | **929 / 25 / 2 / 18** |
+| CPU, scale 4 | 936 / 11 / 4 / 23 | **937** / 11 / **3** / 23 |
+| GPU, scale 4 | 937 / 10 / 4 / 23 | **938** / 10 / **3** / 23 |
+
+**Of 3 814 page verdicts compared, five lines move, and all three distinct causes are
+ADR 0057**: `bug1703683_page2_reduced.pdf` refused → **agrees with the oracle** on both lanes;
+`issue1905.pdf` still refused but now naming its sheet; and `inks.pdf` on the GPU lane by a
+hundred-thousandth of SSIM with its mean and worst tile unchanged — the 1-of-255 `fill_mask`
+residual ADR 0049 priced, since a different tile rectangle sums in a different order and `f32`
+addition is not associative. **Zero page lines move at scale 1 on either lane.** Nothing moved
+away from the oracle and nothing moved for a cause that cannot be named.
+
+The fourteen rounds that were *not* ADR 0057 are character-identical across all 3 814
+verdicts — the four module splits, `Counters::coverage` and `lanes`,
+`SceneError::InvalidImageAlpha`, `RenderError::ViewportTransformTooLarge`, ADR 0023's
+amendment, ADR 0058's present rectangle and `SolidFill`'s single hash probe. In particular the
+two CPU-rasteriser arithmetic fixes claimed that `hypot` is `direction`'s *second* path and no
+corpus page can move; that is now checked over 974 documents rather than over nineteen
+fixtures.
+
+**Their `REFUSED_AT_FOUR` ratchet fails loudly on the change column**, printing both lists, and
+the caller must drop `bug1703683_page2_reduced.pdf` from it. All four *base* rows exit 0, which
+is what says the ratchet is measuring this change rather than their tree moving under us.
+
+**Three commits are not in this matrix**: ADR 0063's atlas round (`333f80b`, `903d05e`,
+`de1c013`) landed while the runs were in flight. Its own scale-4 run reproduced the recorded
+verdict lists name for name, so nothing is known to move — but it has not had the four-row
+treatment, and it owes one before a push.
+
 **The release matrix for `a64a908 → a4380e2`** — 72 commits, one copy of their tree, 29
 minutes, RADV, both lanes, both scales, taken 2026-08-16 00:04–00:33:
 
