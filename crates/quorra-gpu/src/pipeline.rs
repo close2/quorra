@@ -42,9 +42,26 @@
 //! recorded in [`WarmUp`] on **every** exit path, so its `wait_until_warm`
 //! always returns.
 //!
-//! Fallibility is what the module's three files are split along: `layouts.rs` is the
-//! half of a pipeline no adapter can refuse, `spec.rs` is what each pipeline `Kind`
-//! *is*, and this file is the store — its one lock, its laziness and its warm-up.
+//! # The module's five files, and what each one's one thing is
+//!
+//! Fallibility is the seam three of them are cut along: `layouts.rs` is the half of a
+//! pipeline no adapter can refuse, `spec.rs` is what each pipeline `Kind` *is*, and
+//! this file is the store. `warm.rs` is cut along a different one — it is a state
+//! machine with a thread of its own — and `function.rs` along a third, the key. rustdoc
+//! inlines a re-export from a private module (ADR 0051 §1), so this table is the only
+//! place the structure survives into the documentation:
+//!
+//! | Module | Its one thing |
+//! |---|---|
+//! | `pipeline.rs` | the store: one lock, one map, laziness, and the compile that fills it |
+//! | `pipeline/layouts.rs` | the binding tables every pipeline is built against — the half that cannot be refused |
+//! | `pipeline/spec.rs` | what each `Kind` *is*: its shader, entry points, vertex layout and blend state |
+//! | `pipeline/warm.rs` | the warm-up: which pipelines are compiled before anyone asks, and the state machine that reports what became of that |
+//! | `pipeline/function.rs` | ADR 0053's generated shaders, keyed by a program's content hash rather than by a `Kind` |
+//!
+//! The store knows nothing about the warm-up beyond one field: `warm.rs` asks
+//! `PipelineStore::get` for the pipelines it wants like any other caller, which is why
+//! **a change to what a device warms cannot change what a frame compiles.**
 //!
 //! # Shaders are code, and this project's rules apply to them
 //!
@@ -57,10 +74,13 @@
 mod function;
 mod layouts;
 mod spec;
+mod warm;
+
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::PipelineProblem;
@@ -70,6 +90,7 @@ use crate::startup::WarmUp;
 use function::FunctionKey;
 use layouts::Layouts;
 use spec::Spec;
+
 pub(crate) use spec::{Kind, Style};
 
 /// The format the warm-up thread compiles for: the readback and host-texture format,
@@ -176,6 +197,10 @@ struct StoreState {
 pub(crate) struct PipelineStore {
     device: wgpu::Device,
     state: Mutex<StoreState>,
+    /// Released when `state.warm_up` stops being [`WarmUp::Running`]. **Every line that
+    /// waits on it or notifies it is in `warm.rs`**, which is what makes "exactly one
+    /// notifier, and it notifies on every exit path" a property of one file rather than
+    /// a habit spread over two.
     warmed: Condvar,
 }
 
@@ -186,45 +211,6 @@ impl std::fmt::Debug for PipelineStore {
             .field("compiled", &state.pipelines.len())
             .field("warm_up", &state.warm_up)
             .finish_non_exhaustive()
-    }
-}
-
-/// Records the warm-up's outcome and releases its waiters on **every** exit path,
-/// including an unwind.
-///
-/// [`PipelineStore::wait_until_warm`] is a `Condvar` with exactly one notifier, so a
-/// notifier that leaves by a route which does not notify leaves every waiter waiting
-/// forever. That is not a hypothetical: a reserved keyword in `blit.wgsl` panicked this
-/// thread inside `wgpu`, and the test binary then sat silent until it was killed — the
-/// defect ADR 0042 exists to close. The error scopes above make the *known* panic a
-/// value; this guard is what makes the promise hold for the ones that are not.
-struct WarmUpGuard<'a> {
-    store: &'a PipelineStore,
-    /// What to record. Still `None` when the thread is unwinding, which is exactly
-    /// [`WarmUp::Abandoned`] — the state with no reason to give, because there is none.
-    outcome: Option<WarmUp>,
-}
-
-impl<'a> WarmUpGuard<'a> {
-    fn new(store: &'a PipelineStore) -> Self {
-        Self {
-            store,
-            outcome: None,
-        }
-    }
-
-    /// Record `outcome` and release the waiters, by dropping.
-    fn finish(mut self, outcome: WarmUp) {
-        self.outcome = Some(outcome);
-    }
-}
-
-impl Drop for WarmUpGuard<'_> {
-    fn drop(&mut self) {
-        let mut state = self.store.lock();
-        state.warm_up = self.outcome.take().unwrap_or(WarmUp::Abandoned);
-        drop(state);
-        self.store.warmed.notify_all();
     }
 }
 
@@ -245,105 +231,6 @@ impl PipelineStore {
             }),
             warmed: Condvar::new(),
         })
-    }
-
-    /// Compile the warm set on a background thread, so device construction returns
-    /// first. §2.1 of the brief also says a device must not *require* a background
-    /// thread: if the host cannot spawn one, the warm set compiles inline instead —
-    /// construction blocks for the compile, which is the documented cost of a host
-    /// with no threads to give, and `warm_up` keeps meaning what it says.
-    ///
-    /// The handle goes to the [`Device`], which joins it when it is dropped. Nothing
-    /// *waits* on it — completion is observed through `warm_up`/`wait_until_warm`, and
-    /// a frame that arrives early compiles what it needs on the spot — but a thread
-    /// inside the driver must not outlive the device it is compiling for (ADR 0018).
-    ///
-    /// [`Device`]: crate::device::Device
-    pub(crate) fn spawn_warm_up(
-        self: &Arc<Self>,
-        present_format: Option<wgpu::TextureFormat>,
-    ) -> Option<thread::JoinHandle<()>> {
-        let store = Arc::clone(self);
-        let spawned = thread::Builder::new()
-            .name("quorra-warm-up".into())
-            .spawn(move || store.warm_up_now(present_format));
-        let Ok(handle) = spawned else {
-            self.warm_up_now(present_format);
-            return None;
-        };
-        Some(handle)
-    }
-
-    /// The warm-up itself: the two over-lanes a page of text needs, the two passes
-    /// a page with a group needs (§7 — the knockout variants, the reduction and the
-    /// winding lane still compile on first use), and — for a device constructed for a
-    /// surface — the presenting lanes again in the surface's own format.
-    ///
-    /// **Why the surface's format is a second set** (ADR 0043): every pipeline is
-    /// keyed by `(kind, target format)`, the warm set compiles [`WARM_FORMAT`], and a
-    /// surface negotiates `Bgra8Unorm` where the adapter offers it — so a presenting
-    /// host's first frame compiled the lane it drew with *inside that frame*,
-    /// measured on RADV at 0.3–1.0 ms per fresh device, one entry every time, flat or
-    /// layered (`examples/surface_measure.rs`). [`Kind::Composite`] is deliberately
-    /// not in the second set: a composite's target is always an internal accumulator
-    /// (ADR 0038's hand-off means the surface only ever receives the lanes or the
-    /// blit), so a `Bgra8` composite would warm a pipeline no frame can reach.
-    ///
-    /// **Why the compositor's two are here** (ADR 0040): a first frame with a group
-    /// compiles [`Kind::Composite`] and [`Kind::Blit`] inside itself, and
-    /// `Timings::phases` prices the pair at **0.75 ms at the minimum of 40 runs and
-    /// 2.6 ms on the quietest one** on RADV — a third to a half of the 5 to 6 ms such a
-    /// frame costs over its successors. Neither compile depends on the target's size,
-    /// which is why no size hint could ever have moved them, and why the thread nobody
-    /// blocks on is where they belong. A device that never composites pays for two
-    /// pipelines it does not use, off the critical path, and reaches `is_warm` about
-    /// 1.1 ms later.
-    ///
-    /// **[`Kind::Present`] is in the second set and only there** (ADR 0056). A
-    /// presenter draws onto the surface and onto nothing else, so the pass has exactly
-    /// one format it can ever be asked for and `WARM_FORMAT` is not it unless the
-    /// surface negotiated that — which is why it is compiled whenever a present format
-    /// exists, including when that format equals `WARM_FORMAT`, while the other three
-    /// of the second set are skipped in that case as already compiled. A host that
-    /// detaches its presenter therefore finds the pipeline built by this thread, and
-    /// `Device::detach_presenter` compiles nothing itself; a host on a surface that
-    /// never presents pays one pipeline on the thread nobody blocks on.
-    ///
-    /// **A refusal is kept rather than retried** (ADR 0042), and the guard records one
-    /// on every exit path including an unwind — a warm-up that ends without saying so
-    /// leaves every waiter on a `Condvar` nobody will notify, which is how an invalid
-    /// shader used to hang the process instead of failing it.
-    fn warm_up_now(&self, present_format: Option<wgpu::TextureFormat>) {
-        let guard = WarmUpGuard::new(self);
-        let started = Instant::now();
-        let compiled = self
-            .get(Kind::RectOver, WARM_FORMAT)
-            .and_then(|_| self.get(Kind::CoverOver, WARM_FORMAT))
-            .and_then(|_| self.get(Kind::Composite, WARM_FORMAT))
-            .and_then(|_| self.get(Kind::Blit, WARM_FORMAT))
-            .and_then(|_| self.warm_presenting_lanes(present_format));
-        guard.finish(match compiled {
-            Ok(()) => WarmUp::Warm(started.elapsed()),
-            Err(reason) => WarmUp::Refused(reason),
-        });
-    }
-
-    /// The second set: what a device built for a surface compiles in the surface's own
-    /// negotiated format. Nothing at all for a headless device.
-    fn warm_presenting_lanes(
-        &self,
-        present_format: Option<wgpu::TextureFormat>,
-    ) -> Result<(), PipelineProblem> {
-        let Some(format) = present_format else {
-            return Ok(());
-        };
-        if format != WARM_FORMAT {
-            self.get(Kind::RectOver, format)?;
-            self.get(Kind::CoverOver, format)?;
-            self.get(Kind::Blit, format)?;
-        }
-        self.get(Kind::Present, format)?;
-        Ok(())
     }
 
     /// The pipeline for a lane and target format, compiling it now if the warm
@@ -442,37 +329,6 @@ impl PipelineStore {
         pick(Self::layouts(&self.device, &mut state)).clone()
     }
 
-    /// Where the background warm-up has got to.
-    pub(crate) fn warm_up(&self) -> WarmUp {
-        self.lock().warm_up.clone()
-    }
-
-    /// How long the warm set took to compile, once it has.
-    pub(crate) fn warm_duration(&self) -> Option<Duration> {
-        let state = self.lock();
-        match state.warm_up {
-            WarmUp::Warm(duration) => Some(duration),
-            _ => None,
-        }
-    }
-
-    /// Block until the warm-up reports what became of it, and say what that was.
-    /// Measurement support: startup numbers need a defined "fully warm" moment to be
-    /// comparable.
-    ///
-    /// Returns for every outcome, including a warm-up that panicked
-    /// ([`WarmUp::Abandoned`]) — see [`WarmUpGuard`].
-    pub(crate) fn wait_until_warm(&self) -> WarmUp {
-        let mut state = self.lock();
-        while matches!(state.warm_up, WarmUp::Running) {
-            state = self
-                .warmed
-                .wait(state)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-        state.warm_up.clone()
-    }
-
     fn lock(&self) -> MutexGuard<'_, StoreState> {
         // A poisoned lock means a compile panicked; every mutation under this lock is
         // an atomic insert or flag set, so the guarded data is still consistent and
@@ -568,238 +424,5 @@ impl PipelineStore {
             }),
             None => Ok(pipeline),
         }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::panic)] // test-file policy: a fixture that cannot run must fail loudly
-mod tests {
-    use std::sync::Arc;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
-
-    use super::{Kind, PipelineStore, WARM_FORMAT, WarmUpGuard};
-    use crate::device::Device;
-    use crate::error::PipelineProblem;
-    use crate::startup::{Options, WarmUp};
-
-    /// The software adapter, as everywhere in this crate's tests.
-    fn device() -> Device {
-        Device::headless(&Options {
-            adapter: Some("llvmpipe".into()),
-            ..Options::default()
-        })
-        .expect("llvmpipe is present wherever this suite runs")
-    }
-
-    /// **How long a wait is allowed to be before it counts as never ending.** Every
-    /// test here that could hang runs its wait on a thread and gives up after this, so
-    /// a regression fails the suite instead of wedging it — which is the trap the
-    /// defect these tests guard against actually sprang.
-    const PATIENCE: Duration = Duration::from_secs(30);
-
-    /// Call `wait` on a thread and insist it returns. Panics with `what` if it does
-    /// not, leaving the waiting thread behind: it is blocked on a `Condvar` and holds
-    /// nothing, so the process still exits.
-    fn within_patience<T: Send + 'static>(what: &str, wait: impl FnOnce() -> T + Send + 'static) {
-        let (done, waited) = mpsc::channel();
-        thread::spawn(move || {
-            drop(wait());
-            let _ = done.send(());
-        });
-        assert!(
-            waited.recv_timeout(PATIENCE).is_ok(),
-            "{what} did not return within {PATIENCE:?}"
-        );
-    }
-
-    /// The defect ADR 0042 closes, stated as the property that failed: a warm-up that
-    /// ends by panicking must still release everything waiting on it. Before the guard,
-    /// this test hung — which is the whole reason the wait is bounded.
-    #[test]
-    fn a_warm_up_that_panics_still_releases_its_waiters() {
-        let device = device();
-        let (gpu, _) = device.wgpu();
-        let store = PipelineStore::new(gpu.clone());
-        let panicking = {
-            let store = Arc::clone(&store);
-            thread::spawn(move || {
-                let _guard = WarmUpGuard::new(&store);
-                panic!("a driver error wgpu reports by panicking rather than by an error scope");
-            })
-        };
-        assert!(panicking.join().is_err(), "the thread panicked as staged");
-        within_patience("wait_until_warm after a panicking warm-up", {
-            let store = Arc::clone(&store);
-            move || store.wait_until_warm()
-        });
-        assert_eq!(store.warm_up(), WarmUp::Abandoned);
-        assert!(store.warm_duration().is_none());
-    }
-
-    /// A store whose warm-up has not run yet keeps `wait_until_warm` waiting — the
-    /// other half of the property above, so that "it returns" is not passing by
-    /// returning always.
-    #[test]
-    fn a_running_warm_up_is_reported_as_running() {
-        let device = device();
-        let (gpu, _) = device.wgpu();
-        let store = PipelineStore::new(gpu.clone());
-        assert_eq!(store.warm_up(), WarmUp::Running);
-    }
-
-    /// A pipeline this adapter cannot build is an `Err` naming it, not a panic on
-    /// whichever thread asked (§5: refused, never survived).
-    ///
-    /// `Rgba8Snorm` is the instrument: WebGPU gives it no `RENDER_ATTACHMENT` usage, so
-    /// a colour target in that format is a validation error every backend agrees on,
-    /// reached without shipping a shader that does not parse.
-    #[test]
-    fn a_pipeline_the_adapter_refuses_is_an_error_and_not_a_panic() {
-        let device = device();
-        let (gpu, _) = device.wgpu();
-        let store = PipelineStore::new(gpu.clone());
-        let refused = store.get(Kind::Blit, wgpu::TextureFormat::Rgba8Snorm);
-        match refused {
-            Err(PipelineProblem::Pipeline {
-                pipeline, format, ..
-            }) => {
-                assert_eq!(pipeline, "quorra blit");
-                assert_eq!(format, wgpu::TextureFormat::Rgba8Snorm);
-            }
-            other => panic!("expected a named pipeline refusal, got {other:?}"),
-        }
-        // Nothing was cached for the format that failed, and the store still works:
-        // one refused format must not take the device with it.
-        store
-            .get(Kind::Blit, WARM_FORMAT)
-            .expect("the blit pipeline builds for the format the frame actually uses");
-    }
-
-    /// A device made for a surface warms the presenting lanes in the surface's own
-    /// format (ADR 0043), so its first frame does not compile them inside itself —
-    /// asserted at the store, because this account has no window to present to.
-    /// `Composite` deliberately stays out of the second set: a composite's target is
-    /// always an internal accumulator (ADR 0038's hand-off), so warming it for the
-    /// surface's format would compile a pipeline no frame can reach.
-    #[test]
-    fn the_warm_set_includes_the_present_format_when_given_one() {
-        let device = device();
-        let (gpu, _) = device.wgpu();
-        let store = PipelineStore::new(gpu.clone());
-        let present = wgpu::TextureFormat::Bgra8Unorm;
-        store.warm_up_now(Some(present));
-        assert!(matches!(store.warm_up(), WarmUp::Warm(_)));
-        let state = store.lock();
-        for kind in [Kind::RectOver, Kind::CoverOver, Kind::Blit, Kind::Present] {
-            assert!(
-                state.pipelines.contains_key(&(kind, present)),
-                "{kind:?} missing for the present format"
-            );
-        }
-        assert!(
-            !state.pipelines.contains_key(&(Kind::Composite, present)),
-            "a composite never targets the surface, so warming it there is waste"
-        );
-        assert!(
-            !state.pipelines.contains_key(&(Kind::Present, WARM_FORMAT)),
-            "a presenter draws onto the surface and onto nothing else"
-        );
-    }
-
-    /// [`Kind::Present`] is the one member of the second set that is compiled even when
-    /// the surface negotiated [`WARM_FORMAT`] itself — the other three are already
-    /// built, and this one has no first set to be in (ADR 0056). This is what makes
-    /// `Device::detach_presenter` a move rather than a compile: the pipeline a presenter
-    /// needs exists before it is asked for, built by the thread nobody blocks on.
-    #[test]
-    fn the_presenting_pass_is_warmed_for_the_surfaces_format_whatever_it_is() {
-        let device = device();
-        let (gpu, _) = device.wgpu();
-        for present in [WARM_FORMAT, wgpu::TextureFormat::Bgra8Unorm] {
-            let store = PipelineStore::new(gpu.clone());
-            store.warm_up_now(Some(present));
-            assert!(matches!(store.warm_up(), WarmUp::Warm(_)));
-            assert!(
-                store
-                    .lock()
-                    .pipelines
-                    .contains_key(&(Kind::Present, present)),
-                "the present pass is missing for {present:?}"
-            );
-        }
-        // And a headless device warms none of it: there is no surface to present to.
-        let store = PipelineStore::new(gpu.clone());
-        store.warm_up_now(None);
-        assert!(
-            !store
-                .lock()
-                .pipelines
-                .keys()
-                .any(|(kind, _)| *kind == Kind::Present),
-            "a headless device has no surface, so the presenting pass is waste"
-        );
-    }
-
-    /// The other half of ADR 0043's rule, which the presenter relies on: a pipeline the
-    /// warm set did not build is built by the first ask, **inline**, and that ask says
-    /// what it cost — which is how `PresentCost::compiled` can be truthful about a
-    /// presenter detached before its device was warm.
-    #[test]
-    fn a_pipeline_the_warm_set_missed_is_compiled_by_the_first_ask_and_says_so() {
-        let device = device();
-        let (gpu, _) = device.wgpu();
-        let store = PipelineStore::new(gpu.clone());
-        let (_, compiled) = store
-            .get(Kind::Present, WARM_FORMAT)
-            .expect("the present pipeline builds for a format the adapter renders to");
-        assert!(
-            compiled.is_some(),
-            "the ask that compiled a pipeline has to be able to say so"
-        );
-        let (_, again) = store
-            .get(Kind::Present, WARM_FORMAT)
-            .expect("and the second ask finds it cached");
-        assert!(
-            again.is_none(),
-            "a cached pipeline costs nothing and must not claim a compile"
-        );
-    }
-
-    /// The other half: a headless device (no present format) and a surface whose
-    /// format is already [`WARM_FORMAT`] compile no second set at all.
-    #[test]
-    fn the_warm_set_compiles_one_format_when_no_second_is_needed() {
-        let device = device();
-        let (gpu, _) = device.wgpu();
-        for present in [None, Some(WARM_FORMAT)] {
-            let store = PipelineStore::new(gpu.clone());
-            store.warm_up_now(present);
-            assert!(matches!(store.warm_up(), WarmUp::Warm(_)));
-            let state = store.lock();
-            assert!(
-                state
-                    .pipelines
-                    .keys()
-                    .all(|(_, format)| *format == WARM_FORMAT),
-                "no pipeline outside {WARM_FORMAT:?} belongs in this warm set"
-            );
-        }
-    }
-
-    /// The refusal above must reach a caller in the words of the error, not only as a
-    /// variant — a person reading a log has to be able to attribute it.
-    #[test]
-    fn a_refusal_names_the_pipeline_and_the_format() {
-        let device = device();
-        let (gpu, _) = device.wgpu();
-        let store = PipelineStore::new(gpu.clone());
-        let Err(reason) = store.get(Kind::Composite, wgpu::TextureFormat::Rgba8Snorm) else {
-            panic!("Rgba8Snorm is not a renderable format");
-        };
-        let message = reason.to_string();
-        assert!(message.contains("quorra composite"), "{message}");
-        assert!(message.contains("Rgba8Snorm"), "{message}");
     }
 }
