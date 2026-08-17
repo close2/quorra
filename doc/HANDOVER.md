@@ -380,8 +380,17 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
   drops those marks from the sheet, so they cost no coverage; the *count* is missing, and
   `encode/device_space.rs`'s cull still tests `rect` rather than `mark_bounds` for the same
   reason — moving a caller-visible number is its own decision with its own measurement.
-- **The four examples that copy an archetype page still carry private copies of it.** One
-  page under one name lives in five places; see the trap below for what that already cost.
+- **The `Counters` → `Recorded` mapping is written three times** — `tests/archetypes.rs`,
+  `examples/retained.rs`, `examples/surface_measure.rs` — because `Counters` lives in
+  `quorra-gpu` and `quorra-pages` must not depend on it. Named fields are the mitigation, not
+  the fix. A fourth consumer is the trigger to re-open it, with the dev-dependency cycle on
+  the table: it **works** (ADR 0060 verified it in a scratch workspace) and was refused on
+  principle 4, not on feasibility.
+- **`examples/encode_threads.rs` sweeps `DENSE_TEXT_UNCLIPPED`, not the dense-text
+  archetype.** It has since ADR 0054, and its comment said otherwise until 2026-08-17.
+  Whether the thread sweep should run on the archetype — putting its 40 residue-clipped marks
+  into the "does not divide" column where artwork already is — is a question with a
+  measurement attached.
 - **`deny.toml` bans by name, which is a blocklist**, and a blocklist is silent about next
   year's crate. `tests/no_colour_management.rs` closes the shape with an allowlist over the
   published crates' direct dependencies plus a pattern walk of the shipping graph. What
@@ -468,6 +477,14 @@ names.
   `CARGO_TARGET_DIR`, round 0 reported apart, minima of round-robin rounds with the load
   average beside them. Every sample must be a program **no process has compiled**, because
   RADV's on-disk cache keys on SPIR-V — the trap that cost the spike a round.
+- **Whether an instrument still asserts what it claims**:
+  `cargo run --release -p quorra-gpu --example <name> -- --check`. Every example takes it; it
+  is the smallest configuration that executes the example's assertions and prints no
+  statistics, so it is a gate rather than a measurement. CI runs all twelve under `Xvfb`. If
+  you add an example, add it to the workflow's list — `tests/example_checks.rs` fails until
+  you do. **`--check` may only *shrink* a sweep** (fewer rounds, adapters, sizes), never
+  substitute a page: an example that checks a page it does not measure is ADR 0060's defect
+  wearing a different hat.
 - **A page of curve-clipped marks**: `examples/residue_clip.rs` — the artwork archetype,
   headless into a texture, `instrument_encode` on, minima of twenty steady frames with the
   first reported apart and the load average printed beside them. It prints **all three
@@ -663,12 +680,15 @@ mark's one nothing-making property and asserts it *does* reach the target.
 page. Forcing the defect is the only thing that told the two apart — **a gate verified in one
 direction is not verified.**
 
-**A fixture copied into an example is a fixture that has to be re-cut in both places.** Four
-examples carry private copies of `tests/archetypes.rs`'s pages. When ADR 0057 changed what dense
-text draws, `examples/retained.rs` kept asserting the old row and **panicked at its own signature
-gate on `main` for two days** — nothing caught it, because `cargo test` does not run examples. If
-you change a fixture, grep the examples; if you add a signature assertion to an example, remember
-that nothing runs it.
+**A fixture copied into an example is a fixture that has to be re-cut in both places — and
+nothing runs an example.** Four examples carried private copies of `tests/archetypes.rs`'s pages.
+When ADR 0057 changed what dense text draws, `examples/retained.rs` kept asserting the old row and
+**panicked at its own signature gate on `main` for two days**, because `cargo test` neither builds
+nor runs an example. **Closed by ADR 0060**: pages live in `crates/quorra-pages` (a
+dev-dependency, which is the only edge reaching a test *and* an example), every example takes
+`--check`, and CI runs all twelve. The general form outlives the instance: **an assertion nothing
+executes is not a gate, it is a comment that can rot into a panic** — so when you add a gate, ask
+what runs it before you ask whether it is right.
 
 **The minimum of a remainder is not the remainder of the minimum.** `encode: recording` is
 computed as `encode − geometry − staging`, so taking the minimum of each column across frames

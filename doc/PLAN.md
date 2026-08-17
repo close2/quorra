@@ -51,6 +51,25 @@ row, since a number without one is not evidence.
 | — what ADR 0057 moved there | `bug1703683_page2_reduced.pdf` refused → **agrees**; `issue1905.pdf` still refused and now names its sheet | zero page lines move at scale 1; one more at scale 4, `inks.pdf` on the GPU lane by a hundred-thousandth of SSIM |
 | — and a count in an older document is still never a baseline | 936 / 10 / 5 → 936 / 11 / 4 for an *unchanged* quorra, a day apart | ADR 0055, 2026-08-15: their tree moved a page from *refused* to *differs* under us |
 
+**Every page a gate or an instrument draws has one definition** (ADR 0060). `crates/quorra-pages`
+is a `publish = false` workspace member holding the seven archetypes, the glyph page, two
+instrument-only pages, the generator and each page's recorded counter row; `tests/archetypes.rs`
+and six examples read it rather than carrying copies. It is a **dev-dependency**, which is the
+only edge that reaches a test *and* an example, and it depends on `quorra-scene` alone so the
+graph still reads in one direction. Two drifts fell out of putting the definitions side by side,
+neither ever caught by a failure: `encode_threads.rs`'s "dense text" has had no clips since
+ADR 0054 and is now named `DENSE_TEXT_UNCLIPPED`, and `retained.rs`'s overflow page called itself
+verbatim of `zoom.rs`'s while drawing in a different ink.
+
+**And every example's assertions are executed by CI.** Each accepts `--check` — the smallest
+configuration that runs its assertions, printing no statistics — and one workflow step runs all
+twelve under `Xvfb`, in release, in about two minutes. `tests/example_checks.rs` fails if an
+example exists that the step does not name. Before this, `cargo test` neither built nor ran an
+example, and `examples/retained.rs` panicked at its own signature gate on `main` for two days
+with no signal. Three examples gained an assertion they never had — including
+`surface_measure`, which is where this section's real-display row comes from and which until
+now asserted nothing about the page it drew.
+
 **The release matrix for `a64a908 → a4380e2`** — 72 commits, one copy of their tree, 29
 minutes, RADV, both lanes, both scales, taken 2026-08-16 00:04–00:33:
 
