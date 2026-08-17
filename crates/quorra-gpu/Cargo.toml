@@ -31,6 +31,11 @@ pollster.workspace = true
 # by `tests/function_conformance.rs`. A dev-dependency and nothing else: the library must not
 # link a corpus, and the corpus must stay linkable from a test with no device.
 quorra-function-conformance.workspace = true
+# The pages `tests/archetypes.rs` gates and the `examples/` instruments measure, defined
+# once (ADR 0060). A dev-dependency reaches tests *and* examples, which is the property
+# no arrangement inside this crate has: an example cannot reach a `#[cfg(test)]` module
+# or anything under `tests/`.
+quorra-pages.workspace = true
 
 [lints]
 workspace = true

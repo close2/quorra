@@ -40,8 +40,9 @@
 //!
 //! # Scenes
 //!
-//! Two of `tests/archetypes.rs`'s corpus-measured shapes, rebuilt here at the brief's
-//! 1191×1684: **dense text** (4 320 commands over 818 outlines — §6.2's page shape at
+//! Two of `quorra-pages`' corpus-measured archetypes at the brief's
+//! 1191×1684 — the same definitions `tests/archetypes.rs` gates, not copies of them
+//! (ADR 0060): **dense text** (4 320 commands over 818 outlines — §6.2's page shape at
 //! the corpus's p99) and **artwork** (900 commands, 8 groups, 4 of them blended — the
 //! shape that needs the compositor, so its first frame is the one that compiles
 //! `Composite` and `Blit` for the surface's format). Rounds alternate shapes, each on
@@ -65,10 +66,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use quorra_gpu::{Device, Options, Target, Viewport, WarmUp};
-use quorra_scene::{
-    Affine, BlendMode, Color, Compose, FillRule, GroupSpec, LineCap, LineJoin, OutlineId, Paint,
-    Point, Scene, SceneBuilder, Segment, Stroke,
-};
+use quorra_pages::{ARTWORK, Archetype, DENSE_TEXT};
+use quorra_scene::{Affine, OutlineId, Scene};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -78,231 +77,38 @@ use winit::window::{Window, WindowId};
 const WIDTH: u32 = 1191;
 const HEIGHT: u32 = 1684;
 
-// ---------------------------------------------------------------------------
-// Scenes: two corpus-measured shapes from `tests/archetypes.rs`, trimmed to the
-// fields these two need. The counts are `doc/corpus-profile.md`'s; the geometry
-// that realises them is shared with the archetype gate by construction, not by
-// import — an example cannot reach a test's module, so drift between the two is
-// caught by the counters the gate pins, never assumed away.
-// ---------------------------------------------------------------------------
-
-/// One page shape: the archetype fields the two measured scenes use.
-struct Shape {
-    name: &'static str,
-    commands: u32,
-    distinct: u32,
-    segments: u32,
-    side: f32,
-    strokes: u32,
-    clips: u32,
-    clipped: u32,
-    groups: u32,
-    blended_groups: u32,
-}
-
-/// §6.2's page: dense text at the corpus's 99th percentile and measured reuse.
-const DENSE_TEXT: Shape = Shape {
-    name: "dense text",
-    commands: 4_320,
-    distinct: 818,
-    segments: 12,
-    side: 11.0,
-    strokes: 0,
-    clips: 2,
-    clipped: 40,
-    groups: 0,
-    blended_groups: 0,
-};
-
-/// The grouped shape: its first frame is the one that needs `Composite` and `Blit`.
-const ARTWORK: Shape = Shape {
-    name: "artwork",
-    commands: 900,
-    distinct: 300,
-    segments: 24,
-    side: 60.0,
-    strokes: 405,
-    clips: 185,
-    clipped: 600,
-    groups: 8,
-    blended_groups: 4,
-};
-
-/// A closed curve of `segments` segments about the origin, `side` across — the shape a
-/// letterform has for costing purposes.
-fn outline_of(segments: u32, side: f32) -> Vec<Segment> {
-    let radius = side * 0.5;
-    let mut path = vec![Segment::MoveTo(Point::new(-radius, 0.0))];
-    let steps = segments.max(3);
-    for step in 0..steps {
-        let from = (step as f32) / (steps as f32) * std::f32::consts::TAU;
-        let to = ((step + 1) as f32) / (steps as f32) * std::f32::consts::TAU;
-        let point = |angle: f32| Point::new(radius * angle.cos(), radius * angle.sin() * 1.3);
-        let (a, b) = (point(from), point(to));
-        path.push(Segment::CubicTo {
-            c1: Point::new(a.x + (b.x - a.x) * 0.35, a.y + (b.y - a.y) * 0.1),
-            c2: Point::new(a.x + (b.x - a.x) * 0.65, a.y + (b.y - a.y) * 0.9),
-            to: b,
-        });
-    }
-    path.push(Segment::Close);
-    path
-}
-
-/// Where the `index`th command lands: a reading-order grid over the page.
-fn position(index: u32, side: f32) -> Affine {
-    let step = side + 3.5;
-    let columns = ((WIDTH as f32 - 16.0) / step).max(1.0) as u32;
-    let x = 8.0 + (index % columns) as f32 * step + side * 0.5;
-    let y = 12.0 + (index / columns) as f32 * (side + 4.25) + side * 0.5;
-    Affine::translate(x, y % (HEIGHT as f32 - 24.0))
-}
-
-/// One drawing command: a stroke while the shape's stroke budget lasts, a fill after.
-fn emit(
-    builder: &mut SceneBuilder,
-    shape: &Shape,
-    outlines: &[OutlineId],
-    clips: &[quorra_scene::ClipId],
-    index: u32,
-) {
-    let outline = outlines[(index as usize) % outlines.len()];
-    let clip = (index < shape.clipped && !clips.is_empty())
-        .then(|| clips[clip_of(shape, index).min(clips.len() - 1)]);
-    let ink = Color::new(0.12, 0.13, 0.16, 1.0);
-    if index < shape.strokes {
-        builder
-            .stroke(
-                outline,
-                position(index, shape.side),
-                Stroke {
-                    width: 1.5,
-                    cap: LineCap::Butt,
-                    join: LineJoin::Miter,
-                    miter_limit: 4.0,
-                },
-                Paint::Solid(ink),
-                clip,
-                BlendMode::Normal,
-                None,
-            )
-            .unwrap();
-    } else {
-        builder
-            .fill(
-                outline,
-                position(index, shape.side),
-                FillRule::NonZero,
-                Paint::Solid(ink),
-                clip,
-                BlendMode::Normal,
-                Compose::SrcOver,
-                None,
-            )
-            .unwrap();
-    }
-}
-
-/// The side of the `i`th outline — the one statement of it, because the clip cutter
-/// below sizes a clip from the marks it will clip and a second copy is how the two come
-/// apart.
-fn outline_side(shape: &Shape, i: u32) -> f32 {
-    shape.side * (1.0 + (i % 5) as f32 * 0.05)
-}
-
-/// Which clip the `index`th command draws under: a run of consecutive marks in reading
-/// order, so a clip and its marks are in the same part of the page.
+/// The two shapes this instrument alternates, from `quorra-pages` (ADR 0060).
 ///
-/// **The same mapping as `tests/archetypes.rs`**, and the reason this file was re-cut on
-/// 2026-08-17: the page it measured before placed its clips on a grid of `side × 6` and
-/// its marks on a grid of `side`, so 8 of the 600 clipped commands had a mark that met
-/// the clip clipping it, and the other 592 rasterised a tile only to multiply it by zero
-/// (`doc/notes-tiling-bound.md` §3). **No number taken on this shape before that date is
-/// comparable with one taken after it.**
-fn clip_of(shape: &Shape, index: u32) -> usize {
-    if shape.clipped == 0 {
-        return 0;
-    }
-    ((u64::from(index) * u64::from(shape.clips)) / u64::from(shape.clipped)) as usize
-}
+/// **§6.2's page** — dense text at the corpus's p99 — and **the grouped shape**, whose
+/// first frame is the one that needs `Composite` and `Blit` for the surface's format.
+/// Both were private copies of the archetype generator in this file until 2026-08-17;
+/// the numbers `doc/PLAN.md` carries for the real-display row were taken on those copies,
+/// and the copies were re-cut with the fixture on the same day.
+const SHAPES: [&Archetype; 2] = [&DENSE_TEXT, &ARTWORK];
 
-/// The device box the marks under clip `j` occupy, from this file's own arithmetic.
-fn marks_box(shape: &Shape, j: usize) -> (f32, f32, f32, f32) {
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for index in 0..shape.clipped {
-        if clip_of(shape, index) != j {
-            continue;
-        }
-        let at = position(index, shape.side);
-        let side = outline_side(shape, index % shape.distinct.max(1));
-        let (hx, hy) = (side * 0.5, side * 0.65);
-        x0 = x0.min(at.e - hx);
-        y0 = y0.min(at.f - hy);
-        x1 = x1.max(at.e + hx);
-        y1 = y1.max(at.f + hy);
-    }
-    (x0, y0, x1, y1)
-}
-
-/// The transform that puts clip `j`'s ellipse over the marks it clips: three or four
-/// marks across, a fraction of the page, and cutting every one of them.
-fn curve_clip(shape: &Shape, j: u32) -> Affine {
-    let (x0, y0, x1, y1) = marks_box(shape, j as usize);
-    let side = outline_side(shape, j % shape.distinct.max(1));
-    Affine::scale((x1 - x0) / side, (y1 - y0) / (side * 1.3))
-        .then(Affine::translate((x0 + x1) * 0.5, (y0 + y1) * 0.5))
-}
-
-/// Build the shape's scene on this device — the archetype generator, minus the image
-/// and rect-clip branches these two shapes do not use.
-fn build(device: &mut Device, shape: &Shape) -> Scene {
-    let outlines: Vec<OutlineId> = (0..shape.distinct.max(1))
-        .map(|i| {
-            device
-                .upload_outline(&outline_of(shape.segments, outline_side(shape, i)))
-                .unwrap()
-        })
+/// Build a shape's scene on this device.
+fn build(device: &mut Device, shape: &Archetype) -> Scene {
+    let outlines: Vec<OutlineId> = quorra_pages::outlines(shape)
+        .iter()
+        .map(|path| device.upload_outline(path).expect("an archetype outline"))
         .collect();
-    let mut builder = SceneBuilder::new();
-    let clips: Vec<quorra_scene::ClipId> = (0..shape.clips)
-        .map(|i| {
-            let outline = outlines[(i as usize) % outlines.len()];
-            builder
-                .clip(outline, curve_clip(shape, i), FillRule::NonZero, None)
-                .unwrap()
-        })
-        .collect();
-    let per_group = (shape.commands / 4)
-        .checked_div(shape.groups)
-        .map_or(0, |per| per.max(1));
-    let grouped = per_group * shape.groups;
-    for group in 0..shape.groups {
-        let spec = GroupSpec {
-            alpha: 0.8,
-            blend: if group < shape.blended_groups {
-                BlendMode::Multiply
-            } else {
-                BlendMode::Normal
-            },
-            clip: None,
-            knockout: false,
-            mask: None,
-            isolated: true,
-            compose: Compose::SrcOver,
-        };
-        builder
-            .group(spec, |body| {
-                for step in 0..per_group {
-                    emit(body, shape, &outlines, &clips, group * per_group + step);
-                }
-                Ok(())
-            })
-            .unwrap();
+    quorra_pages::scene(shape, &outlines, None).expect("an archetype builds")
+}
+
+/// A frame's counters as the row `quorra-pages` records, field by named field.
+fn recorded(counters: &quorra_gpu::Counters) -> quorra_pages::Recorded {
+    quorra_pages::Recorded {
+        commands: u64::from(counters.commands),
+        commands_culled: u64::from(counters.commands_culled),
+        distinct_outlines: u64::from(counters.distinct_outlines),
+        atlas_distinct_keys: u64::from(counters.atlas_distinct_keys),
+        clip_distinct_regions: u64::from(counters.clip_distinct_regions),
+        tiles: u64::from(counters.tiles),
+        layer_textures: u64::from(counters.layer_textures),
+        clip_residue_regions: u64::from(counters.clip_residue_regions),
+        clip_residue_tiles: u64::from(counters.clip_residue_tiles),
+        coverage_texels: counters.coverage.texels,
     }
-    for index in grouped..shape.commands {
-        emit(&mut builder, shape, &outlines, &clips, index);
-    }
-    builder.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +207,15 @@ struct Config {
     rounds: u32,
     frames: u32,
     adapter: Option<String>,
+    /// `--check`: the smallest run that reaches every assertion, and no report.
+    ///
+    /// Two rounds of two frames each is one frame of each shape's signature gate — the
+    /// only assertion this file makes — and nothing else. `cargo test` neither builds
+    /// nor runs an example (ADR 0060), and this one is the owner's instrument on the
+    /// real display, so what CI can check is that its gates hold, not what it measures.
+    /// Forty frames of Fifo against a display's refresh is a measurement and belongs to
+    /// the person taking it.
+    check: bool,
 }
 
 fn config() -> Config {
@@ -409,9 +224,16 @@ fn config() -> Config {
         rounds: 8,
         frames: 40,
         adapter: std::env::var("QUORRA_MEASURE_ADAPTER").ok(),
+        check: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
+        if flag == "--check" {
+            config.check = true;
+            config.rounds = 2;
+            config.frames = 2;
+            continue;
+        }
         let value = args.next();
         let parsed = value.as_deref().and_then(|v| v.parse::<u32>().ok());
         match (flag.as_str(), parsed) {
@@ -419,7 +241,9 @@ fn config() -> Config {
             ("--frames", Some(n)) => config.frames = n.max(1),
             ("--adapter", None | Some(_)) => config.adapter = value,
             _ => {
-                eprintln!("usage: surface_measure [--rounds N] [--frames N] [--adapter NAME]");
+                eprintln!(
+                    "usage: surface_measure [--check] [--rounds N] [--frames N] [--adapter NAME]"
+                );
                 std::process::exit(2);
             }
         }
@@ -443,12 +267,8 @@ impl Measure {
     /// configurations so machine drift falls on each equally. The uninstrumented
     /// rounds carry §6.2's number (the instrument costs a clock read per seam); the
     /// instrumented ones say where a steady encode goes.
-    fn config_for(round: u32) -> (&'static Shape, bool) {
-        let shape = if round.is_multiple_of(2) {
-            &DENSE_TEXT
-        } else {
-            &ARTWORK
-        };
+    fn config_for(round: u32) -> (&'static Archetype, bool) {
+        let shape = SHAPES[(round % 2) as usize];
         (shape, (round / 2).is_multiple_of(2))
     }
 
@@ -519,6 +339,19 @@ impl Measure {
                 let record = FrameRecord::of(started.elapsed(), frame.timings());
                 let current = self.current.as_mut().expect("round started");
                 if self.frame_in_round == 0 {
+                    // The signature gate this instrument never had. The viewport is
+                    // `WIDTH × HEIGHT` whatever the window negotiated, so the counters
+                    // are the same exact functions of the scene that
+                    // `tests/archetypes.rs` compares — and the row is that crate's, so
+                    // it cannot go stale here while staying right there (ADR 0060).
+                    let (shape, _) = Self::config_for(self.round);
+                    assert_eq!(
+                        recorded(&frame.counters()),
+                        shape.recorded.expect("both shapes are priced pages"),
+                        "{}: this is not the page `doc/PLAN.md`'s real-display row is \
+                         attributed to",
+                        shape.name,
+                    );
                     current.first = record;
                     current.first_uploaded = frame.counters().bytes_uploaded;
                 } else {
@@ -709,5 +542,9 @@ fn main() {
 
     // Release any leftover device (and its surface) before the summary prints.
     measure.device = None;
+    if measure.config.check {
+        println!("check: both shapes presented and their counters are the recorded rows");
+        return;
+    }
     measure.report();
 }

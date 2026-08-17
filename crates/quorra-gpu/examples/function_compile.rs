@@ -260,10 +260,24 @@ fn sample(
     elapsed
 }
 
+/// `--check`: the smallest run that reaches every path this file has — one round over
+/// every program length, which compiles every generated shader once.
+///
+/// `cargo test` neither builds nor runs an example (ADR 0060); CI runs `--check` for
+/// every example named in `.github/workflows/ci.yml`. One round is a *compile*, not a
+/// measurement: the minima this file exists for need twelve, round-robin, on a quiet
+/// machine, and every sample must be a program no process has compiled.
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let check = args.iter().any(|arg| arg == "--check");
+    args.retain(|arg| arg != "--check");
+    let mut args = args.into_iter();
     let adapter = args.next();
-    let rounds: usize = args.next().and_then(|n| n.parse().ok()).unwrap_or(12);
+    let rounds: usize = if check {
+        1
+    } else {
+        args.next().and_then(|n| n.parse().ok()).unwrap_or(12)
+    };
 
     let mut device = Device::headless(&Options {
         adapter,

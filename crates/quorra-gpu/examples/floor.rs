@@ -45,49 +45,24 @@ fn one_rect() -> Scene {
     builder.finish()
 }
 
-/// 5 933 glyph-lane fills over 107 distinct outlines at integer phases: the caller's
-/// dense page, maximal reuse.
+/// 5 933 glyph-lane fills over 107 distinct outlines: the caller's dense page, at
+/// integer phases (maximal reuse) or at a fresh phase per placement (the page the atlas
+/// cannot help).
+///
+/// **`quorra_pages::GLYPH_PAGE`** — the definition `examples/zoom.rs` and
+/// `examples/retained.rs` also draw. Each of the three carried its own copy until
+/// 2026-08-17, and one of them differed (ADR 0060).
 fn glyph_page(device: &mut Device, unique_phases: bool) -> Scene {
-    let mut outlines = Vec::new();
-    for i in 0..107_u32 {
-        let w = 6.0 + (i % 5) as f32;
-        let h = 8.0 + (i % 7) as f32;
-        let outline = device
-            .upload_outline(&[
-                quorra_scene::Segment::MoveTo(Point::new(0.3, 0.2)),
-                quorra_scene::Segment::LineTo(Point::new(w, 0.0)),
-                quorra_scene::Segment::CubicTo {
-                    c1: Point::new(w + 1.0, h * 0.3),
-                    c2: Point::new(w + 1.0, h * 0.7),
-                    to: Point::new(w * 0.8, h),
-                },
-                quorra_scene::Segment::LineTo(Point::new(0.0, h * 0.9)),
-                quorra_scene::Segment::Close,
-            ])
-            .unwrap();
-        outlines.push(outline);
-    }
-    let mut builder = SceneBuilder::new();
-    for i in 0..5_933_u32 {
-        let phase = if unique_phases {
-            (i as f32) * 0.061_3 % 1.0
-        } else {
-            0.0
-        };
-        builder
-            .fill(
-                outlines[(i % 107) as usize],
-                Affine::translate((i % 80) as f32 * 14.5 + phase, (i / 80) as f32 * 15.25),
-                quorra_scene::FillRule::NonZero,
-                quorra_scene::Paint::Solid(Color::new(0.1, 0.1, 0.1, 1.0)),
-                None,
-                quorra_scene::BlendMode::Normal,
-                quorra_scene::Compose::SrcOver,
-                None,
-            )
-            .unwrap();
-    }
-    builder.finish()
+    let page = if unique_phases {
+        quorra_pages::GLYPH_PAGE_UNIQUE_PHASES
+    } else {
+        quorra_pages::GLYPH_PAGE
+    };
+    let outlines: Vec<quorra_scene::OutlineId> = quorra_pages::glyph_outlines(&page)
+        .iter()
+        .map(|path| device.upload_outline(path).expect("a letterform"))
+        .collect();
+    quorra_pages::glyph_scene(&page, &outlines).expect("the glyph page builds")
 }
 
 /// The uploaded resources one figure load needs: a 64×64 image, a two-stop ramp, a
@@ -383,11 +358,30 @@ fn measure_caret_blink(device: &mut Device) {
     }
 }
 
+/// `--check`: the smallest run that reaches every scene and every path this file has.
+///
+/// One adapter, one size, one frame per configuration. It still builds all six scenes,
+/// runs both target kinds and reaches the caret-blink and scene-memory sections, so an
+/// `expect` that would fire fires — which is the whole of what this file asserts.
+/// `cargo test` neither builds nor runs an example (ADR 0060); CI runs `--check` for
+/// every example named in `.github/workflows/ci.yml`. The numbers it prints are one
+/// frame each and are not measurements.
 fn main() {
-    let sizes: [(u32, u32); 3] = [(596, 842), (1191, 1684), (2382, 3368)];
+    let check = std::env::args().any(|arg| arg == "--check");
+    let sizes: &[(u32, u32)] = if check {
+        &[(1191, 1684)]
+    } else {
+        &[(596, 842), (1191, 1684), (2382, 3368)]
+    };
+    let steady = if check { 1 } else { 10 };
+    let adapters: &[&str] = if check {
+        &["llvmpipe"]
+    } else {
+        &["llvmpipe", "RADV"]
+    };
     let scenes = [("1 rect", one_rect()), ("5933 rects", dense_page())];
 
-    for adapter in ["llvmpipe", "RADV"] {
+    for adapter in adapters.iter().copied() {
         let Ok(mut device) = Device::headless(&Options {
             adapter: Some(adapter.into()),
             ..Options::default()
@@ -426,13 +420,13 @@ fn main() {
             "frame"
         );
         for (label, scene) in &scenes {
-            for (w, h) in sizes {
+            for (w, h) in sizes.iter().copied() {
                 let viewport = Viewport::full(w, h, Affine::IDENTITY);
                 for (kind, readback) in [("read", true), ("tex", false)] {
                     // The discarded first frame is the cold one — for glyph scenes it
                     // is where tiles rasterise, which is §11.3's cost.
                     let cold = fastest_of(1, &mut device, scene, &viewport, readback);
-                    let best = fastest_of(10, &mut device, scene, &viewport, readback);
+                    let best = fastest_of(steady, &mut device, scene, &viewport, readback);
                     println!(
                         "{:<16} {:>6}x{:<4} {:>7} | {:>7.3} {:>7.3} {:>7.3} {:>8.3} {:>8.3} {:>8.3}",
                         label,
@@ -460,7 +454,7 @@ fn main() {
         for (label, scene) in &glyph_scenes {
             let viewport = Viewport::full(1191, 1684, Affine::IDENTITY);
             let cold = fastest_of(1, &mut device, scene, &viewport, false);
-            let best = fastest_of(10, &mut device, scene, &viewport, false);
+            let best = fastest_of(steady, &mut device, scene, &viewport, false);
             println!(
                 "{:<16} {:>6}x{:<4} {:>7} | {:>7.3} {:>7.3} {:>7.3} {:>8.3} {:>8.3} {:>8.3}",
                 label,

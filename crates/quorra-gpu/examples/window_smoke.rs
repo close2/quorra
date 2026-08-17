@@ -137,7 +137,14 @@ impl ApplicationHandler for Smoke {
     }
 }
 
+/// `--check` is accepted and changes nothing: this example is already the smallest run
+/// that reaches its own assertion — five frames presented to a real surface — and CI has
+/// run it since ADR 0043. It is accepted so that every example takes the same invocation
+/// (ADR 0060).
 fn main() {
+    if std::env::args().any(|arg| arg == "--check") {
+        println!("check: this example is already the smallest run that asserts what it asserts");
+    }
     let hold = std::env::var("QUORRA_SMOKE_HOLD_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())

@@ -47,15 +47,43 @@ jobs:
         run: cargo test --workspace
       - name: Perf gate (release, timestamp queries)
         run: cargo test --release -p quorra-gpu --test perf_gate -- --nocapture
-      - name: Window smoke (surface path presents real frames under Xvfb)
-        run: xvfb-run -a cargo run -p quorra-gpu --example window_smoke
-      # The other half of the surface path since ADR 0056: a page rendered on one thread
-      # while the window is presented from another, with the window's pixels read back
-      # to check that a non-identity placement put them where it says. It also asserts
-      # the refusals either side of the split — `Target::Surface` while the presenter is
-      # out, and a presenter offered to a device that did not hand it out.
-      - name: Presenter smoke (a render on one thread, presents on another, under Xvfb)
-        run: xvfb-run -a cargo run -p quorra-gpu --example present_thread
+      # ADR 0060. `cargo test` neither builds nor runs an example, so every `assert!` in
+      # `examples/` was a comment until this step existed — and one of them had been
+      # panicking on `main` for two days when the round that added this found it. Each
+      # example accepts `--check`: the smallest configuration that executes every
+      # assertion it makes, printing no statistics, because a one-round wall clock is not
+      # a measurement and must not read like one.
+      #
+      # **The list below is a list, and a list drifts** (ADR 0059). `tests/example_checks.rs`
+      # reads this file and fails if an example exists that no line here names, so adding
+      # an example to `examples/` and not to this step fails the build rather than going
+      # unnoticed. Two of them need a window, which is why the whole step runs under Xvfb;
+      # `window_smoke` and `present_thread` are assertion harnesses that CI has run since
+      # ADR 0043 and ADR 0056, and they take `--check` as a no-op so that one loop can
+      # invoke every example the same way.
+      #
+      # Release, not debug: several of these draw a page of tens of thousands of marks
+      # through a software rasteriser, and the profile is shared with the perf gate above.
+      - name: Every example's assertions execute (--check)
+        run: |
+          set -euo pipefail
+          for example in \
+              encode_threads \
+              floor \
+              function_compile \
+              function_paint \
+              present_thread \
+              rect_lane \
+              residue_clip \
+              retained \
+              startup \
+              surface_measure \
+              window_smoke \
+              zoom
+          do
+            echo "== $example --check =="
+            xvfb-run -a cargo run --release -p quorra-gpu --example "$example" -- --check
+          done
 
   supply-chain:
     runs-on: ubuntu-latest

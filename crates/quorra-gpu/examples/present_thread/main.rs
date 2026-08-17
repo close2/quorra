@@ -93,7 +93,13 @@ const TOLERANCE: u8 = 2;
 /// in this example, and it is a wait rather than a measurement.
 const SETTLE: Duration = Duration::from_millis(300);
 
+/// `--check` is accepted and changes nothing: this example is already an assertion
+/// harness that runs its whole set once, and CI has run it since ADR 0056. It is
+/// accepted so that every example takes the same invocation (ADR 0060).
 fn main() {
+    if std::env::args().any(|arg| arg == "--check") {
+        eprintln!("check: this example is already the smallest run that asserts what it asserts");
+    }
     let mut display = Display::open();
     let options = Options {
         adapter: std::env::var("QUORRA_PRESENT_ADAPTER").ok(),

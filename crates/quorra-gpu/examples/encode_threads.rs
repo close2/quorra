@@ -40,279 +40,44 @@
 use std::time::{Duration, Instant};
 
 use quorra_gpu::{Counters, Device, Options, Target, Viewport};
-use quorra_scene::{
-    Affine, BlendMode, ClipId, Color, Compose, FillRule, GroupSpec, LineCap, LineJoin, OutlineId,
-    Paint, Point, Scene, SceneBuilder, Segment, Stroke,
-};
+use quorra_pages::{ARTWORK, Archetype, CALLERS_DRAWING, DENSE_TEXT_UNCLIPPED, MEDIAN_PAGE};
+use quorra_scene::{Affine, OutlineId, Scene};
 
-/// One page shape, in the fields `tests/archetypes.rs` states its archetypes with. The
-/// geometry that realises them is this file's own, deliberately: an example cannot reach
-/// a test's module, and the counters printed below are what says the two agree.
-struct Shape {
-    name: &'static str,
-    width: u32,
-    height: u32,
-    commands: u32,
-    distinct: u32,
-    segments: u32,
-    side: f32,
-    strokes: u32,
-    clips: u32,
-    clipped: u32,
-    groups: u32,
-    blended_groups: u32,
-}
-
-/// **The caller's page**, at the size and shape their trace measured: one geological
-/// cross-section, 58 009 commands of which six are strokes, 51.9 path segments each, no
-/// text, no images, no groups and not one clip — 3.0 M segments over a 900 × 1100 window
-/// where a mark is about three device pixels across.
-const DRAWING: Shape = Shape {
-    name: "drawing",
-    width: 900,
-    height: 1100,
-    commands: 58_009,
-    distinct: 58_009,
-    segments: 52,
-    side: 3.0,
-    strokes: 6,
-    clips: 0,
-    clipped: 0,
-    groups: 0,
-    blended_groups: 0,
-};
-
-/// `tests/archetypes.rs`'s artwork row: the corpus's p99 clip shape, and the archetype
-/// `doc/PLAN.md` carries a geometry number for. Its 600 clipped marks are the case this
-/// round does **not** divide, which is why it is here.
-const ARTWORK: Shape = Shape {
-    name: "artwork",
-    width: 1191,
-    height: 1684,
-    commands: 900,
-    distinct: 300,
-    segments: 24,
-    side: 60.0,
-    strokes: 405,
-    clips: 185,
-    clipped: 600,
-    groups: 8,
-    blended_groups: 4,
-};
-
-/// `tests/archetypes.rs`'s dense-text row: the shape the glyph atlas exists for, where
-/// five placements share every rasterisation.
-const DENSE_TEXT: Shape = Shape {
-    name: "dense text",
-    width: 1191,
-    height: 1684,
-    commands: 4_320,
-    distinct: 818,
-    segments: 12,
-    side: 11.0,
-    strokes: 0,
-    clips: 0,
-    clipped: 0,
-    groups: 0,
-    blended_groups: 0,
-};
-
-/// `tests/archetypes.rs`'s median row: twelve marks and ninety-six segments, which is
-/// most of a corpus. The floor's evidence — a page this size must not pay for the lane
-/// the page above it wanted (the caller's §4, their ADR 0228).
-const MEDIAN_PAGE: Shape = Shape {
-    name: "median page",
-    width: 1191,
-    height: 1684,
-    commands: 12,
-    distinct: 9,
-    segments: 8,
-    side: 11.0,
-    strokes: 0,
-    clips: 0,
-    clipped: 0,
-    groups: 0,
-    blended_groups: 0,
-};
-
-const SHAPES: [&Shape; 4] = [&DRAWING, &ARTWORK, &DENSE_TEXT, &MEDIAN_PAGE];
-
-/// A closed curve of `segments` cubics about the origin, `side` across.
-fn outline_of(segments: u32, side: f32) -> Vec<Segment> {
-    let radius = side * 0.5;
-    let mut path = vec![Segment::MoveTo(Point::new(-radius, 0.0))];
-    let steps = segments.max(3);
-    for step in 0..steps {
-        let from = (step as f32) / (steps as f32) * std::f32::consts::TAU;
-        let to = ((step + 1) as f32) / (steps as f32) * std::f32::consts::TAU;
-        let point = |angle: f32| Point::new(radius * angle.cos(), radius * angle.sin() * 1.3);
-        let (a, b) = (point(from), point(to));
-        path.push(Segment::CubicTo {
-            c1: Point::new(a.x + (b.x - a.x) * 0.35, a.y + (b.y - a.y) * 0.1),
-            c2: Point::new(a.x + (b.x - a.x) * 0.65, a.y + (b.y - a.y) * 0.9),
-            to: b,
-        });
-    }
-    path.push(Segment::Close);
-    path
-}
-
-fn position(shape: &Shape, index: u32, side: f32) -> Affine {
-    let step = side + 3.5;
-    let columns = ((shape.width as f32 - 16.0) / step).max(1.0) as u32;
-    let x = 8.0 + (index % columns) as f32 * step + side * 0.5;
-    let y = 12.0 + (index / columns) as f32 * (side + 4.25) + side * 0.5;
-    Affine::translate(x, y % (shape.height as f32 - 24.0))
-}
-
-fn emit(
-    builder: &mut SceneBuilder,
-    shape: &Shape,
-    outlines: &[OutlineId],
-    clips: &[ClipId],
-    i: u32,
-) {
-    let outline = outlines[(i as usize) % outlines.len()];
-    let clip = (i < shape.clipped && !clips.is_empty())
-        .then(|| clips[clip_of(shape, i).min(clips.len() - 1)]);
-    let ink = Color::new(0.12, 0.13, 0.16, 1.0);
-    let at = position(shape, i, shape.side);
-    if i < shape.strokes {
-        builder
-            .stroke(
-                outline,
-                at,
-                Stroke {
-                    width: 1.5,
-                    cap: LineCap::Butt,
-                    join: LineJoin::Miter,
-                    miter_limit: 4.0,
-                },
-                Paint::Solid(ink),
-                clip,
-                BlendMode::Normal,
-                None,
-            )
-            .unwrap();
-    } else {
-        builder
-            .fill(
-                outline,
-                at,
-                FillRule::NonZero,
-                Paint::Solid(ink),
-                clip,
-                BlendMode::Normal,
-                Compose::SrcOver,
-                None,
-            )
-            .unwrap();
-    }
-}
-
-/// The side of the `i`th outline — the one statement of it, because the clip cutter
-/// below sizes a clip from the marks it will clip and a second copy is how the two come
-/// apart.
-fn outline_side(shape: &Shape, i: u32) -> f32 {
-    shape.side * (1.0 + (i % 5) as f32 * 0.05)
-}
-
-/// Which clip the `index`th command draws under: a run of consecutive marks in reading
-/// order, so a clip and its marks are in the same part of the page.
+/// The four page shapes this sweep runs, all four defined in `quorra-pages` (ADR 0060).
 ///
-/// **The same mapping as `tests/archetypes.rs`**, and the reason this file was re-cut on
-/// 2026-08-17: the page it measured before placed its clips on a grid of `side × 6` and
-/// its marks on a grid of `side`, so 8 of the 600 clipped commands had a mark that met
-/// the clip clipping it, and the other 592 rasterised a tile only to multiply it by zero
-/// (`doc/notes-tiling-bound.md` §3). **No number taken on this shape before that date is
-/// comparable with one taken after it.**
-fn clip_of(shape: &Shape, index: u32) -> usize {
-    if shape.clipped == 0 {
-        return 0;
-    }
-    ((u64::from(index) * u64::from(shape.clips)) / u64::from(shape.clipped)) as usize
-}
+/// Each was a private copy of the archetype generator in this file until 2026-08-17, and
+/// **two of the four were not the archetype their comment named**. Naming them properly
+/// is what a register of pages buys: `DENSE_TEXT_UNCLIPPED` is dense text without its
+/// two curve clips, which is a different page and always was, and `CALLERS_DRAWING` is
+/// the caller's file at its own 58 009 commands rather than the 1 200-command `DRAWING`
+/// archetype. **Neither is changed here** — ADR 0054's sweep was measured on these pages,
+/// and re-cutting one in the round that moved it is the trap
+/// `doc/notes-clipped-instrument.md` §3.4 names.
+///
+/// The order is the order the sweep prints: the caller's page first, because it is the
+/// one their `doc/QUORRA_ENCODE_THREADS.md` asks about; artwork second, because its 600
+/// residue-clipped marks are the case that does **not** divide; then the atlas shape and
+/// the floor.
+const SHAPES: [&Archetype; 4] = [
+    &CALLERS_DRAWING,
+    &ARTWORK,
+    &DENSE_TEXT_UNCLIPPED,
+    &MEDIAN_PAGE,
+];
 
-/// The device box the marks under clip `j` occupy, from this file's own arithmetic.
-fn marks_box(shape: &Shape, j: usize) -> (f32, f32, f32, f32) {
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for index in 0..shape.clipped {
-        if clip_of(shape, index) != j {
-            continue;
-        }
-        let at = position(shape, index, shape.side);
-        let side = outline_side(shape, index % shape.distinct.max(1));
-        let (hx, hy) = (side * 0.5, side * 0.65);
-        x0 = x0.min(at.e - hx);
-        y0 = y0.min(at.f - hy);
-        x1 = x1.max(at.e + hx);
-        y1 = y1.max(at.f + hy);
-    }
-    (x0, y0, x1, y1)
-}
-
-/// The transform that puts clip `j`'s ellipse over the marks it clips: three or four
-/// marks across, a fraction of the page, and cutting every one of them.
-fn curve_clip(shape: &Shape, j: u32) -> Affine {
-    let (x0, y0, x1, y1) = marks_box(shape, j as usize);
-    let side = outline_side(shape, j % shape.distinct.max(1));
-    Affine::scale((x1 - x0) / side, (y1 - y0) / (side * 1.3))
-        .then(Affine::translate((x0 + x1) * 0.5, (y0 + y1) * 0.5))
-}
-
-fn build(device: &mut Device, shape: &Shape) -> Scene {
-    let outlines: Vec<OutlineId> = (0..shape.distinct.max(1))
-        .map(|i| {
-            // A different side per outline is what makes them distinct shapes rather
-            // than one shape uploaded many times: the caller's page has 58 003 of those.
-            device
-                .upload_outline(&outline_of(shape.segments, outline_side(shape, i)))
-                .unwrap()
-        })
+/// Build a shape's scene on this device.
+///
+/// A different side per outline is what makes them distinct shapes rather than one shape
+/// uploaded many times: the caller's page has 58 003 of those.
+fn build(device: &mut Device, shape: &Archetype) -> Scene {
+    let outlines: Vec<OutlineId> = quorra_pages::outlines(shape)
+        .iter()
+        .map(|path| device.upload_outline(path).expect("an outline"))
         .collect();
-    let mut builder = SceneBuilder::new();
-    let clips: Vec<ClipId> = (0..shape.clips)
-        .map(|i| {
-            let outline = outlines[(i as usize) % outlines.len()];
-            builder
-                .clip(outline, curve_clip(shape, i), FillRule::NonZero, None)
-                .unwrap()
-        })
-        .collect();
-    let per_group = (shape.commands / 4)
-        .checked_div(shape.groups)
-        .map_or(0, |per| per.max(1));
-    let grouped = per_group * shape.groups;
-    for group in 0..shape.groups {
-        let spec = GroupSpec {
-            alpha: 0.8,
-            blend: if group < shape.blended_groups {
-                BlendMode::Multiply
-            } else {
-                BlendMode::Normal
-            },
-            clip: None,
-            knockout: false,
-            mask: None,
-            isolated: true,
-            compose: Compose::SrcOver,
-        };
-        builder
-            .group(spec, |body| {
-                for step in 0..per_group {
-                    emit(body, shape, &outlines, &clips, group * per_group + step);
-                }
-                Ok(())
-            })
-            .unwrap();
-    }
-    for index in grouped..shape.commands {
-        emit(&mut builder, shape, &outlines, &clips, index);
-    }
-    builder.finish()
+    quorra_pages::scene(shape, &outlines, None).expect("a page builds")
 }
 
-fn target_texture(device: &Device, shape: &Shape) -> wgpu::Texture {
+fn target_texture(device: &Device, shape: &Archetype) -> wgpu::Texture {
     let (gpu, _) = device.wgpu();
     gpu.create_texture(&wgpu::TextureDescriptor {
         label: Some("encode threads measurement target"),
@@ -334,7 +99,7 @@ fn target_texture(device: &Device, shape: &Shape) -> wgpu::Texture {
 /// scene on it, render once, and report what the encode cost.
 fn sample(
     adapter: Option<String>,
-    shape: &Shape,
+    shape: &Archetype,
     threads: usize,
 ) -> (Duration, Duration, Counters) {
     let mut device = Device::headless(&Options {
@@ -386,14 +151,35 @@ fn load_average() -> String {
     )
 }
 
+/// `--check`: the smallest run that executes every assertion this example makes.
+///
+/// One round over two thread counts on every shape, which is what reaches the "the
+/// counters moved with the thread count" assertion — it needs two configurations of one
+/// page and nothing more. `cargo test` neither builds nor runs an example, so an
+/// assertion here is a comment until something runs it (ADR 0060); CI runs `--check`
+/// for every example named in `.github/workflows/ci.yml`.
+///
+/// It prints no minima. A single round of a wall clock on this machine is not a
+/// measurement, and a line that looks like one is worse than no line.
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let check = args.iter().any(|arg| arg == "--check");
+    args.retain(|arg| arg != "--check");
+    let mut args = args.into_iter();
     let adapter = args.next().filter(|a| a != "-");
-    let rounds: usize = args.next().and_then(|n| n.parse().ok()).unwrap_or(3);
-    let counts: Vec<usize> = args.next().map_or_else(
-        || vec![1, 2, 4, 8, 24],
-        |list| list.split(',').filter_map(|n| n.parse().ok()).collect(),
-    );
+    let rounds: usize = if check {
+        1
+    } else {
+        args.next().and_then(|n| n.parse().ok()).unwrap_or(3)
+    };
+    let counts: Vec<usize> = if check {
+        vec![1, 2]
+    } else {
+        args.next().map_or_else(
+            || vec![1, 2, 4, 8, 24],
+            |list| list.split(',').filter_map(|n| n.parse().ok()).collect(),
+        )
+    };
 
     println!("load average before: {}", load_average());
     for shape in SHAPES {
@@ -428,6 +214,9 @@ fn main() {
              {} segments, {} residue regions, {} residue tiles",
             shape.name, first[0], first[1], first[2], first[3], first[4], first[5], first[6],
         );
+        if check {
+            continue;
+        }
         for (slot, threads) in counts.iter().enumerate() {
             let min = |v: &[Duration]| v.iter().copied().min().unwrap_or_default();
             println!(
@@ -436,6 +225,10 @@ fn main() {
                 min(&geometry[slot]),
             );
         }
+    }
+    if check {
+        println!("\ncheck: every shape's counters are the same at 1 thread and at 2");
+        return;
     }
     println!("\nload average after: {}", load_average());
 }

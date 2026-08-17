@@ -24,6 +24,13 @@ quorra-gpu = { path = "crates/quorra-gpu", version = "0.1.0" }
 # code. The explicit version is not optional here either: `deny.toml` sets
 # `wildcards = "deny"`, and a bare path dependency is a wildcard requirement.
 quorra-function-conformance = { path = "crates/quorra-function-conformance", version = "0.1.0" }
+# Development-only, and never published: the pages this workspace's gates and instruments
+# draw. It is a crate rather than a module for the same reason as the line above, plus
+# one this tree learned the expensive way — an **example** can reach a dev-dependency and
+# cannot reach a test's module, which is how four examples came to carry private copies
+# of the archetype generator (doc/adr/0060). The explicit version is required by
+# `deny.toml`'s `wildcards = "deny"`.
+quorra-pages = { path = "crates/quorra-pages", version = "0.1.0" }
 
 # Error handling. Every error this library returns is typed and names what failed —
 # RENDER_LIBRARY.md §5 asks for "an `Err` that names what overflowed", which is a

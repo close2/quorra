@@ -1,0 +1,27 @@
+[package]
+name = "quorra-pages"
+description = "The pages this workspace's gates and instruments draw, defined once."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published, and never a dependency of the library: this crate is where a page
+# that more than one target draws is *defined*, so that re-cutting one re-cuts it
+# everywhere. It is a crate rather than a module inside `quorra-gpu` for the reason
+# `quorra-function-conformance` is one — an integration test cannot reach another
+# crate's test code, and an **example** cannot reach a test's module at all, which is
+# how four examples came to carry private copies of `tests/archetypes.rs`'s pages
+# (doc/adr/0060).
+publish = false
+
+# `quorra-scene` and nothing else, deliberately: this crate must stay linkable from a
+# target that has no adapter, and it must not depend on `quorra-gpu`, whose own
+# dev-dependency on it would then close a cycle. The price is that a caller uploads
+# the resources itself — five lines, stated in the crate documentation — and the
+# purchase is a dependency graph that still reads in one direction (doc/adr/0060 §3).
+[dependencies]
+quorra-scene.workspace = true
+
+[lints]
+workspace = true

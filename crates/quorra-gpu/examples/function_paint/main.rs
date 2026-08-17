@@ -90,7 +90,15 @@ struct Case {
     generated: Result<Facts, Refusal>,
 }
 
+/// `--check`: one adapter instead of two, and otherwise the whole spike.
+///
+/// Every property this file establishes is established once per adapter, so a single
+/// adapter reaches every path — the cross-adapter section then reports one row and says
+/// so, which is what it already does on a machine with one adapter. `cargo test` neither
+/// builds nor runs an example (ADR 0060); CI runs `--check` for every example named in
+/// `.github/workflows/ci.yml`.
 fn main() {
+    let check = std::env::args().any(|arg| arg == "--check");
     println!("# quorra spike: a device-evaluated §7.10.5 function paint\n");
     report::load();
 
@@ -107,7 +115,12 @@ fn main() {
     let reference = report::cpu_reference(&cases);
 
     let mut rasters: Vec<AdapterRasters> = Vec::new();
-    for filter in ["RADV", "llvmpipe"] {
+    let adapters: &[&str] = if check {
+        &["llvmpipe"]
+    } else {
+        &["RADV", "llvmpipe"]
+    };
+    for filter in adapters.iter().copied() {
         match Gpu::open(filter) {
             Some(gpu) => {
                 let drawn = run_adapter(&gpu, &cases, &reference);

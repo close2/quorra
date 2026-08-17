@@ -24,9 +24,11 @@
 //! - **Into a retained `Target::Texture`**, created once. A `Readback` frame would put a
 //!   copy-out and a map — the largest single cost a frame has — on top of the thing being
 //!   measured, and a `Surface` frame would block on vsync.
-//! - **The counters are checked against `tests/archetypes.rs`'s recorded row** before any
-//!   number is printed. That is what says this binary encoded §6.2's page and not a
-//!   lookalike, and it is the same discipline the callgrind harness of ADR 0045 used.
+//! - **The counters are checked against the page's recorded row** before any number is
+//!   printed. That is what says this binary encoded §6.2's page and not a lookalike, and
+//!   it is the same discipline the callgrind harness of ADR 0045 used. Since ADR 0060
+//!   the row is `quorra-pages`' — the one `tests/archetypes.rs` compares against — rather
+//!   than a copy of it here, which is what let this gate go stale for two days.
 //! - **The pixels of the two variants are compared**, once, through a `Readback` pair, so
 //!   the run reports byte identity rather than assuming what `tests/retained_frame.rs`
 //!   asserts.
@@ -43,145 +45,50 @@
 use std::time::{Duration, Instant};
 
 use quorra_gpu::{Counters, Device, EncodeSource, Options, RetainedScene, Target, Viewport, wgpu};
-use quorra_scene::{
-    Affine, BlendMode, Color, Compose, FillRule, OutlineId, Paint, Point, Scene, SceneBuilder,
-    Segment,
-};
+use quorra_pages::{Archetype, DENSE_TEXT, GLYPH_PAGE, GlyphPage, Recorded};
+use quorra_scene::{Affine, OutlineId, Scene};
 
 /// The brief's window scale (§6.2): the size both baselines were measured at.
 const WIDTH: u32 = 1191;
 const HEIGHT: u32 = 1684;
 
-/// §6.2's page: dense text at the corpus's 99th percentile and its measured reuse —
-/// 4 320 placements over 818 outlines, 40 of them under a curve clip.
-const COMMANDS: u32 = 4_320;
-const DISTINCT: u32 = 818;
-const SEGMENTS: u32 = 12;
-const SIDE: f32 = 11.0;
-const CLIPS: u32 = 2;
-const CLIPPED: u32 = 40;
+/// §6.2's page: `quorra_pages::DENSE_TEXT`, the corpus's 99th percentile at its measured
+/// reuse — 4 320 placements over 818 outlines, 40 of them under a curve clip.
+///
+/// **This file carried a private copy of that page until 2026-08-17, and the copy is
+/// exactly what ADR 0060 exists for.** ADR 0057 changed what a clipped mark costs; the
+/// row copied in here still said 40 tiles for a page that had stopped drawing any, and
+/// this example **panicked at its own signature gate on `main` for two days** — nothing
+/// caught it, because `cargo test` neither builds nor runs an example.
+const SHAPE: &Archetype = &DENSE_TEXT;
 
-/// `tests/archetypes.rs`'s recorded row for dense text: commands, culled, distinct
-/// outlines, atlas keys, clip regions, tiles, layer textures. The gate on this
-/// example's scene being the archetype's scene.
-const BASELINE: [u32; 7] = [4320, 0, 818, 2164, 1, 40, 0];
-
-fn signature(counters: &Counters) -> [u32; 7] {
-    [
-        counters.commands,
-        counters.commands_culled,
-        counters.distinct_outlines,
-        counters.atlas_distinct_keys,
-        counters.clip_distinct_regions,
-        counters.tiles,
-        counters.layer_textures,
-    ]
-}
-
-/// A closed curve of `segments` cubics about the origin, `side` across — the shape a
-/// letterform has for costing purposes, as in `tests/archetypes.rs`.
-fn outline_of(segments: u32, side: f32) -> Vec<Segment> {
-    let radius = side * 0.5;
-    let mut path = vec![Segment::MoveTo(Point::new(-radius, 0.0))];
-    let steps = segments.max(3);
-    for step in 0..steps {
-        let from = (step as f32) / (steps as f32) * std::f32::consts::TAU;
-        let to = ((step + 1) as f32) / (steps as f32) * std::f32::consts::TAU;
-        let point = |angle: f32| Point::new(radius * angle.cos(), radius * angle.sin() * 1.3);
-        let (a, b) = (point(from), point(to));
-        path.push(Segment::CubicTo {
-            c1: Point::new(a.x + (b.x - a.x) * 0.35, a.y + (b.y - a.y) * 0.1),
-            c2: Point::new(a.x + (b.x - a.x) * 0.65, a.y + (b.y - a.y) * 0.9),
-            to: b,
-        });
+/// A frame's counters as the row `quorra-pages` records, field by named field.
+///
+/// The recorded row is no longer a copy: it is the page's own, the one
+/// `tests/archetypes.rs` compares against. Only the mapping is written twice, and a
+/// mapping that is wrong fails immediately rather than rotting.
+fn recorded(counters: &Counters) -> Recorded {
+    Recorded {
+        commands: u64::from(counters.commands),
+        commands_culled: u64::from(counters.commands_culled),
+        distinct_outlines: u64::from(counters.distinct_outlines),
+        atlas_distinct_keys: u64::from(counters.atlas_distinct_keys),
+        clip_distinct_regions: u64::from(counters.clip_distinct_regions),
+        tiles: u64::from(counters.tiles),
+        layer_textures: u64::from(counters.layer_textures),
+        clip_residue_regions: u64::from(counters.clip_residue_regions),
+        clip_residue_tiles: u64::from(counters.clip_residue_tiles),
+        coverage_texels: counters.coverage.texels,
     }
-    path.push(Segment::Close);
-    path
-}
-
-/// Where the `index`th command lands: a reading-order grid over the page.
-fn position(index: u32, side: f32) -> Affine {
-    let step = side + 3.5;
-    let columns = ((WIDTH as f32 - 16.0) / step).max(1.0) as u32;
-    let x = 8.0 + (index % columns) as f32 * step + side * 0.5;
-    let y = 12.0 + (index / columns) as f32 * (side + 4.25) + side * 0.5;
-    Affine::translate(x, y % (HEIGHT as f32 - 24.0))
-}
-
-/// The side of the `i`th outline — one statement of it, because the clip cutter below
-/// sizes a clip from the marks it will clip.
-fn outline_side(i: u32) -> f32 {
-    SIDE * (1.0 + (i % 5) as f32 * 0.05)
-}
-
-/// Which clip the `index`th command draws under: a run of consecutive marks in reading
-/// order, as in `tests/archetypes.rs`. Before 2026-08-17 the two clips sat on a grid of
-/// `side × 6` and met **0 of the 40** marks they clip, which is why this file's own
-/// signature gate had `40` tiles for a page that (once ADR 0057 stopped rasterising a
-/// tile for a mark its chain admits nothing of) drew none.
-fn clip_of(index: u32) -> usize {
-    ((index as usize) * (CLIPS as usize)) / (CLIPPED as usize)
-}
-
-/// The transform that puts clip `j`'s ellipse over the marks it clips.
-fn curve_clip(j: u32) -> Affine {
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for index in 0..CLIPPED {
-        if clip_of(index) != j as usize {
-            continue;
-        }
-        let at = position(index, SIDE);
-        let side = outline_side(index % DISTINCT);
-        let (hx, hy) = (side * 0.5, side * 0.65);
-        x0 = x0.min(at.e - hx);
-        y0 = y0.min(at.f - hy);
-        x1 = x1.max(at.e + hx);
-        y1 = y1.max(at.f + hy);
-    }
-    let side = outline_side(j % DISTINCT);
-    Affine::scale((x1 - x0) / side, (y1 - y0) / (side * 1.3))
-        .then(Affine::translate((x0 + x1) * 0.5, (y0 + y1) * 0.5))
 }
 
 /// The dense-text archetype, built on this device.
 fn build(device: &mut Device) -> Scene {
-    let outlines: Vec<OutlineId> = (0..DISTINCT)
-        .map(|i| {
-            device
-                .upload_outline(&outline_of(SEGMENTS, outline_side(i)))
-                .unwrap()
-        })
+    let outlines: Vec<OutlineId> = quorra_pages::outlines(SHAPE)
+        .iter()
+        .map(|path| device.upload_outline(path).expect("an archetype outline"))
         .collect();
-    let mut builder = SceneBuilder::new();
-    let clips: Vec<quorra_scene::ClipId> = (0..CLIPS)
-        .map(|i| {
-            builder
-                .clip(
-                    outlines[(i as usize) % outlines.len()],
-                    curve_clip(i),
-                    FillRule::NonZero,
-                    None,
-                )
-                .unwrap()
-        })
-        .collect();
-    let ink = Color::new(0.12, 0.13, 0.16, 1.0);
-    for index in 0..COMMANDS {
-        let clip = (index < CLIPPED).then(|| clips[clip_of(index)]);
-        builder
-            .fill(
-                outlines[(index as usize) % outlines.len()],
-                position(index, SIDE),
-                FillRule::NonZero,
-                Paint::Solid(ink),
-                clip,
-                BlendMode::Normal,
-                Compose::SrcOver,
-                None,
-            )
-            .unwrap();
-    }
-    builder.finish()
+    quorra_pages::scene(SHAPE, &outlines, None).expect("the dense-text archetype builds")
 }
 
 /// One frame's host and device spans.
@@ -274,20 +181,10 @@ fn compare_pixels(device: &mut Device, scene: &Scene, retained: &mut RetainedSce
 /// which is the other regime — so this section carries its own page, and asserts the
 /// condition rather than trusting these numbers to keep meaning what they mean.
 const OVERFLOW_ATLAS: u64 = 256 * 1024;
-const OVERFLOW_DISTINCT: u32 = 107;
-const OVERFLOW_PLACEMENTS: u32 = 5_933;
 
-/// A viewport magnified about the dense page's middle — `examples/zoom.rs`'s own
-/// `zoomed`, so the two examples ask for the same frame: the same scene, four times the
-/// size, which is the frame a reader zoomed in is holding still.
-fn magnified(scale: f32) -> Affine {
-    Affine::translate(-580.0, -565.0)
-        .then(Affine::scale(scale, scale))
-        .then(Affine::translate(WIDTH as f32 / 2.0, HEIGHT as f32 / 2.0))
-}
-
-/// The overflow section's page: **`examples/zoom.rs`'s dense page, verbatim** — 5 933
-/// fills over 107 letterforms of five widths and seven heights, on a 14.5 × 15.25 grid.
+/// The overflow section's page: **`quorra_pages::GLYPH_PAGE`** — 5 933 fills over 107
+/// letterforms of five widths and seven heights, on a 14.5 × 15.25 grid, the same
+/// definition `examples/zoom.rs` and `examples/floor.rs` draw.
 ///
 /// Not the archetype above, and not a variation on it. The band this section measures is
 /// a relation between the tile sizes a page produces and the two divisions a shelf
@@ -295,42 +192,19 @@ fn magnified(scale: f32) -> Affine {
 /// different letterform changes the tile size, which moves the working set, which is how
 /// an instrument silently stops measuring what it names. The assertion at the end is the
 /// guard, and it is what caught two earlier substitutions of exactly this kind.
+///
+/// This file's copy of it said "verbatim" and was not: it drew in the *archetypes'* ink
+/// rather than the glyph page's. Nothing here reads a colour, which is why nobody
+/// noticed and why reconciling it moves no number (ADR 0060 §5).
+const OVERFLOW_PAGE: &GlyphPage = &GLYPH_PAGE;
+
+/// The overflow page, built on this device.
 fn overflow_page(device: &mut Device) -> Scene {
-    let outlines: Vec<OutlineId> = (0..OVERFLOW_DISTINCT)
-        .map(|i| {
-            let (w, h) = (6.0 + (i % 5) as f32, 8.0 + (i % 7) as f32);
-            device
-                .upload_outline(&[
-                    Segment::MoveTo(Point::new(0.3, 0.2)),
-                    Segment::LineTo(Point::new(w, 0.0)),
-                    Segment::CubicTo {
-                        c1: Point::new(w + 1.0, h * 0.3),
-                        c2: Point::new(w + 1.0, h * 0.7),
-                        to: Point::new(w * 0.8, h),
-                    },
-                    Segment::LineTo(Point::new(0.0, h * 0.9)),
-                    Segment::Close,
-                ])
-                .unwrap()
-        })
+    let outlines: Vec<OutlineId> = quorra_pages::glyph_outlines(OVERFLOW_PAGE)
+        .iter()
+        .map(|path| device.upload_outline(path).expect("a letterform"))
         .collect();
-    let ink = Color::new(0.12, 0.13, 0.16, 1.0);
-    let mut builder = SceneBuilder::new();
-    for index in 0..OVERFLOW_PLACEMENTS {
-        builder
-            .fill(
-                outlines[(index as usize) % outlines.len()],
-                Affine::translate((index % 80) as f32 * 14.5, (index / 80) as f32 * 15.25),
-                FillRule::NonZero,
-                Paint::Solid(ink),
-                None,
-                BlendMode::Normal,
-                Compose::SrcOver,
-                None,
-            )
-            .unwrap();
-    }
-    builder.finish()
+    quorra_pages::glyph_scene(OVERFLOW_PAGE, &outlines).expect("the glyph page builds")
 }
 
 /// **Does the atlas settle?** — the second measurement in this file, and a property
@@ -353,7 +227,9 @@ fn overflow_section(adapter: Option<&str>, frames: usize) {
     .expect("an adapter");
     device.wait_until_warm();
     let scene = overflow_page(&mut device);
-    let viewport = Viewport::full(WIDTH, HEIGHT, magnified(4.0));
+    // `quorra_pages::zoomed` — `examples/zoom.rs` asks for the same frame through the
+    // same function, so the two examples magnify one page about one point.
+    let viewport = Viewport::full(WIDTH, HEIGHT, quorra_pages::zoomed(OVERFLOW_PAGE, 4.0));
     let mut retained = RetainedScene::new(scene);
 
     let mut sources = String::new();
@@ -373,8 +249,8 @@ fn overflow_section(adapter: Option<&str>, frames: usize) {
     }
     let counters = last.expect("at least one frame");
     println!(
-        "\na page the atlas cannot hold — {OVERFLOW_DISTINCT} letterforms at 4×, atlas \
-         {OVERFLOW_ATLAS} bytes"
+        "\na page the atlas cannot hold — {} letterforms at 4×, atlas {OVERFLOW_ATLAS} bytes",
+        OVERFLOW_PAGE.distinct
     );
     println!(
         "  working set {} bytes over {} distinct keys; {} resident, {} tiles on the scratch sheet",
@@ -391,10 +267,90 @@ fn overflow_section(adapter: Option<&str>, frames: usize) {
     );
 }
 
+/// What one round of the round-robin needs. A struct rather than six arguments, because
+/// five of them are borrows of the same device and the order they are passed in is not
+/// something a reader should have to remember.
+struct RoundRobin<'a> {
+    device: &'a mut Device,
+    scene: &'a Scene,
+    retained: &'a mut RetainedScene,
+    texture: &'a wgpu::Texture,
+    viewport: &'a Viewport<'a>,
+    rounds: usize,
+}
+
+/// One frame of each variant per round, and the two assertions that say the comparison
+/// is a comparison: the encoded frame encoded, and the replayed one replayed and counted
+/// what the encode counted.
+fn round_robin(run: &mut RoundRobin<'_>) -> (Vec<Record>, Vec<Record>, Counters) {
+    let mut encoded_runs: Vec<Record> = Vec::with_capacity(run.rounds);
+    let mut replayed_runs: Vec<Record> = Vec::with_capacity(run.rounds);
+    let mut counters: Option<Counters> = None;
+    let record = |wall, frame: &quorra_gpu::Frame| Record {
+        wall,
+        encode: frame.timings().encode,
+        upload: frame.timings().upload,
+        execute: frame.timings().execute,
+    };
+    for _ in 0..run.rounds {
+        let started = Instant::now();
+        let frame = run
+            .device
+            .render(run.scene, run.viewport, Target::Texture(run.texture))
+            .expect("the dense-text archetype draws");
+        let wall = started.elapsed();
+        assert_eq!(frame.encode_source(), EncodeSource::Encoded);
+        counters.get_or_insert_with(|| frame.counters());
+        encoded_runs.push(record(wall, &frame));
+
+        let started = Instant::now();
+        let frame = run
+            .device
+            .render_retained(run.retained, run.viewport, Target::Texture(run.texture))
+            .expect("a retained frame draws");
+        let wall = started.elapsed();
+        assert_eq!(
+            frame.encode_source(),
+            EncodeSource::Replayed,
+            "the retained frame re-encoded: something invalidated it, and the numbers \
+             reported would be two encodes rather than a comparison"
+        );
+        // The recorded row rather than the whole of `Counters`: `bytes_uploaded` is about
+        // *this* frame's transfers, and after the warm-up neither variant uploads a glyph
+        // tile, so the two agree here — but that is a property of a warm atlas, not of a
+        // replay, and asserting it would be asserting the wrong thing.
+        assert_eq!(
+            recorded(&frame.counters()),
+            recorded(&counters.expect("the encoded frame ran first")),
+            "a replayed frame counts what the encode counted"
+        );
+        replayed_runs.push(record(wall, &frame));
+    }
+    (
+        encoded_runs,
+        replayed_runs,
+        counters.expect("at least one round"),
+    )
+}
+
+/// `--check`: the smallest run that executes every assertion this example makes.
+///
+/// One round of the round-robin and one frame of the overflow section, which reaches
+/// every `assert!` in the file. `cargo test` neither builds nor runs an example, so an
+/// assertion here is a comment until something runs it — and this is the file that
+/// proved it, by panicking at its own signature gate on `main` for two days (ADR 0060).
+/// CI runs `--check` for every example named in `.github/workflows/ci.yml`.
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let check = args.iter().any(|arg| arg == "--check");
+    args.retain(|arg| arg != "--check");
+    let mut args = args.into_iter();
     let adapter = args.next();
-    let rounds: usize = args.next().and_then(|r| r.parse().ok()).unwrap_or(40);
+    let rounds: usize = if check {
+        1
+    } else {
+        args.next().and_then(|r| r.parse().ok()).unwrap_or(40)
+    };
 
     let mut device = Device::headless(&Options {
         adapter: adapter.clone(),
@@ -403,7 +359,10 @@ fn main() {
     .expect("an adapter");
     device.wait_until_warm();
     println!("adapter: {}", device.description());
-    println!("scene:   dense text, {COMMANDS} commands over {DISTINCT} outlines, {WIDTH}x{HEIGHT}");
+    println!(
+        "scene:   {}, {} commands over {} outlines, {WIDTH}x{HEIGHT}",
+        SHAPE.name, SHAPE.commands, SHAPE.distinct
+    );
 
     let scene = build(&mut device);
     let mut retained = RetainedScene::new(scene.clone());
@@ -421,59 +380,22 @@ fn main() {
             .unwrap();
     }
 
-    let mut encoded_runs: Vec<Record> = Vec::with_capacity(rounds);
-    let mut replayed_runs: Vec<Record> = Vec::with_capacity(rounds);
-    let mut counters: Option<Counters> = None;
+    let (encoded_runs, replayed_runs, counters) = round_robin(&mut RoundRobin {
+        device: &mut device,
+        scene: &scene,
+        retained: &mut retained,
+        texture: &texture,
+        viewport: &viewport,
+        rounds,
+    });
 
-    for _ in 0..rounds {
-        let started = Instant::now();
-        let frame = device
-            .render(&scene, &viewport, Target::Texture(&texture))
-            .unwrap();
-        let wall = started.elapsed();
-        assert_eq!(frame.encode_source(), EncodeSource::Encoded);
-        counters.get_or_insert_with(|| frame.counters());
-        encoded_runs.push(Record {
-            wall,
-            encode: frame.timings().encode,
-            upload: frame.timings().upload,
-            execute: frame.timings().execute,
-        });
-
-        let started = Instant::now();
-        let frame = device
-            .render_retained(&mut retained, &viewport, Target::Texture(&texture))
-            .unwrap();
-        let wall = started.elapsed();
-        assert_eq!(
-            frame.encode_source(),
-            EncodeSource::Replayed,
-            "the retained frame re-encoded: something invalidated it, and the numbers \
-             below would be two encodes rather than a comparison"
-        );
-        // The signature rather than the whole row: `bytes_uploaded` is about *this*
-        // frame's transfers, and after the warm-up neither variant uploads a glyph tile,
-        // so the two agree here — but that is a property of a warm atlas, not of a
-        // replay, and asserting it would be asserting the wrong thing.
-        assert_eq!(
-            signature(&frame.counters()),
-            signature(&counters.unwrap()),
-            "a replayed frame counts what the encode counted"
-        );
-        replayed_runs.push(Record {
-            wall,
-            encode: frame.timings().encode,
-            upload: frame.timings().upload,
-            execute: frame.timings().execute,
-        });
-    }
-
-    let counters = counters.unwrap();
+    // The signature gate — the one that rotted. The row is no longer a copy: it is the
+    // page's own, and a change to what the page costs now moves the row this compares
+    // against and the row `tests/archetypes.rs` compares against in the same edit.
     assert_eq!(
-        signature(&counters),
-        BASELINE,
-        "this is not the dense-text archetype: (commands, culled, outlines, atlas keys, \
-         clip regions, tiles, layer textures)"
+        recorded(&counters),
+        SHAPE.recorded.expect("dense text is a priced page"),
+        "this is not `quorra_pages::DENSE_TEXT` as that crate records it"
     );
 
     compare_pixels(&mut device, &scene, &mut retained);
@@ -481,6 +403,18 @@ fn main() {
         "retained: {} bytes held by the handle",
         retained.retained_bytes()
     );
+
+    if check {
+        // One frame is enough to reach the overflow section's assertion; twelve is what
+        // makes its `E...........` readable, and a one-round table is not a measurement.
+        overflow_section(adapter.as_deref(), 1);
+        println!(
+            "check: the dense-text archetype's row holds, a replay counts what the \
+                  encode counted, and the atlas refused a tile for a working set that fits"
+        );
+        return;
+    }
+
     println!("load average: {}", load_average());
     println!("rounds: {rounds}, round-robin, one frame of each per round\n");
 
