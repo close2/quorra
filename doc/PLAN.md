@@ -38,15 +38,18 @@ row, since a number without one is not evidence.
 | — execute: the GPU is about 4 % of the frame | 0.071 ms | same |
 | the same frame, unchanged, replayed rather than encoded | **0.174 ms** against 1.107 | `examples/retained.rs`, headless RADV, ADR 0048 |
 | — and now also when the page's glyph tiles overflow the atlas | 1 encode per page, not 1 per frame | `examples/retained.rs`'s overflow section, ADR 0050 |
-| artwork — the corpus's p99 clip shape — steady | 43.3 ms, geometry 35.4 of it | `surface_measure`, RADV at the real display, 2026-08-14 — **before ADR 0049**, and not re-run on the display since |
-| — the same page's encode, before → after ADR 0049 | geometry **37.8 → 28.9 ms**, encode 46.3 → 37.2 | `examples/residue_clip.rs`, headless RADV into a texture, three alternating rounds, minima, load 3.8–4.8, 2026-08-15 |
+| artwork — the corpus's p99 clip shape — steady | 43.3 ms, geometry 35.4 of it | `surface_measure`, RADV at the real display, 2026-08-14 — **stale in two ways**: before ADR 0049, and on the page as it was before its curve clips were cut around its marks (2026-08-17). Owed a re-run on the display |
+| — the same page's encode, before → after ADR 0049 | geometry **37.8 → 28.9 ms**, encode 46.3 → 37.2 | `examples/residue_clip.rs`, 2026-08-15 — **a number about a page whose clips met 8 of the 600 marks they clipped.** The mechanism and the saving were real; the fixture was re-cut on 2026-08-17 and no number taken on it before that date is comparable with one taken after (`doc/notes-clipped-instrument.md`) |
+| — what the residue multiply costs that page, and where the clock puts it | **4 683 942 Ir, 0.62 % of the encode**; inside `geometry` since ADR 0023's amendment | callgrind on the re-cut page, counters checked against `tests/archetypes.rs`, 2026-08-17. It was reported as `recording` until then, so every `recording` share published for a clipped page was too large by it |
+| the artwork and dense-text archetypes' curve clips, before the re-cut | overlapped **8 of 600** and **0 of 40** of the marks they clipped | counted from the generator's own arithmetic, 2026-08-17 (ADR 0057 found it) — a mark whose chain admits nothing still got a mark-sized tile multiplied by zero, so the rows looked like they gated the residue lane for two ADRs |
 | first frames, presenting | pipeline compiles: **none**, eight of eight | same; ADR 0043 |
 | a path-heavy page's encode geometry, 1 thread → 24 | **309.0 → 46.9 ms** (encode 406.8 → 132.2) | `examples/encode_threads.rs`, llvmpipe, minima of five round-robin, load 17.6, ADR 0054 |
 | a generated function shader's compile, at the 482-instruction witness's length | **8.25 ms** RADV, 6.88 ms llvmpipe | `examples/function_compile.rs`, minima of 12 round-robin rounds × 3 alternating runs per adapter, load 5.1–8.6, 2026-08-15 |
 | — the floor a *one*-instruction program still pays | 2.67 / 2.04 ms | same; that is `function_lane.wgsl` parsed and built, not the program |
-| the caller's corpus at scale 1 | **931** agree / 23 differ / 2 refused / 18 not comparable | their tree, one copy, 2026-08-15 |
-| the caller's corpus at scale 4 | **936** / 10 / 5 / 23 | same copy, same hour |
-| — the same lane re-run a day later, against an unchanged quorra | 936 / **11 / 4** / 23 | a second copy, 2026-08-15 (ADR 0055): their tree moved a page from *refused* to *differs*, which is why a count in an older document is never a baseline |
+| the caller's corpus at scale 1 | **931** agree / 23 differ / 2 refused / 18 not comparable (GPU lane 929 / 25 / 2 / 18) | their tree, one copy, 2026-08-17 |
+| the caller's corpus at scale 4 | **937** / 11 / **3** / 23 (GPU lane **938** / 10 / **3** / 23) | same copy, same day, ADR 0057 |
+| — what ADR 0057 moved there | `bug1703683_page2_reduced.pdf` refused → **agrees**; `issue1905.pdf` still refused and now names its sheet | zero page lines move at scale 1; one more at scale 4, `inks.pdf` on the GPU lane by a hundred-thousandth of SSIM |
+| — and a count in an older document is still never a baseline | 936 / 10 / 5 → 936 / 11 / 4 for an *unchanged* quorra, a day apart | ADR 0055, 2026-08-15: their tree moved a page from *refused* to *differs* under us |
 
 **The release matrix for `a64a908 → a4380e2`** — 72 commits, one copy of their tree, 29
 minutes, RADV, both lanes, both scales, taken 2026-08-16 00:04–00:33:
@@ -125,24 +128,67 @@ a single render, where the old arrangement allows none** — the finished raster
 — so that number is the owner's on the real display. §1.7's determinism is untouched: nothing
 on this path draws a page, and the corpus and the oracle both use `Target::Readback`.
 
+**And a layer now draws its own rectangle rather than the whole window** (ADR 0058,
+2026-08-17, measured in `doc/notes-present-quad.md`). At the caller's own 2048×2560 window a
+page, a selection, a sidebar and a modal card cost **20 971 520 fragments**, of which
+**10 711 584 — 51 %** — are shaded to no effect once a host sizes its layer textures to their
+content, and 1 766 624 (8.4 %) even when it does not. The decision was taken on the **count**,
+not on a clock: the durations that agree with it vary by more than the saving between runs on
+this machine, and one llvmpipe cell has the smaller arrangement slower. The bytes are
+identical — 0 differing pixels of 5 242 880 on both adapters — and no public API moved. Two
+honest halves: the reprojection case ADR 0056 exists for wins nothing (95.8 %), and **before
+this change a host sizing its layers to their content bought nothing at all**, because the
+pass cost `layers × window` whatever a layer's size — a cost the API hid from the only person
+who could remove it.
+
 ### What is still open
 
-- **The residue-clip seam, half taken.** The residue itself is now rasterised once per
-  chain rather than once per clipped command (ADR 0049): artwork's encode geometry is
-  37.8 → 28.9 ms and its 600 residue rasterisations are 185. What is *not* taken is the
-  reason two pages at 4× refuse with `ScratchExhausted` — that is the coverage **sheet**,
-  one tile per clipped command, and ADR 0049 leaves `Counters::tiles` unchanged on every
-  archetype on purpose. `HANDOVER.md` item 2 holds what is left, and it is tiling work.
-  (The refusal count in this bullet used to read "three pages at 4× and one at scale 1",
-  and "the only reason any corpus frame is refused". Both were too strong: today it is
-  **two** at 4× and none at scale 1, and the corpus's other three refusals are a different
-  budget or a correct clause refusal each.)
+- **The residue-clip seam, taken.** The residue is rasterised once per chain rather than
+  once per clipped command (ADR 0049), and a clipped mark's coverage tile is now bounded
+  by its chain's own device box (ADR 0057) — which took `bug1703683_page2_reduced.pdf`
+  from refused to agreeing with the oracle at 4× on both lanes, with **zero page lines
+  moving at scale 1**. **ADR 0049's 37.8 → 28.9 ms is withdrawn as a demonstration**: it
+  was measured on a page whose 185 clips met 8 of the 600 marks they clipped, so most of
+  what it removed was repeated rasterisation of tiles that were then multiplied by zero.
+  The mechanism and the saving are real and unaffected; what the fixture *showed* was
+  narrower than the row implied. On the page that now exists, artwork reads **600 tiles,
+  66 residue regions and 384 per-tile rasterisations** — 450 rasterisations for 600
+  clipped commands, both branches of the admission rule gated by one page.
+  **One page still refuses at 4× and does so correctly**: `issue1905.pdf`, whose marks
+  *are* the page — seven fills wider than it under a rectangular clip that already bounds
+  them, 1 339 315 879 texels, no residue clip anywhere. Nothing on the tiling side draws
+  that inside a 256 MiB budget, and the question to ask the caller before spending a round
+  on it is whether it refuses in the product or only in the gate: the frame that refuses
+  is a whole page at 4× in one target, and a viewer's viewport is its window.
+- **Whether a soft mask is a knockout element's shape or its opacity is unresolved, and
+  the tree and ADR 0025 disagree about it.** `fs_shape` in `rect.wgsl`, `coverage.wgsl`
+  and `image.wgsl` multiplies the mark's soft mask into the shape it returns; ADR 0025's
+  text states the opposite ("§11.6.4.3's soft mask and §11.6.4.4's constant alpha are
+  *opacity*"). §11.6.4.3 makes it the `AIS` graphics-state flag's answer — "The mask may
+  serve as a source of either shape ( fm ) or opacity ( qm ) values" — and **nothing in
+  this tree or the caller's display list carries `AIS`**. The two readings differ only for
+  a masked element inside a knockout group. Found by reading on 2026-08-17
+  (`doc/notes-hayro-questions.md` §2); it needs the caller's answer, an ADR and a corpus
+  run. `doc/notes-function-wiring.md` §4.5 flagged the same thing for one lane; it is five.
+- **The suite's scale coverage, half taken.** `tests/scale_invariance.rs` (2026-08-17)
+  renders one fixture at 1×, 2× and 4× and asserts that ink is area, over a fill, a stroke
+  and a residue-clipped fill. What is *not* taken is the reference comparison: the only
+  test that checks this tree's pixels against the independent CPU rasteriser is `m1.rs`'s
+  golden, and it is scale 1 only. Before that round **187 of the suite's 198 viewports
+  were scale 1** and no test walked a range at all — which is the caller's hayro #40
+  pointed at our own instrument rather than at theirs.
 - **The caller's adoption round** — they pin twenty commits back, three sections of their
   `QUORRA_FEEDBACK.md` have drafted answers waiting, and `RetainedScene` is an API they
   must take up rather than merely receive. `HANDOVER.md` item 1. Two `Counters` fields
   land with ADR 0050 — `atlas_working_set_bytes` and `atlas_repacked` — and one
-  `DeviceError` variant, `ResourceIdsExhausted`; all three are additive, and
-  `doc/api-change-retained-atlas.md` is what the bump owes them.
+  `DeviceError` variant, `ResourceIdsExhausted`; all three are additive. What the bump
+  owes them for those is `QUORRA_API_2026_08_15.md` §0 in their tree and this file — the
+  `api-change-*.md` drafts were transfer documents and were deleted in `688449d` once
+  folded in, so a citation of `doc/api-change-retained-atlas.md` here was pointing at
+  nothing from that commit until 2026-08-17. The bump now also carries `CoverageSheet`
+  and `Counters::coverage` with `RenderError::ScratchExhausted`'s three new fields
+  (ADR 0057), `RenderError::ViewportTransformTooLarge`, and one `SceneError` addition,
+  `InvalidImageAlpha`, whose transfer document is `doc/api-change-image-alpha.md`.
 - **A paint the device evaluates — built** (ADR 0053, 2026-08-15). `Paint::Function` is a
   §7.10.5 type 4 program uploaded once, admitted at `Device::upload_function`, generated
   into a WGSL shader cached by the program's content hash, and drawn through the rare

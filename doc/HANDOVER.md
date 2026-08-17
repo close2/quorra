@@ -12,6 +12,44 @@ happened, here if it changes how you *work*.
 Nine milestones are done; the swap landed on 2026-08-03 and the caller consumes this
 library as a git dependency, pinned by their `Cargo.lock`.
 
+**The 2026-08-16/17 improvement rounds are merged and unpushed.** Nine rounds in parallel
+worktrees: ADR 0057 (a clipped mark's tile is bounded by its chain's box — one corpus page
+refused → agrees), ADR 0058 (a present layer draws its own rectangle), ADR 0059 (a gate over
+a private list lives inside the crate), the `error.rs` split, ADR 0023's amendment (the
+residue multiply is geometry, not recording), the archetype re-cut, and the caller's
+`HAYRO_ISSUES_FOR_QUORRA.md` answered in full. The suite went **445 → 501** tests, every new
+gate verified able to fail.
+
+**Four defects that no test in the tree could see**, and they are the reason the rounds were
+worth running rather than the features:
+
+- **`raster::direction` overflowed above `1.9e19`** — eight orders below the contract's own
+  `1e27` device delta — to an infinite length, a `(0,0)` normal and **a stroke drawn as
+  nothing**; below `1.1e-22` it underflowed to NaN geometry, because `stroke_polylines`
+  dedupes by testing coordinates for *equality* and two points `1e-30` apart pass that.
+- **`raster::accumulate_edge`'s slope overflowed** for a wide, vertically thin edge to a NaN
+  that survived the prefix sum into a solid row. See the NaN trap below; this is the one that
+  drew a plausible wrong page.
+- **`tests/shader_copies.rs` named 8 shaders where `src/shaders.rs` names 10.** Missing were
+  `present.wgsl` and `function_lane.wgsl` — and `function_lane.wgsl` carries the sixth
+  `soft_mask_value` and the sameness promise. The gate compared five, asserted five, found
+  five and passed, on every run since ADR 0053.
+- **The archetype fixture's curve clips met 0 of 40 and 8 of 600 of the marks they clipped**,
+  so the signature looked like it gated the residue lane for two ADRs.
+
+**Three claims in our own documents were withdrawn or corrected**: `recording` being 56 % the
+residue multiply on a clipped page (re-measured: **0.62 % of the encode**, and the old figure
+was taken on the fixture above *and* counted a bounding scan that is recording); ADR 0049's
+37.8 → 28.9 ms as a *demonstration* (mechanism and saving stand); and three citations of
+§11.4.5 for a group's constant alpha, which is §11.6.4.4's in §11.3.7.2's range.
+
+**What needs the owner, not another round:** the caller must drop
+`bug1703683_page2_reduced.pdf` from their scale-4 `REFUSED` ratchet; `issue1905.pdf` needs
+their answer on whether it refuses in the product or only in the gate; the `AIS` question in
+`PLAN.md` needs their answer before it can become an ADR; two clause corrections go back to
+their `HAYRO_ISSUES_FOR_QUORRA.md` (`doc/notes-hayro-coverage-map.md` has both); and ADR 0058
+wants one number from the real display — what share of a refresh the present pass takes.
+
 **The 2026-08-15 release round is pushed** (`a64a908`): ADR 0047 (a document's rectangles
 reach the rectangle lane), ADR 0048 (`RetainedScene`), ADR 0049 (a clip chain's residue
 rasterised once, and the border-cut defect under it), ADR 0050 (a page too large for its
@@ -176,7 +214,42 @@ ADR 0025's `DestOut`/`Plus` stages are compiled and selected but never drawn.
 Do not build the interpreter shape. It is 133 ms against 0.060, it costs 596 ms–4.5 s of
 cold compile against 6.3 ms, and at 4× it lost the device.
 
-### 2. A page-sized coverage tile per clipped shape — **not** multi-sheet passes
+### 2. The tiling seam — **taken** (ADR 0057); one page and one question are what is left
+
+*(This was **item 5** while three finished items still stood above it, and ADR 0048 and
+`doc/feedback-answers-draft.md` both cite it under that number. What follows the horizontal
+rule is the item as it stood before it was taken, kept because its measurements retired three
+candidate schemes with numbers rather than with argument.)*
+
+**Built and corpus-clean, 2026-08-17.** A clipped mark's coverage tile is bounded by its
+chain's own device box — the links' control hulls, taken from `HullMemo` at the moment the
+chain is resolved, so no flattening, no second pass, and **nothing paid by a page with no
+residue clip**. `bug1703683_page2_reduced.pdf` goes from **refused to agreeing with the
+oracle** at 4× on both lanes (CPU 936/11/4/23 → 937/11/3/23, GPU 937/10/4/23 → 938/10/3/23);
+zero page lines move at scale 1 in either lane, and one moves at scale 4 — `inks.pdf` on the
+GPU lane by a hundred-thousandth of SSIM, its mean and worst tile unchanged.
+
+**Both instrument debts are paid**, through one additive type: `CoverageSheet`, reported as
+`Counters::coverage` on a drawn frame and inside
+`RenderError::ScratchExhausted { limit, sheet, tile_width, tile_height }` on a refused one.
+Attaching a whole `Counters` to a refusal was considered and refused — a `Counters` from a
+half-finished walk is numbers about a frame that does not exist, and principle 6 does not
+weaken when the frame is an error.
+
+**What is left, in order:**
+
+- **`issue1905.pdf` at 4× still refuses, and correctly.** Its marks *are* the page:
+  1 339 315 879 texels, no residue clip anywhere. **Ask the caller first** whether it refuses
+  in the product or only in the gate — the frame that refuses is a whole page at 4× in one
+  target, and a viewer's viewport is its window. That answer decides whether this half of the
+  seam is worth any work at all.
+- **The caller must re-baseline their scale-4 `REFUSED` list**, dropping
+  `bug1703683_page2_reduced.pdf`. Their ratchet fails loudly with both lists printed, which
+  is it doing its job.
+
+---
+
+### 2 (as it stood). A page-sized coverage tile per clipped shape — **not** multi-sheet passes
 
 *(This was **item 5** while three finished items still stood above it, and ADR 0048 and
 `doc/feedback-answers-draft.md` both cite it under that number.)*
@@ -282,19 +355,33 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
 
 ### Small debts, none blocking
 
-- **`error.rs` is 558 lines** and `encode/parallel.rs` 532 — the two files past the ~500-line
-  smell. `error.rs` grew with ADR 0056's four new variants and is the next split candidate.
-- **`fill_solid`'s duplicate outline lookup is priced**: 9 514 587 instructions on the
-  caller's page (2.31 % of its `recording`), 711 286 on dense text (5.79 %). It still needs
-  the lifetime that fights `&mut self`, which is why it is a round and not an edit.
-- **The present pass draws a full-screen triangle per layer** rather than a transformed
-  bounding quad. Nothing has measured it; on a page-sized layer they are the same, and on a
-  small chrome layer they are not.
-- **`encode/parallel.rs` at 532 lines is one of two source files past the ~500-line smell.**
-  `encode.rs` is 435 lines over eleven new modules (`doc/notes-encode-split.md`), `device.rs`
-  is 235 over eleven, and the dispatch now has one module per command arm — `rect`, `fill`,
-  `stroke`, `rare`, `layer` — which is the shape the next lane should be added in.
-  `parallel.rs` was left because ADR 0054 had landed in it two commits earlier.
+- **`error.rs` is split** — a map over seven private modules named for the subsystem that
+  raises each refusal (`doc/notes-error-split.md`, ADR 0051's shape). It moved no behaviour:
+  the same test names before and after, archetype counters identical, and the seven bodies
+  diff against the old file in five hunks that are all doc text. The decline was argued
+  first and lost to three facts: five of its seven vocabularies are raised in exactly one
+  subsystem each, its module comment was already eight lines of map, and three commits had
+  added a whole vocabulary at a stroke.
+- **The list of files past the ~500-line smell was measured, and it named the wrong files.**
+  Counted to the `#[cfg(test)]` module, `raster.rs` is **810** and `pipeline.rs` **573**;
+  nothing else in `quorra-gpu` is over 500, and `encode/parallel.rs` — which this list called
+  one of the two biggest — is **417** (532 whole). Neither of the two real ones has been read
+  for this purpose. `raster.rs` is one stated responsibility and its module comment says so,
+  which CLAUDE.md explicitly permits; read before splitting.
+- **`max_frame_bytes` is not the host-memory ceiling its name suggests.** `charge_tile`
+  charges `width × height` bytes; `fill_mask` holds an `f32` accumulator of
+  `(width + 1) × height` *and* the coverage bytes, so the peak is **5×** the charge. Priced,
+  not changed — moving the constant moves which pages refuse. `doc/notes-ceilings-audit.md` §1.
+- **The frame budget's pre-check counts top-level commands only**, while `Scene::cost().commands`
+  counts through group nesting. Not a bomb (the instance streams are smaller than the
+  `Command`s the caller already holds), but the two numbers differ for a nested scene and
+  `FrameBudgetExceeded`'s `needed` is the smaller one.
+- **`commands_culled` does not count a mark whose residue chain admits nothing.** ADR 0057
+  drops those marks from the sheet, so they cost no coverage; the *count* is missing, and
+  `encode/device_space.rs`'s cull still tests `rect` rather than `mark_bounds` for the same
+  reason — moving a caller-visible number is its own decision with its own measurement.
+- **The four examples that copy an archetype page still carry private copies of it.** One
+  page under one name lives in five places; see the trap below for what that already cost.
 - **Four things the `encode.rs` split found and left**, in `doc/notes-encode-split.md` §5:
   `push_op`'s doc comment is two openings for one function — the same defect this file's
   traps record from `take_pass_query`, now in `encode/plan.rs`; `CULL_MARGIN`'s comment cites
@@ -361,6 +448,12 @@ names.
   `tests/archetypes.rs` before believing any of it** — that is what says the harness encoded
   §6.2's page. Delete the harness with the round; `Cargo.toml`'s note on `criterion` is the
   standing decision that a benchmark harness does not live in this tree.
+  **Take the A/B without the `#[inline(never)]` seams when the question is "what does this
+  change cost", and with them only when the question is "what is it made of"**: `lto = "fat"`
+  inlines the walk either way, so the delta between two unseamed builds is the delta the
+  caller gets, and the seams' 0.07–0.20 % distortion buys nothing. Two unseamed builds
+  reproduced a seamed round's per-item prices to within 2.5 % on three pages
+  (`doc/notes-fill-solid-lookup.md` §1).
 - **What a generated shader costs to compile**: `examples/function_compile.rs` — a §7.10.5
   program's shader, timed by the program's length. It reads a **direct span** that
   `PipelineStore::function_pipeline` already brackets rather than a subtraction, its own
@@ -369,11 +462,23 @@ names.
   RADV's on-disk cache keys on SPIR-V — the trap that cost the spike a round.
 - **A page of curve-clipped marks**: `examples/residue_clip.rs` — the artwork archetype,
   headless into a texture, `instrument_encode` on, minima of twenty steady frames with the
-  first reported apart and the load average printed beside them. It prints
-  `clip_residue_regions` and `clip_residue_tiles` with the clocks, which is what makes two
-  runs on a loaded machine comparable at all: the counters are exact functions of the
-  scene. Two builds of it cannot be round-robined inside one process, so the A/B is a
-  `git checkout` between the base and the change, three rounds each, alternating.
+  first reported apart and the load average printed beside them. It prints **all three
+  phases** and the sheet's coverage texels, plus `clip_residue_regions` and
+  `clip_residue_tiles`, which is what makes two runs on a loaded machine comparable at
+  all: the counters are exact functions of the scene. **Read the `fastest encode` line
+  rather than the per-phase minima** — the minimum of a remainder across twenty frames is
+  not the remainder of the minimum. Two builds of it cannot be round-robined inside one
+  process, so the A/B is a `git checkout` between the base and the change, three rounds
+  each, alternating. **Its page was re-cut on 2026-08-17** and no number taken on it before
+  that date is comparable with one taken after.
+- **What a present pass costs**: a **count**, and `doc/notes-present-quad.md` §2 is the
+  arithmetic — pixel centres whose inverse-mapped point lands inside `[0, source)`, per
+  layer, against the target. A throwaway example that also timed it with timestamp queries
+  was run, read and deleted (ADR 0058); rebuild it the same way if a second question needs
+  it, holding the retired arrangement inline so both can be round-robined in **one** process
+  rather than across a `git checkout`. **Do not decide on its durations**: on the page-only
+  arrangement llvmpipe read the 4 %-smaller pass 14 % slower in one run and 0.04 % faster in
+  another.
 - **Whether the atlas settles**: `examples/retained.rs`'s second section — twelve retained
   frames of a page whose tiles overflow a stated atlas budget, printed as a string of `E`
   (encoded) and `.` (replayed). A **property, not a clock**, so it reads the same at load
@@ -495,6 +600,73 @@ new gate *in both directions* — a test that passes proves only that a test exi
 **A fixture that names a lane should say which lane it means.** ADR 0047 found three tests in
 `m45.rs` using a rectangle as a stand-in glyph: one failed, and two would have gone on
 passing while comparing one lane with itself.
+
+**A claim that something cannot be done is a claim, and it decays.** "`fill_solid`'s duplicate
+lookup needs a lifetime that fights `&mut self`" was written once from a reading, and travelled
+from `notes-encode-split.md` §5 through `notes-recording-shares.md` §5 into this file's debt
+list, gaining a price on the way but never a compile. It was wrong: the encoder holds the store
+as `&'a ResourceStore`, so a borrow out of it keeps no loan on `self`, and the whole change is
+one struct field plus naming a lifetime the `impl` block already had. Two functions in the same
+file were already holding that borrow across `&mut self` calls, which is evidence a reader had
+in front of them for two rounds. **Cost to disprove: one edit and one `cargo build`.** Before
+quoting a "cannot" forward a third time, spend the five minutes.
+
+**A clip that overlaps nothing looks exactly like a clip that works.** `tests/archetypes.rs`
+placed its curve clips on a grid of step `side × 6` and its marks on a grid of step `side`:
+**0 of 40** and **8 of 600** of the clipped commands had a mark that met its clip. The rows read
+40 and 600 tiles and 2 and 185 residue regions anyway, because a mark whose chain admits nothing
+still got a mark-sized tile and multiplied it by zero — so the signature looked like it gated the
+residue lane for two ADRs, and `examples/residue_clip.rs` inherited it. ADR 0057's tile bound is
+what made it visible, four rounds later. Same family as "a determinism fixture that does not
+overlap is not a determinism fixture": **when a fixture's subject is an interaction, assert the
+interaction happened** — count the tiles, not the commands.
+
+**A gate whose assertion is an absence needs a control.** `tests/no_ink.rs` asserts that four
+kinds of "nothing" leave the target byte-identical. An ink floor planted in `coverage_at` failed
+one of them in all four contexts and left the other three **passing** — an empty clip is culled
+at encode, a zero-area rectangle produces a quad with no fragments, a zero-area outline produces
+no coverage byte, and none of the three ever reaches a fragment shader. "The target did not
+change" reads the same whether the fixture answered the question or never drew anything. The
+remedy is in the file:
+`the_marks_this_file_asserts_are_invisible_are_visible_when_they_are_given_ink` restores each
+mark's one nothing-making property and asserts it *does* reach the target.
+
+**A gate on a fixture can be wrong in exactly the way the fixture was.** The first version of
+`a_curve_clip_clips_the_marks_that_draw_under_it` compared each mark against the box its clip was
+*built from*, which is an identity: it passed with the clips forced back to the far side of the
+page. Forcing the defect is the only thing that told the two apart — **a gate verified in one
+direction is not verified.**
+
+**A fixture copied into an example is a fixture that has to be re-cut in both places.** Four
+examples carry private copies of `tests/archetypes.rs`'s pages. When ADR 0057 changed what dense
+text draws, `examples/retained.rs` kept asserting the old row and **panicked at its own signature
+gate on `main` for two days** — nothing caught it, because `cargo test` does not run examples. If
+you change a fixture, grep the examples; if you add a signature assertion to an example, remember
+that nothing runs it.
+
+**The minimum of a remainder is not the remainder of the minimum.** `encode: recording` is
+computed as `encode − geometry − staging`, so taking the minimum of each column across frames
+mixes three different frames and can hide a phase shift entirely. Read one frame's three parts
+together — `examples/residue_clip.rs`'s `fastest encode` line, not the per-phase minima.
+
+**A NaN is not a stopped frame.** `fill_mask`'s prefix sum carries a NaN to the end of its row,
+and the non-zero rule's `running.abs().min(1.0)` returns **1.0** for it, because `f32::min`
+returns the non-NaN operand. One invisible mark therefore paints its whole row solid, drawn, and
+reported as drawn. Any change that lets a non-finite value into the accumulation grid produces a
+plausible-looking wrong page rather than a failure — which is why `MAX_COORDINATE` now bounds the
+viewport transform as well as the scene's, and why `accumulate_edge` returns on a non-finite
+slope (`doc/notes-ceilings-audit.md` §2). Release **wraps**: `[profile.release]` sets `lto` and
+`codegen-units` and nothing else, so `overflow-checks` is cargo's default `false`.
+
+**A cross-worktree build can fail with another worktree's *source* in the error.** A `cargo test`
+failed with `E0027: missing field 'stencil' in Command::Image` against a field that exists nowhere
+in that worktree or at `HEAD`, and twice more with a `RenderError` variant that had just been
+added being "not found"; a sibling agent was building into `/home/AI/cargo-target/quorra` at the
+time, and re-running succeeded with no file changed. The existing shared-target-dir trap covers a
+stale *binary*; this is the same hazard producing a stale *compile error*, which reads like a
+defect in your own tree. Re-run before believing an error that names a symbol you cannot find,
+and take a private `CARGO_TARGET_DIR` for anything you will **report a gate result from** — not
+only for anything you read numbers from.
 
 **A WGSL compile error now fails the suite by name** (ADR 0042). It used to hang it: a
 reserved keyword in `blit.wgsl` panicked the warm-up thread inside wgpu, and every test file
