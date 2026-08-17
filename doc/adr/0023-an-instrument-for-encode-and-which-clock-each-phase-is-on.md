@@ -116,11 +116,15 @@ was too small.
 `encode/coverage.rs`'s `coverage_tile` opened a geometry span around `raster::fill_mask`
 and closed it there. The next thing it did was multiply the chain's residue into the tile
 it had just rasterised — one multiply, one add and one divide per pixel — with no span
-open. Everything inside `residue_intersection` was already spanned (the flatten, the
-links' `min`, the crop), so the *only* unattributed per-pixel work on the clipped path was
-that product, and it was reported as `recording`, the remainder.
+open. Almost everything inside `residue_intersection` was already spanned — the flatten,
+the links' `min`, and the crop on the path a second mark under the same chain takes — so
+the product was the whole of the unattributed per-pixel work, and it was reported as
+`recording`, the remainder.
 
-The fix is one seam: `residue_product` is its own function and its own span.
+The fix is one seam: `residue_product` is its own function and its own span. A second,
+much smaller one goes with it: a region's crop was spanned at one of its two call sites
+and not at the other (the first mark under an admitted chain), which is the same defect at
+a hundredth of the size — once per chain rather than once per clipped mark.
 
 ### The line between geometry and recording, now stated
 

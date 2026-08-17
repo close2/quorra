@@ -43,7 +43,11 @@ product was the **only** unattributed per-pixel work on the clipped path, and ev
 large by exactly it.
 
 The fix is one seam: the loop is `residue_product`, a function of its own, inside its own
-`clock.geometry` span.
+`clock.geometry` span. A second, much smaller one goes with it, found while partitioning
+the instructions: `encode/clips.rs`'s region **crop** is inside a span at one of its two
+call sites and was outside it at the other — the first mark under a chain that keeps a
+region, so once per chain rather than once per clipped mark. On artwork that is 66 crops
+against 534, about 0.3 % of the encode at its largest.
 
 **The line the amendment writes down**, because the phase definitions did not decide this
 case: *geometry is the work that makes coverage; recording is the work that decides what
