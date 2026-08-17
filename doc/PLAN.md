@@ -272,9 +272,12 @@ who could remove it.
 - **§11.2's census has run** (2026-08-17, `doc/notes-census.md`), and the path lane's design
   no longer stands on `doc/corpus-profile.md`'s shapes alone. §1.1's premise survives at
   **9.4 %** and §1.6 now picks candidate 2 by measurement. ADR 0008's lever was not pulled.
-  What the census left open is one thing it was not asked about: the glyph lane surrenders
-  69 834 marks at 4× to the atlas **budget**, on 19 pages, reversibly — §1.1's stated
-  mechanism accounts for one mark in 27 507.
+  What the census left open is one thing it was not asked about, and **ADR 0063 has since
+  answered it**: the glyph lane surrenders ~70 000 marks at 4× not to the atlas *budget* and
+  not to §1.1's stated mechanism (which accounts for 40 marks of 81 046) but to **the shelf
+  packer holding earlier pages' tiles**. The atlas has no eviction, so it accumulates across
+  pages until something is refused — and the pages that overflow with the quantum off and
+  with it on share only six names, so which page pays is not a property of any page.
 
 ---
 
@@ -303,8 +306,11 @@ Two properties of the sorter matter more than the lanes themselves:
 
 - **Classification happens at encode time, per frame — never at scene-build time.**
   Which lane a command takes is a device-space question: the same glyph outline is a
-  quad at 100% zoom and a general path at 6400%, when its device size outgrows what an
-  atlas entry can hold. Putting the sorter in `render` is what keeps the `Scene`
+  quad at 100% zoom and a general path at 6400%. **Why** it becomes one is measured and is
+  not what this bullet said until 2026-08-17: a tile too large for an atlas entry accounts
+  for 40 marks of 81 046 at 4×, and what actually moves a glyph to the path lane is the
+  shelf packer being full of *earlier pages'* tiles (ADR 0063). The device-space point
+  stands; the mechanism named for it did not. Putting the sorter in `render` is what keeps the `Scene`
   viewport-free (§2.3), which the brief calls the most important property in the
   document. The budget for the whole encode is the number the current backend already
   achieves: **1.1–1.6 ms, flat in resolution** (§6.1). Ours may not regress it, because
@@ -331,10 +337,16 @@ marks cause two thirds of the coverage. That is the number to design against, an
 **The population is concentrated, not a tail**: 704 of 954 pages draw no path-lane mark at
 all, ten pages are 93 % of it, and `issue12810.pdf` alone — 34 970 sub-pixel strokes — is 54 %.
 
-**One clause of this table is wrong and is corrected below**: the glyph lane's surrender at
-zoom is not "when its device size outgrows what an atlas entry can hold". That mechanism moves
-**one mark in 27 507**. What moves the other 69 834 at 4× is the atlas *budget*, and it is
-reversible by turning the quantum on. `HANDOVER.md` carries the round that is measuring it.
+**One clause of this table is wrong, and so was the first correction of it.** The glyph lane's
+surrender at zoom is not "when its device size outgrows what an atlas entry can hold" — that
+moves **40 marks of 81 046**. Nor is it the atlas *budget*, which is what this paragraph said
+until ADR 0063 measured it: the largest single page's working set is **4.10 MiB of 8**, the
+median is 11 KiB, and **no page is over budget**. What runs out is **the shelf packer, full of
+earlier pages' tiles** — the atlas has no eviction, so it accumulates across pages until one is
+refused. The claim that turning the quantum on reverses it **does not reproduce** and has been
+withdrawn; the quantum *divides* keys rather than multiplying them (`Some(16)` collapses phases
+onto one key, `None` keys exact bits and never collides), so it changes how fast the shared
+atlas fills, not which page is rendering when it does.
 
 ## 1.2 A frame, from call to pixels
 
