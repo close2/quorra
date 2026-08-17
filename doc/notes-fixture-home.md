@@ -146,6 +146,14 @@ makes**, and no statistics.
 page it does not measure would be this round's defect wearing a different hat, and that
 rule is written into the ADR rather than left as an intention.
 
+**What the loop costs, measured here rather than guessed.** All twelve, under `xvfb-run`,
+release, llvmpipe and RADV both present, on this desktop at load average 17–45: **114 s**
+with the binaries already linked, and **~8 min** when every example relinks first (fat
+LTO, one codegen unit — that is the profile's cost, not the step's). The two longest are
+`function_paint` (54 s: it runs both witnesses through an analysis, a generated shader and
+a CPU reference) and `surface_measure` (11 s: two surface devices, each warmed). Nothing
+else exceeds ten seconds of run time.
+
 **Three examples gained an assertion they did not have.** `residue_clip` and
 `surface_measure` printed counters and checked nothing — `surface_measure` is the instrument
 `doc/PLAN.md`'s real-display row is read from, and nothing said the page it drew was the

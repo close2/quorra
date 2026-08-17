@@ -24,9 +24,11 @@
 //! - **Into a retained `Target::Texture`**, created once. A `Readback` frame would put a
 //!   copy-out and a map — the largest single cost a frame has — on top of the thing being
 //!   measured, and a `Surface` frame would block on vsync.
-//! - **The counters are checked against `tests/archetypes.rs`'s recorded row** before any
-//!   number is printed. That is what says this binary encoded §6.2's page and not a
-//!   lookalike, and it is the same discipline the callgrind harness of ADR 0045 used.
+//! - **The counters are checked against the page's recorded row** before any number is
+//!   printed. That is what says this binary encoded §6.2's page and not a lookalike, and
+//!   it is the same discipline the callgrind harness of ADR 0045 used. Since ADR 0060
+//!   the row is `quorra-pages`' — the one `tests/archetypes.rs` compares against — rather
+//!   than a copy of it here, which is what let this gate go stale for two days.
 //! - **The pixels of the two variants are compared**, once, through a `Readback` pair, so
 //!   the run reports byte identity rather than assuming what `tests/retained_frame.rs`
 //!   asserts.
