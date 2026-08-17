@@ -93,9 +93,11 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
     return out;
 }
 
-// Coverage × clip × soft mask at the fragment's cell — the geometric part of the
-// weight, and textually the shading lane's, because it is the same quantity.
-fn base_weight(p: vec2f) -> f32 {
+// Coverage × clip at the fragment's cell — the element's *shape* (§11.6.4.2 met with
+// §8.5.4's clip), and textually the shading lane's, because it is the same quantity.
+// The soft mask is not in it (ADR 0066): Table 57's alpha source flag reads
+// §11.6.4.3's mask as opacity by default, so it is `q` and not `f`.
+fn shape_at(p: vec2f) -> f32 {
     var cov: f32;
     if params.coverage.z > 0.5 {
         let texel = vec2i(params.coverage.xy + (p - params.dest.xy));
@@ -109,7 +111,7 @@ fn base_weight(p: vec2f) -> f32 {
     let overlap_min = max(params.clip.xy, p);
     let overlap_max = min(params.clip.zw, p + vec2f(1.0, 1.0));
     let extent = max(overlap_max - overlap_min, vec2f(0.0, 0.0));
-    return cov * extent.x * extent.y * soft_mask_at(p);
+    return cov * extent.x * extent.y;
 }
 
 // The straight-alpha paint at a device pixel: the program's own answer for the point
@@ -145,7 +147,7 @@ fn paint_at(p: vec2f) -> vec4f {
 fn fs_main(in: VsOut) -> @location(0) vec4f {
     let p = floor(in.position.xy) + params.origin;
     let straight = paint_at(p);
-    return vec4f(straight.rgb * straight.a, straight.a) * base_weight(p);
+    return vec4f(straight.rgb * straight.a, straight.a) * (shape_at(p) * soft_mask_at(p));
 }
 
 // The knockout erase pass wants the shape alone (§11.4.6, ADR 0010). A pixel the paint
@@ -155,7 +157,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 // The test is `> 0.0` on the paint's alpha, and it carries one consequence worth
 // stating: a `Background` whose own alpha is zero is indistinguishable here from an
 // absent one, because `function::background_rgba` encodes both as vec4f(0). That is the
-// encoding's deliberate collapse — the two paint the same pixels — and §11.4.7.2's
+// encoding's deliberate collapse — the two paint the same pixels — and §11.3.7.2's
 // shape/opacity distinction is preserved everywhere it is observable: a background of
 // alpha 0.4 marks full shape at four tenths opacity, exactly as a ramp stop of that
 // alpha does.
@@ -166,5 +168,5 @@ fn fs_shape(in: VsOut) -> @location(0) vec4f {
     if straight.a <= 0.0 {
         return vec4f(0.0);
     }
-    return vec4f(0.0, 0.0, 0.0, base_weight(p));
+    return vec4f(0.0, 0.0, 0.0, shape_at(p));
 }

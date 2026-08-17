@@ -266,7 +266,7 @@ mod tests {
             &bytes,
             &[
                 ("inv0", Lane::Vec4([1.0, 2.0, 3.0, 4.0])),
-                // §8.3.3's e and f, then §11.6.4.3's CA and the resolved filter.
+                // §8.3.3's e and f, then §11.6.4.4's constant alpha and the resolved filter.
                 ("inv1", Lane::Vec4([5.0, 6.0, 0.5, 1.0])),
                 ("image_rect", Lane::Vec4([11.0, 12.0, 13.0, 14.0])),
                 ("dest", Lane::Vec4([21.0, 22.0, 23.0, 24.0])),

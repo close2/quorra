@@ -104,17 +104,38 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: Instance) -> VsOu
     return out;
 }
 
-// Coverage = area of (rect ∩ pixel cell), times the soft mask (§11.5.1's soft
-// clip). Each extent is in [0, 1] by construction, so the product is the exact
-// area — no approximation at corners, where the two partial extents multiply.
-fn coverage_at(in: VsOut) -> f32 {
-    // position.xy is the pixel centre (k + 0.5 exactly); floor recovers the pixel's
-    // integer corner, and the pixel's cell is [px, px+1) × [py, py+1).
-    let px = floor(in.position.xy) + globals.origin;
+// The element's SHAPE at a pixel: the area of (rect ∩ pixel cell), which is
+// §11.6.4.2's object shape antialiased by ADR 0005's area rule, met with §8.5.4's
+// clip — "The effective shape is the intersection of the object's intrinsic shape
+// with the clipping path". Each extent is in [0, 1] by construction, so the product
+// is the exact area — no approximation at corners, where the two partial extents
+// multiply.
+//
+// **Neither the soft mask nor the paint's alpha is in it** (ADR 0066). Table 57's
+// alpha source flag governs both together — "whether the current soft mask and alpha
+// constant parameters shall be interpreted as shape values ( true ) or opacity values
+// ( false )" — and its initial value is `false`. A scene carries no such flag, so both
+// are §11.6.4.3's `qm` and §11.6.4.4's `qk`, and both stay out of `f`.
+fn shape_at(in: VsOut, px: vec2<f32>) -> f32 {
     let overlap_min = max(in.rect.xy, px);
     let overlap_max = min(in.rect.zw, px + vec2<f32>(1.0, 1.0));
     let extent = max(overlap_max - overlap_min, vec2<f32>(0.0, 0.0));
-    return extent.x * extent.y * soft_mask_at(px);
+    return extent.x * extent.y;
+}
+
+// The device pixel this fragment shades. `position.xy` is the pixel centre
+// (k + 0.5 exactly); floor recovers the pixel's integer corner, and the cell is
+// [px, px+1) × [py, py+1).
+fn pixel_of(in: VsOut) -> vec2<f32> {
+    return floor(in.position.xy) + globals.origin;
+}
+
+// The source alpha the mark is drawn with: `f × q` for a mark whose only opacity
+// input besides the paint is §11.6.4.3's mask. §11.3.6 sees only the product, which
+// is why this and `shape_at` differ only where §11.4.6 reads the two apart.
+fn coverage_at(in: VsOut) -> f32 {
+    let px = pixel_of(in);
+    return shape_at(in, px) * soft_mask_at(px);
 }
 
 // Premultiplied source scaled by coverage; the fixed-function blend is
@@ -124,11 +145,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return in.color * coverage_at(in);
 }
 
-// The element's SHAPE alone (§11.4.7.2: object shape ∧ clip ∧ mask shape — the
-// paint's alpha is opacity, not shape). The knockout erase pass scales the backdrop
-// by (1 − shape) through the (ZERO, ONE_MINUS_SRC_ALPHA) blend; the add pass then
-// deposits shape · element (ADR 0010's two-pass knockout).
+// The element's shape alone, for §11.4.6's knockout erase (ADR 0066). The erase pass
+// scales the backdrop by (1 − shape) through the (ZERO, ONE_MINUS_SRC_ALPHA) blend;
+// the add pass then deposits shape · element (ADR 0010's two-pass knockout), and that
+// deposit *does* carry the mask, because it is the element's own contribution.
 @fragment
 fn fs_shape(in: VsOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(coverage_at(in));
+    return vec4<f32>(shape_at(in, pixel_of(in)));
 }

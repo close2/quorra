@@ -103,11 +103,12 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: Instance) -> VsOu
     return out;
 }
 
-// The combined coverage at this fragment: the CPU-rasterised byte times the analytic
-// clip-rectangle overlap of the pixel's unit cell (same formula as rect.wgsl,
-// ADR 0005/0007).
-fn coverage_at(in: VsOut) -> f32 {
-    let p = floor(in.position.xy) + globals.origin;
+// The element's SHAPE at this fragment: the CPU-rasterised coverage byte times the
+// analytic clip-rectangle overlap of the pixel's unit cell (same formula as
+// rect.wgsl, ADR 0005/0007) — §11.6.4.2's object shape met with §8.5.4's clip. The
+// soft mask is *not* in it (ADR 0066): Table 57's alpha source flag reads the mask as
+// opacity by default, so it belongs to `q` and not to `f`.
+fn shape_at(in: VsOut, p: vec2f) -> f32 {
     let local = vec2i(p - in.dest_min);
     let texel = vec2i(in.tex_origin_source.xy) + local;
     var cov: f32;
@@ -119,7 +120,18 @@ fn coverage_at(in: VsOut) -> f32 {
     let overlap_min = max(in.clip.xy, p);
     let overlap_max = min(in.clip.zw, p + vec2f(1.0, 1.0));
     let extent = max(overlap_max - overlap_min, vec2f(0.0, 0.0));
-    return cov * extent.x * extent.y * soft_mask_at(p);
+    return cov * extent.x * extent.y;
+}
+
+// The device pixel this fragment shades (rect.wgsl's `pixel_of`).
+fn pixel_of(in: VsOut) -> vec2f {
+    return floor(in.position.xy) + globals.origin;
+}
+
+// The source alpha the mark is drawn with: shape times §11.6.4.3's mask opacity.
+fn coverage_at(in: VsOut) -> f32 {
+    let p = pixel_of(in);
+    return shape_at(in, p) * soft_mask_at(p);
 }
 
 // Premultiplied source scaled by coverage; fixed-function (ONE, ONE_MINUS_SRC_ALPHA).
@@ -131,5 +143,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 // The element's shape alone, for the knockout erase pass (see rect.wgsl's fs_shape).
 @fragment
 fn fs_shape(in: VsOut) -> @location(0) vec4f {
-    return vec4f(coverage_at(in));
+    return vec4f(shape_at(in, pixel_of(in)));
 }

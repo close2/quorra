@@ -24,11 +24,10 @@
 //! main reason for maintaining a separate shape value rather than only a single alpha that
 //! combines shape and opacity."
 //!
-//! - **No shape.** An empty clip, a zero-area outline, a fully transparent soft mask read
-//!   as shape: the element's source shape is 0. §11.4.6's NOTE 5 is unconditional — "A
-//!   shape value of 0.0 (outside) leaves the previous group results unchanged" — so this
-//!   is a no-op in every kind of group, and [`no_shape`] holds every lane and every group
-//!   kind to byte identity.
+//! - **No shape.** An empty clip, a zero-area rectangle, a zero-area outline: the element's
+//!   source shape is 0. §11.4.6's NOTE 5 is unconditional — "A shape value of 0.0 (outside)
+//!   leaves the previous group results unchanged" — so this is a no-op in every kind of
+//!   group, and every lane and every group kind is held to byte identity.
 //! - **No opacity.** A fill whose paint alpha is 0 has, in the clause's terms, shape 1
 //!   inside its path (§11.6.4.2: "the shape shall always be 1.0 inside and 0.0 outside the
 //!   path") and constant opacity 0 (§11.6.4.4). Outside a knockout group that composites to
@@ -37,6 +36,14 @@
 //!   group with the result, and a transparent element over a transparent initial backdrop
 //!   is transparent. So a zero-opacity mark inside a knockout group erases what it covers,
 //!   and a compositor that made it a no-op would be wrong. Both halves are asserted below.
+//!
+//! **A fully transparent soft mask is in the second half, not the first** (ADR 0066). It
+//! reads as shape only under Table 57's alpha source flag, whose initial value is `false`
+//! and which a scene cannot set: "A flag specifying whether the current soft mask and alpha
+//! constant parameters shall be interpreted as shape values ( true ) or opacity values
+//! ( false ). … Initial value: false ." So a mask of 0 is `qm = 0` over a shape of 1, and
+//! inside a knockout group it erases exactly as a zero paint alpha does. This file asserted
+//! the opposite until 2026-08-18, and the shader agreed with it.
 //!
 //! **What this means for `/None`, and it is worth the caller having in writing**: `/None`
 //! cannot be modelled as a zero-alpha paint. Inside a knockout group the two differ — one
@@ -93,7 +100,9 @@ enum Nothing {
     /// which is different from an absent clip", and ADR 0007's empty resolution.
     EmptyClip,
     /// A soft mask whose group marks nothing at all, so the reduction is 0 everywhere
-    /// (§11.5.2 with the identity transfer).
+    /// (§11.5.2 with the identity transfer): **shape 1, opacity 0**, because Table 57's
+    /// alpha source flag is `false` by default and a scene carries no other value
+    /// (§11.6.4.3, ADR 0066).
     TransparentSoftMask,
     /// A degenerate rectangle through the analytic rectangle lane (`rect.wgsl`).
     ZeroAreaRect,
@@ -108,16 +117,19 @@ enum Nothing {
 }
 
 /// The kinds whose **shape** is zero. A no-op in every group, by §11.4.6's NOTE 5.
-const NO_SHAPE: [Nothing; 4] = [
+const NO_SHAPE: [Nothing; 3] = [
     Nothing::EmptyClip,
-    Nothing::TransparentSoftMask,
     Nothing::ZeroAreaRect,
     Nothing::ZeroAreaFill,
 ];
 
 /// The kinds whose **opacity** is zero while their shape is not. A no-op everywhere except
 /// inside a knockout group, where §11.4.6 replaces rather than composites.
-const NO_OPACITY: [Nothing; 2] = [Nothing::ZeroAlphaFill, Nothing::ZeroAlphaImage];
+const NO_OPACITY: [Nothing; 3] = [
+    Nothing::ZeroAlphaFill,
+    Nothing::ZeroAlphaImage,
+    Nothing::TransparentSoftMask,
+];
 
 /// What the "nothing" mark is nested in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,7 +310,7 @@ fn append_nothing(
     ink: Ink,
 ) -> Result<(), SceneError> {
     match nothing {
-        Nothing::ZeroAlphaFill | Nothing::ZeroAlphaImage => {
+        Nothing::ZeroAlphaFill | Nothing::ZeroAlphaImage | Nothing::TransparentSoftMask => {
             append_no_opacity(builder, device, nothing, ink)
         }
         _ => append_no_shape(builder, device, nothing, ink),
@@ -335,23 +347,6 @@ fn append_no_shape(
             let chain = builder.clip(second, Affine::IDENTITY, FillRule::NonZero, Some(outer))?;
             solid(builder, device, Some(chain), None, opaque())
         }
-        Nothing::TransparentSoftMask => {
-            // A mask group that marks nothing reduces to 0 everywhere (§11.5.2 with the
-            // identity transfer); one that marks the page opaquely reduces to 1 there.
-            let mask = builder.mask(MaskKind::Alpha, None, |mask| {
-                if full {
-                    mask.rect(
-                        Rect::new(Point::new(0.0, 0.0), Point::new(64.0, 64.0)),
-                        Affine::IDENTITY,
-                        Color::new(1.0, 1.0, 1.0, 1.0),
-                        None,
-                        None,
-                    )?;
-                }
-                Ok(())
-            })?;
-            solid(builder, device, None, Some(mask), opaque())
-        }
         Nothing::ZeroAreaRect => builder.rect(
             Rect::new(
                 Point::new(20.0, 20.0),
@@ -383,14 +378,15 @@ fn append_no_shape(
                 None,
             )
         }
-        Nothing::ZeroAlphaFill | Nothing::ZeroAlphaImage => {
+        Nothing::ZeroAlphaFill | Nothing::ZeroAlphaImage | Nothing::TransparentSoftMask => {
             unreachable!("dispatched to append_no_opacity")
         }
     }
 }
 
 /// The kinds whose shape is 1 inside their own geometry and whose **opacity** is zero
-/// (§11.6.4.4 for the fill's constant alpha, §11.6.4.2 for the image's rectangle).
+/// (§11.6.4.4 for the fill's constant alpha, §11.6.4.2 for the image's rectangle,
+/// §11.6.4.3 for the soft mask under Table 57's default alpha source flag).
 fn append_no_opacity(
     builder: &mut SceneBuilder,
     device: &mut Device,
@@ -426,6 +422,24 @@ fn append_no_opacity(
                 BlendMode::Normal,
                 None,
             )
+        }
+        Nothing::TransparentSoftMask => {
+            // A mask group that marks nothing reduces to 0 everywhere (§11.5.2 with the
+            // identity transfer); one that marks the page opaquely reduces to 1 there.
+            // The mark's shape is the triangle either way — the mask is `qm`, not `fm`.
+            let mask = builder.mask(MaskKind::Alpha, None, |mask| {
+                if ink == Ink::Full {
+                    mask.rect(
+                        Rect::new(Point::new(0.0, 0.0), Point::new(64.0, 64.0)),
+                        Affine::IDENTITY,
+                        Color::new(1.0, 1.0, 1.0, 1.0),
+                        None,
+                        None,
+                    )?;
+                }
+                Ok(())
+            })?;
+            solid(builder, device, None, Some(mask), opaque())
         }
         _ => unreachable!("dispatched to append_no_shape"),
     }

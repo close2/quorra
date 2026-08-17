@@ -20,7 +20,7 @@
 //! and ADR 0025's whole subject is that a caller writes that stage as two marks —
 //! `P' = (1 − f) × P + S`, per channel and premultiplied, `f` the element's shape and `S`
 //! its own premultiplied deposit. §11.6.4.2 makes shape geometry, so the *paint's* alpha is
-//! not part of `f`; §11.4.7.2 is the clause that keeps the two quantities apart.
+//! not part of `f`; §11.3.7.2 is the clause that keeps the two quantities apart.
 //!
 //! For this paint one more clause joins them. §8.7.4.5.2:
 //!

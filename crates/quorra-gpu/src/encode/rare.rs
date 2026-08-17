@@ -60,7 +60,7 @@ pub(crate) struct ImageOp {
     pub residue_origin: Option<[f32; 2]>,
     /// Whether the placement preserves axes (analytic edges).
     pub axis_aligned: bool,
-    /// The command's constant alpha (§11.6.4.3).
+    /// The command's constant alpha (§11.6.4.4).
     pub alpha: f32,
     /// The placement's resolved filter: `true` for linear (§4.5, integration
     /// note 1).
