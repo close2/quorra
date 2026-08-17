@@ -162,3 +162,178 @@ output are context and nothing else.
 > The base column does not build against their tree unmodified and the change column does:
 > `a4380e2` predates ADR 0056, and their `render-quorra` already calls `detach_presenter`.
 > `doc/notes-release-matrix.md` records exactly what was removed from the copy for the base run.
+
+---
+
+# The release matrix for `1cd74c9 → a4f10f5`
+
+Date: **2026-08-18**. Base `1cd74c9` — where the matrix above stops — against `main` at
+`a4f10f5`. **24 commits**, 18 of them non-merge, five rounds merged after that run and
+covered by no matrix until this one. Each argued individually that it moves no pixel, and
+this project's rule is that the corpus is the instrument rather than the argument.
+
+The corpus is the caller's, read-only at `/home/cl/projects/pdf-viewer`, revision
+**`411063f9`** ("A key that cannot be hit, and a mask that masks itself"), copied once at
+23:34 and not re-copied between columns. Adapter: **AMD Radeon 890M Graphics (RADV
+STRIX1)**, Vulkan, 24 encode threads, release build, glyph quantum off. All eight runs in
+**one copy of their tree, in one sitting, 2026-08-17 23:37 to 2026-08-18 00:08**, flipping
+only the `[patch]` path.
+
+## 1. The four rows
+
+| lane, scale | base `1cd74c9` | `main` `a4f10f5` |
+|---|---|---|
+| CPU, scale 1 | 931 agree / 23 differ / 2 refused / 18 not comparable | **931 / 23 / 2 / 18** |
+| GPU, scale 1 | 929 / 25 / 2 / 18 | **929 / 25 / 2 / 18** |
+| CPU, scale 4 | 937 / 11 / 3 / 23 | **937 / 11 / 3 / 23** |
+| GPU, scale 4 | 938 / 10 / 3 / 23 | **938 / 10 / 3 / 23** |
+
+3 814 page verdicts compared — 956 at scale 1 and 951 at scale 4, twice each. A line is
+printed only for a page that differs or is refused: **79 lines across the four rows** (25
+at CPU 1, 27 at GPU 1, 14 at CPU 4, 13 at GPU 4), naming **37 distinct documents**.
+
+## 2. Every page line that moved, with its cause
+
+**None.** Not one of the 79 lines differs between the columns, in any field — page name,
+verdict, mean, worst tile and its coordinates, differing fraction, SSIM, and the full text
+of every refusal. The four `.out` files of the change column are **byte-for-byte identical**
+to the base column's once the five wall-clock lines are removed, which is a stronger
+statement than the per-field comparison and is the one actually run
+(`/home/AI/final-matrix/strict.sh`).
+
+That is the expected result and it is still worth having taken, because three of the range's
+commits reach shipped source rather than rustdoc:
+
+- **`333f80b`, ADR 0063's atlas round.** Two additive fields — `Counters::atlas_overflow_tiles`
+  and `Limits::atlas_bytes` — plus the one behavioural-looking edit in the range:
+  `Device::construct` now builds the `AtlasStore` *before* `Limits` so both read one
+  arithmetic, and `settle_atlas` calls `AtlasStore::byte_size()` where it multiplied
+  `dimensions()` itself. Same product, one site; the matrix is the check on "same product"
+  over 974 documents rather than over the unit tests that assert it.
+- **`cd93db3`, `geom.rs` into `affine.rs` / `segment.rs` / `shape.rs`**, and **`cc47ea7`,
+  `outline.rs` into `outline/triangles.rs`.** Verified as pure moves before the run, by
+  comparing the multiset of non-comment code lines across each split: `geom` differs by one
+  removed `use` and sixteen added lines, every one of them a `mod`, a `pub use`, a
+  `use super::…` or a `#[cfg(test)] mod tests {` brace pair; `outline` differs by twelve,
+  all of the same kinds. **No logic line moved**, and the corpus says so independently.
+
+The rest of the range does not reach a pixel by construction and the matrix confirms it:
+`903d05e` and `de1c013` (doc corrections to ADR 0063's own text), ADR 0064's rare-lane round
+(`b194c85`, `c2c7f4a`, `9d5f2af` — rustdoc on `Coverage` plus `tests/rare_lane_coverage.rs`),
+ADR 0065's atlas-admission round (`3e1a863`, `2a4d2b5`, `81c5727` — two doc comments on
+`CacheProspect`), the `resources.rs` and `encode/parallel.rs` split *declines* (`af8eb3e`,
+`3e4b837` — module comments stating why each file is one thing), the real-display rounds
+(`94d4cc2`, `8f6d2a6`, `d168f78`, `1b5aa21` — `examples/present_thread` and `PLAN.md` rows),
+and `a4f10f5`'s `CLAUDE.md` Wayland correction.
+
+**A second null worth recording**: every count in the base column reproduces the `1cd74c9`
+column of the matrix above to the digit, although the caller's tree moved from `22ab57d4` to
+`411063f9` between the two runs. That is luck rather than a guarantee — `HANDOVER.md`'s trap
+about counts being statements about a revision stands — but it is evidence that the eight
+runs above and the eight here are measuring the same population.
+
+## 3. Their `REFUSED_AT_FOUR` ratchet fails, identically, in **both** columns
+
+The CPU scale-4 row exits 101 in the base column *and* in the change column, with the same
+assertion and the same two lists:
+
+```
+assertion `left == right` failed: the pages quorra refuses at 4× have changed
+  left: ["bug1721218_reduced.pdf", "issue18032.pdf", "issue1905.pdf"]
+ right: ["bug1703683_page2_reduced.pdf", "bug1721218_reduced.pdf", "issue18032.pdf", "issue1905.pdf"]
+```
+
+`diff` of the two stderr excerpts is empty. **That identity is the point**: both columns
+contain ADR 0057, which moved `bug1703683_page2_reduced.pdf` off the 4× refusal list, and the
+caller has not re-baselined. The failure is a debt of theirs carried forward from the matrix
+above, not a difference this range introduces. The other six runs exit 0, including both
+CPU scale-1 rows — which check `REFUSED` *and* the differing list, the strictest pair the
+gate has — so nothing else in their ratchets moved either.
+
+**The caller must still drop `bug1703683_page2_reduced.pdf` from `REFUSED_AT_FOUR`** when they
+take the bump. This matrix does not change that instruction; it confirms it is the only one.
+
+## 4. What was patched in the copy, and why
+
+**Nothing but the `[patch]` block, in either column.** `head -n -5 Cargo.toml` is
+byte-identical to the copy's `Cargo.toml.orig`, and both columns built their `render-quorra`
+unmodified. This is a change from the matrix above, where the base column at `a4380e2`
+predated ADR 0056 and needed two methods deleted from `crates/render-quorra/src/present.rs`
+to compile at all: both ends of this range carry ADR 0056's presenter API, so their working
+tree compiles against either. Cargo warns that the `quorra` patch entry is unused — their
+workspace depends on `quorra-gpu` and `quorra-scene` only — which is expected and is not an
+error.
+
+The two columns are two distinct binaries and the record says which: all four base rows ran
+`target/release/deps/corpus-fb39a089635d465a`, all four change rows ran
+`corpus-44888576e3dd799c`. Cargo's metadata hash moves with the patched source, which is what
+makes that a check rather than a coincidence.
+
+## 5. Method, so the numbers can be re-taken rather than argued about
+
+- `rsync -a` of their tree with `HANDOVER.md`'s seven excludes to `/home/AI/final-matrix/viewer`,
+  once. **Never built in or written to `/home/cl/projects/pdf-viewer`.**
+- Base column: `git worktree add /home/AI/final-matrix/quorra-base 1cd74c9`. Change column: a
+  worktree at `a4f10f5`. Only the `[patch]` path differs between the two runs of each row.
+- A private `CARGO_TARGET_DIR=/home/AI/final-matrix/target`.
+- `cargo test --release -p render-quorra --test corpus -- --ignored --nocapture`, with
+  `PDFVIEWER_QUORRA_COVERAGE=cpu|gpu` and `PDFVIEWER_QUORRA_SCALE=1|4`. Driver:
+  `run-column.sh`; per-page comparison: `compare.py`; byte-level column diff: `strict.sh`;
+  raw output: `out/{base,change}-{cpu,gpu}-{1,4}.{out,err,rc}` — all under
+  `/home/AI/final-matrix`, which is removed after the numbers are written down.
+- `--release` and not the caller's newer `gates` profile, so that these rows are comparable
+  with the eight above, which predate it.
+
+**No timing is published from this run.** The load average was 1.4 when the base column
+started and 35.6 when the change column ended — something else on this desktop began during
+the run — and `HANDOVER.md`'s rule stands: which pages refuse is arithmetic and
+machine-independent, which lane is faster is not. The wall clocks in the raw output are
+context and nothing else. **The verdicts are unaffected by that load**, which is exactly what
+byte-identical output under a 25× swing in load demonstrates.
+
+## 6. Recommended replacement for `PLAN.md`'s matrix
+
+`doc/PLAN.md` is not edited from here. The block below is the recommended text. It goes
+**immediately before** the `a4380e2 → 1cd74c9` matrix — that section lists matrices
+newest-first — and **replaces neither of them**: the two cover different ranges and together
+they cover `a4380e2 → a4f10f5`, which is what a push delivers.
+
+One paragraph of the existing matrix is superseded and should go with the insertion. Its
+closing —
+
+> **Three commits are not in this matrix**: ADR 0063's atlas round (`333f80b`, `903d05e`,
+> `de1c013`) landed while the runs were in flight. Its own scale-4 run reproduced the recorded
+> verdict lists name for name, so nothing is known to move — but it has not had the four-row
+> treatment, and it owes one before a push.
+
+— is the debt this round pays, and it should be struck rather than left standing beside the
+matrix that pays it.
+
+> **The release matrix for `1cd74c9 → a4f10f5`** — the 24 commits merged after the matrix
+> above was taken: ADR 0063's atlas round, ADR 0064's rare-lane round, ADR 0065's
+> atlas-admission round, the `geom.rs` and `outline.rs` splits with the `resources.rs` and
+> `encode/parallel.rs` declines, the real-display rounds, and `CLAUDE.md`'s Wayland
+> correction. One copy of their tree at `411063f9`, RADV, both lanes, both scales, taken
+> 2026-08-17 23:37 – 2026-08-18 00:08:
+>
+> | lane, scale | base `1cd74c9` | `main` `a4f10f5` |
+> |---|---|---|
+> | CPU, scale 1 | 931 / 23 / 2 / 18 | **931 / 23 / 2 / 18** |
+> | GPU, scale 1 | 929 / 25 / 2 / 18 | **929 / 25 / 2 / 18** |
+> | CPU, scale 4 | 937 / 11 / 3 / 23 | **937 / 11 / 3 / 23** |
+> | GPU, scale 4 | 938 / 10 / 3 / 23 | **938 / 10 / 3 / 23** |
+>
+> **Nothing moved.** All 79 printed lines across the four rows — 37 distinct documents,
+> 3 814 page verdicts — are identical between the columns, and the four output files are
+> byte-identical once the wall clocks are removed. That is the null the range's three
+> source-touching commits needed: `333f80b`'s two additive `Counters`/`Limits` fields and its
+> one-arithmetic `AtlasStore::byte_size`, and the `geom.rs` and `outline.rs` splits, which
+> were separately verified as pure code moves. **The caller's `REFUSED_AT_FOUR` ratchet fails
+> in both columns with the same two lists** — ADR 0057's `bug1703683_page2_reduced.pdf`, which
+> is in both — so it is their outstanding re-baseline and not a difference here; the other six
+> runs exit 0. Both columns built their `render-quorra` unmodified, which the previous
+> matrix's base column could not.
+>
+> **`a4380e2 → 1cd74c9` and `1cd74c9 → a4f10f5` together cover everything a push delivers.**
+> `doc/notes-release-matrix.md` holds both, with method, raw-output layout and the per-page
+> evidence.
