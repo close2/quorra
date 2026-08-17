@@ -314,9 +314,20 @@ refresh, it is how the refresh gets a picture while a frame is still running.
 
 **One thing we owe you off the back of this.** You wrote that you cannot subdivide
 `recording` from outside, and you are right — and worse, on a *clipped* page our own three
-phases mislabel it: 56 % of artwork's `recording` is the per-pixel multiply of a clip's
-residue into a coverage tile, which is geometry by any reading and lands outside the
-geometry span. We are recommending that `Options::instrument_encode` grow an optional
+phases mislabel it: the per-pixel multiply of a clip's residue into a coverage tile is
+geometry by any reading and lands outside the geometry span.
+
+> **Corrected before this was carried across, 2026-08-17.** This paragraph said **56 % of
+> artwork's `recording`**, and that figure does not survive its own instrument: it was
+> taken on a test page whose clips overlapped 8 of the 600 marks they clipped, so most of
+> those multiplies were of a residue of zero, and it counted a bounding scan that is
+> *recording* by the rule we have since written down. **The mislabel was real and is now
+> fixed** — the multiply is inside the geometry span (our ADR 0023, amended) — and
+> re-measured on a page whose clips do clip, it is **0.62 % of the encode and 13.7 % of
+> what `recording` was**. Nothing else in this document is affected: your page states no
+> clip, so its `recording` never contained any of this.
+
+We are recommending that `Options::instrument_encode` grow an optional
 detail level that emits `encode: bounds`, `encode: atlas`, `encode: instances` and
 `encode: commit` as extra rows, with `encode: recording` still the remainder so a trace that
 sums the rows still gets `encode` and an existing parser sees the three rows it always saw.
