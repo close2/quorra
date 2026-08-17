@@ -288,3 +288,44 @@ when the warm set missed it.
 - **We cannot answer whether it holds the rate.** Their §7(c) says so first: `Xvfb` reports
   a refresh rate of 0.00 and 120 Hz cannot be observed on this machine at all. The
   arithmetic is theirs to close on the display that states its own refresh.
+
+  **Closed on 2026-08-17 by the amendment below. It holds it, 149 presents out of 149.**
+
+## Amendment, 2026-08-17 — it holds the rate, and the ratio this ADR quotes is the wrong one
+
+The decision stands and nothing in it changes; **the one number it could not take has been
+taken**, and one sentence of the way it was quoted has to go with it. The measurement is
+`doc/notes-present-rate.md`, the instrument is `examples/present_thread/rate.rs`, and the
+display is the owner's `eDP-1` — 2880 × 1800, 119.96 Hz, one refresh of **8.34 ms**.
+
+**The answer is yes, and it is a property rather than a duration.** The library configures
+the surface `PresentMode::Fifo` and offers no other mode, so presents are refresh-locked by
+construction and the honest question is whether the presenting thread *makes* its 8.34 ms
+window. Over four runs in two loop rounds, each presenting the caller's four layers on the
+main thread while a second thread held the `&mut Device` rendering §6.2's dense-text page for
+about 300 ms: **1.02 presents per refresh of the span, and 100 % of presents consumed exactly
+one refresh — 149 of 149, no run with a single missed refresh.** The refresh itself was
+measured rather than assumed, by presenting an empty slice: 8.300, 8.315, 8.342 and 8.322 ms,
+against the 8.34 the display states. What the failure would have looked like is the shape the
+caller measured before this split and that this ADR's context records: a `2 refresh ×n`
+bucket and `presents per refresh` at 0.5, against their 167.4 ms median interval with 1
+present in 23 landing on the next refresh.
+
+**And the correction, which is about how this was reported rather than about what was
+built.** This ADR's proof section says *"on this machine, 4 presents got through one 30.6 ms
+render"*, and `doc/answer-nonblocking-render.md` carries *"three to five presents through a
+single render"* to the caller. **Presents per render is a statement about the fixture's
+render, not about the split.** On RADV a dense-text render is 1.7 to 4.4 ms — shorter than a
+refresh — so the same arrangement produces 179 renders and 38 presents in one span, a ratio
+of 0.21, and nobody should read that as a regression. **The count that carries the claim is
+presents per refresh, and it is 1.00.** The caller's own page is where the two coincide:
+their frame is 4 454.9 ms, so one of their renders spans 534 refreshes and on this evidence
+would get a present on each of them, where their measured arrangement got three.
+
+**One thing this ADR's proof had never actually run.** `examples/present_thread` had only
+ever been executed under `Xvfb`. On the owner's machine it opened its window, presented, and
+then died in `xwd` — because `XDG_SESSION_TYPE=wayland` and winit prefers the Wayland backend
+whenever `WAYLAND_DISPLAY` is set, so the window is not in the X tree for an X11 tool to find
+at all. Run with `env -u WAYLAND_DISPLAY` it takes the X11 backend, XWayland puts the window
+on the same display at the same refresh, and **every pixel assertion in that example passed on
+the real GPU for the first time.** The example's own documentation now says so.

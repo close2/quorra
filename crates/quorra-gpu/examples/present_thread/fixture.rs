@@ -105,9 +105,13 @@ pub(crate) fn chrome() -> Scene {
 /// the chrome's colour in the same corner, drawn through `Target::Surface` — a picture
 /// the presenter could not have left behind, so seeing it is the proof that the device
 /// has its surface again.
-pub(crate) fn through_the_surface() -> Scene {
+///
+/// Takes the window's size rather than reading [`WINDOW`]: the rate phase resizes the
+/// window, and a scene built for the size the window was *opened* at would leave the rest
+/// of it transparent (ADR 0039) — which looks like a defect and is not one.
+pub(crate) fn through_the_surface(window: (u32, u32)) -> Scene {
     let mut builder = SceneBuilder::new();
-    let (width, height) = (WINDOW.0 as f32, WINDOW.1 as f32);
+    let (width, height) = (window.0 as f32, window.1 as f32);
     rect(&mut builder, (0.0, 0.0, width, height), MARK);
     rect(&mut builder, CHROME_RECT, CHROME);
     builder.finish()
