@@ -126,10 +126,16 @@ pub const DEFAULT_GLYPH_QUANTUM: u16 = 16;
 /// paint reaches the scratch sheet by a path that never asks. So a page of large
 /// shading-filled paths pays the CPU rasteriser under `Gpu`, and a zoom of one does not
 /// get the magnification independence the `Gpu` variant describes below.
-/// `tests/function_coverage.rs` holds that equality in the pixels rather than leaving it
-/// to be inferred from the code. Whether the rare lane *should* be able to take the
-/// device is an open question with a measurement in front of it, not a decision that has
-/// been taken.
+/// `tests/function_coverage.rs` and `tests/rare_lane_coverage.rs` hold that equality in
+/// the pixels rather than leaving it to be inferred from the code.
+///
+/// **That is a decision now, and it is ADR 0064's.** It was an open question until
+/// 2026-08-17, when it was priced over the caller's 974-document corpus: the marks it
+/// would move are **0.11 % of a frame's rasterised coverage at a page's own scale and
+/// 0.63 % at 4×** — a rare paint under a non-rectangular clip takes the processor lane
+/// under either setting anyway, and two thirds of what is left is glyph-sized, which is
+/// the shape class this lane is the accurate one for. `doc/notes-rare-lane.md` has the
+/// numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Coverage {
     /// The CPU scanline rasteriser of ADR 0008, with the glyph atlas in front of it.
