@@ -362,12 +362,16 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
   first and lost to three facts: five of its seven vocabularies are raised in exactly one
   subsystem each, its module comment was already eight lines of map, and three commits had
   added a whole vocabulary at a stroke.
-- **The list of files past the ~500-line smell was measured, and it named the wrong files.**
-  Counted to the `#[cfg(test)]` module, `raster.rs` is **810** and `pipeline.rs` **573**;
-  nothing else in `quorra-gpu` is over 500, and `encode/parallel.rs` — which this list called
-  one of the two biggest — is **417** (532 whole). Neither of the two real ones has been read
-  for this purpose. `raster.rs` is one stated responsibility and its module comment says so,
-  which CLAUDE.md explicitly permits; read before splitting.
+- **The ~500-line list, measured on the whole file rather than to `#[cfg(test)]`.** After the
+  2026-08-17 round the `quorra-gpu` source files past the smell are `resources.rs` (606),
+  `outline.rs` (566), `atlas.rs` (537) and `encode/parallel.rs` (532), plus `quorra-scene`'s
+  `geom.rs` (634); `raster.rs` is 61 lines over three clause modules and `pipeline.rs` 428
+  over five (`doc/notes-raster-pipeline-read.md`). One test module is past it on purpose:
+  `raster/tests.rs` at 704, by ADR 0061. **The whole file is the number this rule is about**
+  — a reviewer holds the test module too, which is CLAUDE.md's own reason — and quoting the
+  count to `#[cfg(test)]` is what let a 1 563-line file be called "one irreducible thing"
+  twice. *(This list has now named the wrong files three times; the correction above is the
+  fourth statement of it and the first with a stated unit.)*
 - **`max_frame_bytes` is not the host-memory ceiling its name suggests.** `charge_tile`
   charges `width × height` bytes; `fill_mask` holds an `f32` accumulator of
   `(width + 1) × height` *and* the coverage bytes, so the peak is **5×** the charge. Priced,
@@ -643,6 +647,30 @@ The tempting reading of `coverage_lanes.rs` — that the lanes agree to an eight
 **not** a bound on this: it was derived for an edge *crossing* a pixel, and says nothing about a
 shape narrower than the sample grid. Any claim that the two lanes agree needs to name the shape
 class it was measured on.
+
+**A split is a whole-file replacement, so its base is part of its correctness.** A `raster.rs`
+split prepared on a base twenty commits stale would have merged out `direction`'s `hypot` path
+and `accumulate_edge`'s non-finite-slope return — **and the three tests that cover them**,
+because they lived in the same file. Every gate would have stayed green: there is nothing left
+to fail once a fix and its test leave together, and **`git` offers no conflict**, because the
+file the other change touched no longer exists on the splitting side. The instrument that
+catches it is the multiset comparison of every non-comment, non-blank line — run against the
+base the branch will actually merge into — finishing by grepping the split side for the
+incoming fix *by name*. Check a branch's **base**, not only its diff.
+
+**A module comment claiming one responsibility is evidence about the comment, not about the
+file.** `raster.rs` said "the one producer of coverage bytes" over 864 lines in which a third —
+§8.4.3's stroke expansion — produces no coverage byte at all: it takes polylines and returns
+polylines. `pipeline.rs` was more honest and was read past anyway, because its seam was an
+"and": "the store — its one lock, its laziness *and its warm-up*". **Two openings for one file
+is the same tell as `push_op`'s two openings for one function.** Read what a file does before
+believing what it says it does.
+
+**A public module with no public items still has public documentation.** `pub mod pipeline;`
+exports nothing — every item under it is `pub(crate)` — but its module comment is public
+rustdoc, so `[`Kind`]` in it fails `RUSTDOCFLAGS="-D warnings"` as "links to private item"
+while resolving fine under `--document-private-items`. Use code spans there, and run **both**
+doc commands: they disagree, and the strict one is CI.
 
 **A claim that something cannot be done is a claim, and it decays.** "`fill_solid`'s duplicate
 lookup needs a lifetime that fights `&mut self`" was written once from a reading, and travelled
