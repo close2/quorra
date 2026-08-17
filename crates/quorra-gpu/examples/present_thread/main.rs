@@ -16,6 +16,18 @@
 //! `QUORRA_PRESENT_ADAPTER` picks the adapter. `xwd` (Debian/Ubuntu: `x11-apps`) must be
 //! present — the example reads its own window back and fails loudly without it.
 //!
+//! **It needs an X11 window, and on a Wayland session that has to be asked for.** `xwd` is
+//! an X11 client and can only see X11 windows; winit prefers Wayland whenever
+//! `WAYLAND_DISPLAY` is set, and the window it then opens is invisible to the whole X
+//! tree — not renamed, not reparented, *absent*, which is why the failure reads as a
+//! window that does not exist. Run it with `WAYLAND_DISPLAY` unset so that winit takes the
+//! X11 backend and the compositor's `XWayland` server puts the window on the same display at
+//! the same refresh:
+//!
+//! ```text
+//! env -u WAYLAND_DISPLAY cargo run --release -p quorra-gpu --example present_thread
+//! ```
+//!
 //! # What it asserts, in the order it does
 //!
 //! 1. A device built for a surface hands out **one** presenter, and a second ask gets
@@ -41,6 +53,13 @@
 //! 9. `PresentCost` says what it should: two layers, a swapchain configured once, and
 //!    **no pipeline compiled** — the presenting pass was in the warm set (ADR 0043,
 //!    ADR 0056), which is the end-to-end half of "detaching compiles nothing".
+//! 10. The caller's own four-layer arrangement costs the fragments ADR 0058 counted —
+//!     exact arithmetic, no window and no adapter in it (`arrangement`).
+//! 11. And, at a display that states its own refresh, what the split is worth: how many
+//!     presents land while a render holds the device, whether each made its refresh, and
+//!     how many copies of that arrangement one present can carry before it stops (`rate`).
+//!     Steps 10 and 11 come last because 11 resizes the window, and every pixel assertion
+//!     above is stated in the size the window was opened at.
 
 // An example's arithmetic is window coordinates, byte offsets inside a file it just
 // read, and small counts — all bounded and all exact in the types they use, where the
@@ -58,7 +77,9 @@
     clippy::too_many_lines
 )]
 
+mod arrangement;
 mod fixture;
+mod rate;
 mod xwd;
 
 use std::sync::Arc;
@@ -97,8 +118,11 @@ const SETTLE: Duration = Duration::from_millis(300);
 /// harness that runs its whole set once, and CI has run it since ADR 0056. It is
 /// accepted so that every example takes the same invocation (ADR 0060).
 fn main() {
-    if std::env::args().any(|arg| arg == "--check") {
-        eprintln!("check: this example is already the smallest run that asserts what it asserts");
+    let check = std::env::args().any(|arg| arg == "--check");
+    if check {
+        eprintln!(
+            "check: the pixel proof is already its own smallest run; the rate phase runs one"
+        );
     }
     let mut display = Display::open();
     let options = Options {
@@ -167,6 +191,11 @@ fn main() {
     check_the_affine_landed();
     check_the_cost(&presenter.last().expect("two layers were just presented"));
     check_the_other_filter_runs(&mut display, &mut presenter, &page, placement);
+
+    // Steps 10 and 11, on the window this proof already owns rather than on a second one:
+    // what the split is worth at the display's own refresh. Last, because it resizes the
+    // window and every pixel assertion above is stated in the size it was opened at.
+    let device = rate::measure(&mut display, device, &mut presenter, check);
 
     let mut device = give_it_back(device, presenter, &options);
     draw_through_the_surface_again(&mut display, &mut device);
@@ -374,9 +403,14 @@ fn give_it_back(device: Device, presenter: Presenter, options: &Options) -> Devi
 }
 
 /// Step 8: `Target::Surface` draws again, and the window proves it.
+///
+/// The window's size is asked for rather than assumed: the rate phase resizes it, and a
+/// viewport smaller than its target would leave the rest of the window transparent
+/// (ADR 0039) — a picture that looks like a defect and is not one.
 fn draw_through_the_surface_again(display: &mut Display, device: &mut Device) {
-    let viewport = Viewport::full(fixture::WINDOW.0, fixture::WINDOW.1, Affine::IDENTITY);
-    let scene = fixture::through_the_surface();
+    let (width, height) = display.size();
+    let viewport = Viewport::full(width, height, Affine::IDENTITY);
+    let scene = fixture::through_the_surface((width, height));
     let until = Instant::now() + SETTLE;
     while Instant::now() < until {
         display.pump();
@@ -493,8 +527,32 @@ impl Display {
 
     /// Let the window system say what it has to say. Nothing here depends on the
     /// events; a window that is never pumped is a window the server stops believing in.
-    fn pump(&mut self) {
+    pub(crate) fn pump(&mut self) {
         self.event_loop
             .pump_app_events(Some(Duration::ZERO), &mut self.opener);
+    }
+
+    /// The window's inner size in physical pixels, which is what a presenter is sized to.
+    pub(crate) fn size(&self) -> (u32, u32) {
+        let size = self.window.inner_size();
+        (size.width, size.height)
+    }
+
+    /// Ask the window system for a size, and **report the one it gave**.
+    ///
+    /// A resize on X11 is a request the window manager answers when it feels like it, so
+    /// this pumps until the window reports the size asked for or a second passes. The
+    /// return value is what the window actually is — a manager that refused the size
+    /// should produce honest numbers for the window that exists, not pretty ones for the
+    /// window that was wanted.
+    pub(crate) fn resize(&mut self, (width, height): (u32, u32)) -> (u32, u32) {
+        let _ = self
+            .window
+            .request_inner_size(winit::dpi::PhysicalSize::new(width, height));
+        let until = Instant::now() + Duration::from_secs(1);
+        while self.size() != (width, height) && Instant::now() < until {
+            self.pump();
+        }
+        self.size()
     }
 }

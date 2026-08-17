@@ -141,6 +141,9 @@ fails with `bounds` and `inv1` exchanged.
   refresh of 0.00 here, so what share of a refresh a present takes is the owner's
   measurement on the display that states one. The notes say exactly what to ask it.
 
+  **Taken on 2026-08-17. It is 4.4 % of a refresh, and this ADR's own guess about itself
+  was right** — see the amendment below.
+
 ## Consequences
 
 - Public API: none. `Layer`, `Presenter::present`, `PresentCost` and every refusal are
@@ -149,3 +152,54 @@ fails with `bounds` and `inv1` exchanged.
   full-screen triangle or an instanced buffer. `Spec::strip` and `QUAD_UNIFORM` already
   existed for it.
 - ADR 0056's cost bullet is superseded and says so there.
+
+## Amendment, 2026-08-17 — the share of a refresh, and it is the value this ADR predicted
+
+The decision stands and the counts above are unchanged; **the one number this ADR left open
+has been measured** on the owner's `eDP-1` — 2880 × 1800 at 119.96 Hz, one refresh
+**8.34 ms**. The round is `doc/notes-present-rate.md`; the instrument is
+`examples/present_thread/rate.rs` and `examples/present_thread/arrangement.rs`, which CI
+runs.
+
+**The pass is 0.37 ms — 4.4 % of a refresh — at the caller's four layers.** It could not be
+timed at their 2048 × 2560 window because 2560 rows do not fit an 1800-row display, so it was
+measured at **1280 × 1600**, their window at a device scale of 1, where the window-sized
+overlay arrangement is **7 506 609 fragments of 8 192 000 — 91.6 %, this ADR's own share to
+the decimal.**
+
+Two instruments, and they agree:
+
+- **A count, and it is the exact half.** Sixteen copies of the whole four-layer arrangement
+  in one present — 120 105 744 fragments — still land on every refresh, in four runs out of
+  four; thirty-two never do. So one present is **at most 1/16 of a refresh, 0.52 ms**.
+- **A slope, and it is the indicative half.** `Fifo` floors the interval at the refresh until
+  the work exceeds it, so the difference between the two loaded rows divides out everything
+  that does not scale with the layer count: **0.367, 0.369, 0.378 and 0.469 ms per copy**.
+  The minimum is the number; the outlier is the run whose load average reached 17.40.
+  8.31 / 0.367 = 22.6 copies is where the crossing should be, and it is observed between 16
+  and 32.
+
+**Scaled to the caller's own window by this ADR's own fragment counts** — 49 ps a fragment,
+and this row is a *model*, labelled as one:
+
+| at 2048 × 2560 | fragments | modelled | of a refresh |
+|---|---:|---:|---:|
+| before this ADR — four full-screen triangles | 20 971 520 | 1.03 ms | 12.4 % |
+| window-sized overlays, their shape today | 19 210 251 | 0.95 ms | 11.4 % |
+| content-sized overlays, if they size their textures | 10 270 775 | 0.51 ms | 6.1 % |
+
+**So this ADR bought them 0.09 ms — 1.0 % of a refresh — at the arrangement they have, and
+0.53 ms, 6.3 %, at the one they could have.** The decision section said exactly this about
+itself before the number existed: *"today the decision buys them nothing at all … a cost the
+API hides from the person who could remove it."* The milliseconds are not the value; **that
+sizing a layer now pays is.**
+
+**And one caveat of `doc/notes-present-quad.md` §3 resolves, in the favourable direction.**
+That round timed the pass into an offscreen `Rgba8Unorm` target and warned that *"a surface's
+image may differ in tiling or compression, so these are the pass's shape rather than the
+window's cost"*. It read 1.44 – 1.49 ms for window-sized overlays at 2048 × 2560, which is
+76 ps a fragment against the 49 ps measured here on the swapchain — **the window is about
+1.5× cheaper per fragment than the texture**, and the gap is if anything understated, because
+the marginal copy in this round also carries four bind groups and four uniform buffers of
+host work that the timestamped pass did not include. **The offscreen figure must not be
+quoted as the window's cost**; it overstates it by half again.
