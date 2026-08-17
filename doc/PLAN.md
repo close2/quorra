@@ -72,6 +72,35 @@ with no signal. Three examples gained an assertion they never had — including
 `surface_measure`, which is where this section's real-display row comes from and which until
 now asserted nothing about the page it drew.
 
+**The release matrix for `f378fa2 → 1adf479`** — ADR 0066, the one change in this whole round
+that moves pixels. One copy of their tree at `14a81f0d`, RADV, both lanes, both scales,
+2026-08-18 00:35–01:02:
+
+| lane, scale | base `f378fa2` | `main` `1adf479` |
+|---|---|---|
+| CPU, scale 1 | 931 / 23 / 2 / 18 | **931 / 23 / 2 / 18** |
+| GPU, scale 1 | 929 / 25 / 2 / 18 | **929 / 25 / 2 / 18** |
+| CPU, scale 4 | 937 / 11 / 3 / 23 | **937 / 11 / 3 / 23** |
+| GPU, scale 4 | 938 / 10 / 3 / 23 | **938 / 10 / 3 / 23** |
+
+**Nothing moved, and the null was checked rather than accepted.** A null from eleven touched
+files, six of them shaders, is exactly the claim this project has been burned believing, so the
+round walked all 974 page-one display lists: **5 pages emit a `Shaped` command and 16 emit a
+knockout group** (29 groups, 142 overall), so the corpus does reach the path ADR 0066 changed.
+Re-run on those 16 alone, both columns print identical lines with **0 not comparable** — so all
+sixteen were really rendered by both backends rather than skipped.
+
+**And the mechanism is confirmed rather than inferred**: of the six `Shaped` commands, the
+`shape` half carries a soft mask in **none** of them, and the corpus's one masked element
+(`knockout_smask.pdf`) carries it on `object`. That is the caller's `stated_shape` (their
+ADRs 0234/0327) doing exactly what it says, which is what makes ADR 0066 inert *for this
+translator* — by construction, not by luck. A different caller, or a scene built straight
+through `SceneBuilder`, would see the 138-of-255 difference the round measured.
+
+**`a4380e2 → 1cd74c9`, `1cd74c9 → a4f10f5` and `f378fa2 → 1adf479` together cover everything a
+push delivers.** `doc/notes-release-matrix.md` holds all three, with method and per-page
+evidence.
+
 **The release matrix for `1cd74c9 → a4f10f5`** — the 24 commits merged after the matrix below
 was taken: ADR 0063's atlas round, ADR 0064's rare-lane round, ADR 0065's atlas-admission round,
 the `geom.rs` and `outline.rs` splits with the `resources.rs` and `encode/parallel.rs` declines,
