@@ -72,6 +72,33 @@ with no signal. Three examples gained an assertion they never had — including
 `surface_measure`, which is where this section's real-display row comes from and which until
 now asserted nothing about the page it drew.
 
+**The release matrix for `1cd74c9 → a4f10f5`** — the 24 commits merged after the matrix below
+was taken: ADR 0063's atlas round, ADR 0064's rare-lane round, ADR 0065's atlas-admission round,
+the `geom.rs` and `outline.rs` splits with the `resources.rs` and `encode/parallel.rs` declines,
+the real-display rounds, and `CLAUDE.md`'s Wayland correction. One copy of their tree at
+`411063f9`, RADV, both lanes, both scales, taken 2026-08-17 23:37 – 2026-08-18 00:08:
+
+| lane, scale | base `1cd74c9` | `main` `a4f10f5` |
+|---|---|---|
+| CPU, scale 1 | 931 / 23 / 2 / 18 | **931 / 23 / 2 / 18** |
+| GPU, scale 1 | 929 / 25 / 2 / 18 | **929 / 25 / 2 / 18** |
+| CPU, scale 4 | 937 / 11 / 3 / 23 | **937 / 11 / 3 / 23** |
+| GPU, scale 4 | 938 / 10 / 3 / 23 | **938 / 10 / 3 / 23** |
+
+**Nothing moved.** All 79 printed lines across the four rows — 37 distinct documents, 3 814 page
+verdicts — are identical between the columns, and the four output files are byte-identical once
+the wall clocks are removed. That is the null the range's three source-touching commits needed:
+`333f80b`'s two additive `Counters`/`Limits` fields and its one-arithmetic `AtlasStore::byte_size`,
+and the two splits, separately verified as pure code moves by multiset comparison before the run.
+**The caller's `REFUSED_AT_FOUR` ratchet fails in both columns with the same two lists** — ADR 0057's
+`bug1703683_page2_reduced.pdf`, present in both — so it is their outstanding re-baseline and not a
+difference here; the other six runs exit 0. Both columns built their `render-quorra` unmodified,
+which the base column of the matrix below could not. The output was byte-identical across a load
+swing of 1.4 → 35.6, which is its own evidence that a verdict is load-independent.
+
+**`a4380e2 → 1cd74c9` and `1cd74c9 → a4f10f5` together cover everything a push delivers.**
+`doc/notes-release-matrix.md` holds both, with method and per-page evidence.
+
 **The release matrix for `a4380e2 → 1cd74c9`** — fifteen rounds, one copy of their tree, all
 eight runs inside half an hour on 2026-08-17 against their `22ab57d4`, RADV, both lanes, both
 scales (`doc/notes-release-matrix.md`):
@@ -103,10 +130,8 @@ fixtures.
 the caller must drop `bug1703683_page2_reduced.pdf` from it. All four *base* rows exit 0, which
 is what says the ratchet is measuring this change rather than their tree moving under us.
 
-**Three commits are not in this matrix**: ADR 0063's atlas round (`333f80b`, `903d05e`,
-`de1c013`) landed while the runs were in flight. Its own scale-4 run reproduced the recorded
-verdict lists name for name, so nothing is known to move — but it has not had the four-row
-treatment, and it owes one before a push.
+*(The gap this paragraph used to record — three commits that landed while these runs were in
+flight — is closed by the matrix above, which covers them and everything after.)*
 
 **The release matrix for `a64a908 → a4380e2`** — 72 commits, one copy of their tree, 29
 minutes, RADV, both lanes, both scales, taken 2026-08-16 00:04–00:33:
