@@ -634,6 +634,16 @@ with an ordering drain removed**. At 6 pixels for a 44-pixel mark it fails. The 
 atlas defect — a duplicate insert, `bytes_uploaded` off by exactly 64 — was found by the
 gate rather than by reading, which is what a fixture that actually contends buys you.
 
+**A cache's "is this worth caching?" test must be asked on the axis the cache pays off on.**
+ADR 0029's `worth_caching` asks whether *this frame* reads an entry twice. On `Coverage::Gpu`
+that is right, because a "no" routes the tile to a lane measurably faster for one use. On
+`Coverage::Cpu` there is no such lane — "no" routes it to the sheet, the same rasteriser with
+no entry next frame — so the same question turns a one-off cost into a **per-frame** one.
+98.6 % of the corpus's atlas keys are placed exactly once *within* their frame while the atlas
+still serves 242 049 cached marks on the next one: the value was never on the axis the test
+measures. Sibling of the trap below — that one is about **units**, this one about **which
+axis**, and both look correct while reading the call site.
+
 **A cache's "would this help?" test must be asked in the units the cache allocates in.**
 ADR 0024 gated the atlas repack on `bytes requested <= bytes available`, and the packer
 allocates *shelves*: a page at 63 % of the atlas by area did not fit it by packing, so the
@@ -848,7 +858,10 @@ reading it:
   sheet tile a rare paint is drawn through, verified by making the change and reverting it — so
   reopen it by measuring, not by re-deriving. The trigger that changes the arithmetic is a
   residue multiply on the device: 82 % of all rare-painted coverage is under one;
-- the census cannot see how often a shape is placed, at phase granularity (0029);
+- the census cannot see how often a shape is placed, at phase granularity (0029) — and
+  **ADR 0065 measured that this looseness is load-bearing rather than a debt**: a phase-aware
+  census would keep 226 368 tiles out of the atlas rather than 79 370 and empty it almost
+  completely. Sharpening it makes the answer worse, not better;
 - a pane is cut in sheet order rather than by what packs tightest (0028);
 - tiles are packed in encounter order; sorting them needs positions assigned after the walk,
   which is a two-pass encode (0034);

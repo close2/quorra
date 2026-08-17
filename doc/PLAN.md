@@ -331,6 +331,14 @@ who could remove it.
   packer holding earlier pages' tiles**. The atlas has no eviction, so it accumulates across
   pages until something is refused — and the pages that overflow with the quantum off and
   with it on share only six names, so which page pays is not a property of any page.
+  **ADR 0065 has since priced the mechanism behind that accumulation and refused the fix.**
+  Filtering single-use tiles out of the atlas on the default lane removes **88.7 % of the
+  refusals and moves no pixel** — and costs **31.7 % of the corpus's cached marks on every
+  frame after the first**, because 98.6 % of distinct keys are placed once *in their own
+  frame* while the atlas still serves 242 049 cached marks on the next one. The criterion
+  `worth_caching` states is within-frame, and that is the wrong axis for the lane that keeps
+  its tiles; the accumulation stands as ADR 0063 bounded it — one frame per exhaustion, 19
+  pages in 948.
 
 ---
 
