@@ -367,6 +367,16 @@ who could remove it.
   and a soft mask over this paint are never anything but 1 anywhere in the tree, no function
   test runs `Coverage::Gpu`, and ADR 0025's `DestOut`/`Plus` stages are selected but never
   drawn.
+  **The population is now measured, and it is four documents** (ADR 0067, 2026-08-18). A census
+  over **67 464 PDFs** — the whole of the caller's `corpus-cache`, their tracked corpora and
+  pdf.js's suite — found **four** carrying a `/ShadingType 1` together with a type 4 function,
+  of which exactly **one is a real document**, and it is already drawn on the device. It
+  extracted **7 139** type 4 programs and ran the real `admit()` over every one: the agreement
+  classification refuses **5 of 7 139 (0.07 %)**, and the only two that reach this lane are the
+  caller's own hand-written witnesses. Two narrowings that would admit those two are specified
+  and deliberately not built — the yield is two hand-made demos against a third Table 42
+  implementation that would have to agree with the other two for ever.
+  `doc/notes-function-refusal-narrowing.md` is the record.
 - **A ramp's subdomain boundary now follows §7.10.4** (ADR 0055, 2026-08-15). A bound belongs
   to the subfunction that starts there, except at the clause's own two exceptions, which
   point opposite ways: the last interval is closed on the right, and where `Domain0 =

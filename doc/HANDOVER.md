@@ -584,6 +584,17 @@ CARGO_TARGET_DIR=<scratch>/target cargo test --release -p render-quorra --test c
 `PDFVIEWER_QUORRA_COVERAGE=cpu|gpu` picks the lane and `PDFVIEWER_QUORRA_SCALE=n` the
 magnification.
 
+## Counting a feature's population without the corpus test
+
+ADR 0067's census read **67 464 PDFs** — `corpus-cache` alone is 66 211 files and 94 GB — with
+one `rg -a` pass for the dictionary key, a 90-line Python extractor that inflates `/FlateDecode`
+and `/ObjStm` bodies, and a throwaway crate with a path dependency on the worktree that runs the
+**real analyser** over what it found. Minutes rather than the corpus run's 25, no copy of their
+tree, and it answers the question that decides whether a change is worth making at all: **how
+many documents would this touch?** It is sound for a *stream* object because ISO 32000-2 §7.5.7
+forbids stream objects inside object streams; a dictionary-only key needs the `/ObjStm`
+inflation. Reach for this **before** a narrowing round, not after.
+
 ## Traps
 
 **The corpus is part of a change, not a check after it.** Layers sized to their plans passed
@@ -718,6 +729,16 @@ passed**: the page sits at x = 480 with width 1568, so its right edge is the win
 the outward pixel is clamped away at either width. Moving the *height* failed it by exactly
 1569. **A fixture at a boundary can be wrong on the axis of that boundary without anything
 noticing.**
+
+**`wgpu` 30 cannot pin a rounding mode or forbid a fusion, and no amount of Vulkan
+documentation changes that.** `naga` 30 emits no `NoContraction` decoration (the `spirv` crate it
+depends on defines one, so the absence is a choice) and no `RoundingModeRTE` / `DenormPreserve`
+execution mode; `wgpu-hal` 30 never requests `VK_KHR_shader_float_controls`; and **the word
+"contraction" does not occur in the WGSL specification at all**. WGSL §15.7.4.1 grants `x / y`
+**2.5 ULP** where it calls `+ - *` "correctly rounded", and §15.7.4 adds that its own "correctly
+rounded" still "does not specify a rounding mode". So any proposal beginning "we can make the GPU
+bit-exact by setting …" is answered by ADR 0067 §1 before it is costed — it reasons about
+IEEE 754 and raw Vulkan, and we ship WGSL through `wgpu`. A named cost of ADR 0002.
 
 **A stale worktree argues that your brief is wrong.** A round given the four files past the
 size smell reported three "corrections" — that the highest ADR is 0056, that the suite is 445
