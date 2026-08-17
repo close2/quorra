@@ -430,6 +430,20 @@ fn accumulate_edge(
         return;
     }
     let dxdy = (bot_x - top_x) / (bot_y - top_y);
+    // **A slope this edge cannot state is a slab this edge cannot fill.** The numerator
+    // is bounded by twice the largest device coordinate the scene contract admits
+    // (`MAX_COORDINATE` on a point and on a transform coefficient, so `4e27`), and the
+    // denominator is positive by the test above — so a non-finite ratio means the slab
+    // is under `2.4e-11` of a pixel tall, and the exact area such an edge deposits is
+    // under `2.4e-11` where one coverage step is `1/255`. Depositing nothing is the
+    // right answer to eleven decimal places, and it is the only answer that keeps a NaN
+    // out of the accumulator: a NaN survives the prefix sum, and `abs().min(1.0)`
+    // returns **1.0** for it, so one such edge paints the rest of its row solid. The
+    // same test also catches a NaN arriving from a coordinate that is not finite, which
+    // `Device::render` refuses at the viewport before it can reach here.
+    if !dxdy.is_finite() {
+        return;
+    }
 
     let mut y = top_y.floor().max(0.0);
     while y < bot_y {
@@ -641,10 +655,51 @@ pub(crate) fn stroke_polylines(polylines: &[Polyline], stroke: Stroke) -> Vec<Po
     out
 }
 
+/// The unit vector from `a` to `b`, or the zero vector when there is no direction to
+/// give — which is a piece the caller has already established is not zero-length.
+///
+/// # Why the second computation exists
+///
+/// `dx * dx` is not the length of anything on its own, and it leaves the representable
+/// range at both ends long before `dx` does: it overflows to infinity above `1.9e19`
+/// and underflows to zero below `1.1e-22`. **Both ends are inside the scene contract.**
+/// `MAX_COORDINATE` is `1e9` on an outline point *and* on a transform coefficient, and a
+/// device delta is a composed transform applied to such a point, so `dx` reaches `1e27`;
+/// at the other end nothing bounds a delta from below except the float grid, and
+/// `stroke_polylines`' dedupe compares coordinates for *equality*, which two points
+/// `1e-30` apart pass.
+///
+/// Neither end used to be caught, and neither failed quietly at the same place:
+/// - `1e27` gave `len = inf`, so the normal was `(0, 0)`, so the stroke's quad was
+///   degenerate and the mark **deposited no ink at all**;
+/// - `1e-30` gave `len = 0`, so the normal was `(NaN, ±inf)`, and `fill_mask`'s prefix
+///   sum carries a NaN to the end of its row where `abs().min(1.0)` returns **1.0** for
+///   it — a fully painted row across the tile. CLAUDE.md's rule is that a document's
+///   numbers must "never produce NaN geometry"; this was the one place in the tree that
+///   did.
+///
+/// `hypot` is the same length without the square and is exact at both ends. It is the
+/// *second* path rather than the only one because it is a libm call on the hottest
+/// stroke loop there is — the caller's reading of hayro #630 is the standing warning
+/// about exactly that — and because every segment the fast path already handles must
+/// keep the arithmetic it had, to the bit, so that no page of the corpus moves.
 fn direction(a: Point, b: Point) -> Point {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len = (dx * dx + dy * dy).sqrt();
-    Point::new(dx / len, dy / len)
+    if len.is_finite() && len > 0.0 {
+        return Point::new(dx / len, dy / len);
+    }
+    let len = dx.hypot(dy);
+    if len.is_finite() && len > 0.0 {
+        Point::new(dx / len, dy / len)
+    } else {
+        // `a` and `b` are the same point to the last bit, or one of them is not finite —
+        // neither of which `stroke_polylines` hands us, since it dedupes exact repeats
+        // and its input is bounded by `MAX_COORDINATE`. A zero direction makes every
+        // piece built from it degenerate, which deposits nothing (§8.5.3.2's degenerate
+        // subpath), rather than letting a NaN into the accumulator.
+        Point::new(0.0, 0.0)
+    }
 }
 
 /// The left normal of `a → b`, scaled to the half-width.
@@ -1396,5 +1451,113 @@ mod tests {
         let lines = flatten(&path, IDENTITY);
         let region = fill_mask(&lines, Rule::NonZero, -4, 0, 16, 1);
         assert_eq!(cov(&region, 4, 0), 159, "the pixel at device x = 0");
+    }
+
+    /// The largest device coordinate the scene contract admits, derived rather than
+    /// picked: `MAX_COORDINATE` is `1e9` on an outline point *and* on each of a command
+    /// transform's and the viewport transform's coefficients, so
+    /// `point × command × viewport` reaches `1e27` and a sum of two such terms `2e27`.
+    ///
+    /// `Device::render` refuses a viewport transform above `MAX_COORDINATE`
+    /// (`RenderError::ViewportTransformTooLarge`), which is what makes this a *bound*
+    /// rather than a guess.
+    const LARGEST_DEVICE_COORDINATE: f32 = 2e27;
+
+    fn hairline() -> Stroke {
+        Stroke {
+            width: 4.0,
+            cap: LineCap::Butt,
+            join: LineJoin::Miter,
+            miter_limit: 10.0,
+        }
+    }
+
+    /// **A stroke at the top of the coordinate range still deposits its ink.**
+    ///
+    /// `direction`'s `dx * dx` overflows to infinity above `1.9e19`, which is eight
+    /// orders of magnitude below what the contract admits; the length was then infinite,
+    /// the normal `(0, 0)`, and the stroke's quad had no width at all. A mark asked for
+    /// and drawn as nothing is §5's forbidden third state, and no test could see it
+    /// because every fixture in the tree is a page-sized number.
+    #[test]
+    fn a_stroke_spanning_the_coordinate_range_is_not_drawn_as_nothing() {
+        let line = Polyline {
+            points: vec![
+                Point::new(0.0, 4.0),
+                Point::new(LARGEST_DEVICE_COORDINATE, 4.0),
+            ],
+            closed: false,
+        };
+        let expanded = stroke_polylines(&[line], hairline());
+        assert!(
+            expanded
+                .iter()
+                .flat_map(|line| &line.points)
+                .all(|p| p.x.is_finite() && p.y.is_finite()),
+            "no piece of the expansion may be non-finite: {expanded:?}"
+        );
+        let mask = fill_mask(&expanded, Rule::NonZero, 0, 0, 8, 8);
+        assert_eq!(cov(&mask, 4, 3), 255, "the band's own row is covered");
+        assert_eq!(cov(&mask, 4, 4), 255, "and so is the other side of it");
+        assert_eq!(cov(&mask, 4, 0), 0, "four pixels above it is not");
+    }
+
+    /// **A segment too short for the float grid produces no NaN geometry**, which is
+    /// CLAUDE.md's rule about a document's numbers stated at the one place in the tree
+    /// that broke it.
+    ///
+    /// `stroke_polylines` drops coincident neighbours by comparing coordinates for
+    /// equality, and two points `1e-30` apart are not equal — while `dx * dx` for that
+    /// delta underflows to zero, so the length was zero and the normal `(NaN, ±inf)`.
+    /// Both coordinates are inside `MAX_COORDINATE`, so this is an outline a document may
+    /// state.
+    #[test]
+    fn a_segment_below_the_float_grid_produces_finite_geometry() {
+        let line = Polyline {
+            points: vec![Point::new(0.0, 4.0), Point::new(1e-30, 4.0)],
+            closed: false,
+        };
+        let expanded = stroke_polylines(&[line], hairline());
+        assert!(
+            expanded
+                .iter()
+                .flat_map(|line| &line.points)
+                .all(|p| p.x.is_finite() && p.y.is_finite()),
+            "a piece of the expansion is not finite: {expanded:?}"
+        );
+        let mask = fill_mask(&expanded, Rule::NonZero, 0, 0, 8, 8);
+        assert!(
+            mask.coverage.iter().all(|&byte| byte == 0),
+            "a butt-capped stroke of a zero-length segment covers nothing: {:?}",
+            mask.coverage
+        );
+    }
+
+    /// **An edge whose slope leaves `f32` deposits nothing, not a solid row.**
+    ///
+    /// The triangle below is `1e-30` of a pixel tall and `1e9` wide — both inside
+    /// `MAX_COORDINATE`, so a document may state it. Its slope is `1e39`, which is
+    /// infinite in `f32`; the slab arithmetic then produced a NaN, the prefix sum carried
+    /// it to the end of the row, and `abs().min(1.0)` returns **1.0** for a NaN — so one
+    /// invisible sliver painted its whole row solid.
+    ///
+    /// Zero is not a compromise here but the exact answer to eleven decimal places: the
+    /// area such an edge covers is under `1e-30` where one coverage step is `1/255`.
+    #[test]
+    fn an_edge_whose_slope_leaves_f32_deposits_nothing() {
+        let sliver = Polyline {
+            points: vec![
+                Point::new(0.0, 1e-30),
+                Point::new(1e9, 2e-30),
+                Point::new(0.0, 2e-30),
+            ],
+            closed: true,
+        };
+        let mask = fill_mask(&[sliver], Rule::NonZero, 0, 0, 8, 8);
+        assert!(
+            mask.coverage.iter().all(|&byte| byte == 0),
+            "a sliver 1e-30 of a pixel tall covers no pixel: {:?}",
+            mask.coverage
+        );
     }
 }

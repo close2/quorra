@@ -159,6 +159,22 @@ impl Encoder<'_> {
 
     /// Extend the current batch, or start a new one on any switch of lane, style or
     /// mask — scene order is preserved by breaking batches, never by reordering.
+    ///
+    /// # Why the `- 1` cannot wrap, and the `as u32` cannot truncate
+    ///
+    /// This is private and both callers append **one whole instance** immediately before
+    /// calling it, so the stream holds at least one stride and the index of its last
+    /// instance is at least zero. There is no third caller and no path that notes a batch
+    /// before writing one; if one were added, the subtraction would wrap to `u32::MAX` in
+    /// release and the batch would name an instance the draw call does not have. The
+    /// `no_batch_is_noted_before_its_instance_is_written` test states the invariant from
+    /// the outside — a first mark's batch begins at index 0 — so the argument is gated
+    /// rather than only written down.
+    ///
+    /// `as u32` is a truncation only above four billion instances in one stream, which is
+    /// 137 GB of rectangle instances; `encode` refuses the frame at
+    /// `Options::max_frame_bytes` (268 MiB by default) long before, having charged one
+    /// rect and one quad per command up front.
     #[allow(clippy::cast_possible_truncation, clippy::arithmetic_side_effects)]
     fn note_batch(&mut self, kind: BatchKind, style: DrawStyle, mask: Option<u32>) {
         let index = match kind {

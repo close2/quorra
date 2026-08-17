@@ -51,6 +51,24 @@ pub enum RenderError {
     /// never turned into NaN geometry.
     #[error("the viewport transform has a non-finite coefficient")]
     NonFiniteViewportTransform,
+    /// A viewport transform coefficient exceeded
+    /// [`MAX_COORDINATE`](quorra_scene::MAX_COORDINATE), the bound the scene boundary
+    /// already holds every rectangle corner and command transform to.
+    ///
+    /// The two bounds together are what makes "no device coordinate is infinite" a
+    /// statement one can *check* rather than one that happens to hold: a device point is
+    /// a scene point (≤ `MAX_COORDINATE`) through a command transform (≤
+    /// `MAX_COORDINATE`) through this one, so bounding all three keeps the product
+    /// inside `f32` with thirty orders of magnitude to spare. Leave this one unbounded
+    /// and the composition reaches infinity, and an infinite coordinate does not stop a
+    /// frame — it paints a row of a coverage tile solid (`raster::accumulate_edge`).
+    #[error("viewport transform coefficient {coefficient} exceeds the limit of {limit}")]
+    ViewportTransformTooLarge {
+        /// The largest coefficient magnitude the transform carries.
+        coefficient: f32,
+        /// The limit, [`MAX_COORDINATE`](quorra_scene::MAX_COORDINATE).
+        limit: f32,
+    },
     /// A damage rectangle was not a finite, ordered rectangle. Refused rather than
     /// repaired: a malformed damage list means the caller's change tracking broke,
     /// and a guessed region would risk exactly the stale frame damage exists to

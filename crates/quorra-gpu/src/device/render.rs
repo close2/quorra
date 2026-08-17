@@ -18,7 +18,7 @@
 
 use std::time::{Duration, Instant};
 
-use quorra_scene::Scene;
+use quorra_scene::{MAX_COORDINATE, Scene};
 
 use super::Device;
 use super::bound::Bound;
@@ -398,6 +398,20 @@ impl Device {
     fn validate_viewport(&self, viewport: &Viewport<'_>) -> Result<(), RenderError> {
         if !viewport.transform.is_finite() {
             return Err(RenderError::NonFiniteViewportTransform);
+        }
+        // The scene boundary holds every rectangle corner, every outline point and every
+        // command transform to `MAX_COORDINATE`; this is the third factor of a device
+        // coordinate and the only one that used to be checked for finiteness alone. With
+        // all three bounded the largest device coordinate is about `4e27`, which leaves
+        // `f32` eleven orders of magnitude of headroom — and that headroom is what
+        // `raster::accumulate_edge`'s slope test spends. See
+        // [`RenderError::ViewportTransformTooLarge`].
+        let coefficient = viewport.transform.max_coefficient();
+        if coefficient > MAX_COORDINATE {
+            return Err(RenderError::ViewportTransformTooLarge {
+                coefficient,
+                limit: MAX_COORDINATE,
+            });
         }
         let limit = self.limits.max_target_size;
         if viewport.width > limit || viewport.height > limit {
