@@ -6,21 +6,27 @@
 //! is what each caller already built** — a fixture generalised on the way in would change
 //! what somebody's assertion means without anybody deciding to.
 //!
-//! Four parts, along what each is about:
+//! Five parts, along what each is about:
 //!
 //! - [`headless`] — the device this suite renders through, and the pixels it hands back;
 //! - [`scene`] — the scene pieces more than one file draws;
 //! - [`retained`] — the two pages and the render helper the `retained_*.rs` family shares,
 //!   as `tests/function_support/` is shared by the `function_*.rs` family;
-//! - [`clause`] — §11.4.6's line, which four files measure a frame against.
+//! - [`clause`] — §11.4.6's line, which four files measure a frame against;
+//! - [`probe`] — a drawn raster turned into the number an assertion is written on.
 //!
-//! Some fixtures with two copies are deliberately still apart, and `doc/HANDOVER.md` says
-//! which: each of them indexes a raster through its own file's `SIZE`, so one home for
-//! them means one home for `SIZE`, and that would tie five files' probe dimensions
-//! together. Unifying them is a decision about what those probes are, not a refactor.
-//! [`clause`] is the one that *was* unified, and only because that objection did not
-//! survive being read: the clause's arithmetic runs over every pixel of the rasters it is
-//! handed and needs no dimension at all, where a probe needs one to name a pixel.
+//! The last two were listed in `doc/HANDOVER.md` as deliberately *not* unified, and the
+//! recorded obstacle was the same sentence for both: each copy indexed a raster through
+//! its own file's `SIZE`, so one home for them looked like one home for `SIZE`. Read
+//! rather than quoted forward, that obstacle was two different mistakes. [`clause`]'s
+//! arithmetic runs over every pixel of the rasters it is handed and needs **no** dimension
+//! at all. [`probe`]'s needs the raster's **stride** — which is an argument, not a
+//! suite-wide constant, and three files here were already passing it before the merge.
+//! Neither module can read another file's `SIZE`, because neither reads a `SIZE`.
+//!
+//! What each caller still owns is its **expectation and its bound**: `clause`'s callers
+//! each state their own partial-pixel floor, and `probe`'s each state their own tolerance.
+//! A measurement is shared; a claim about a fixture is not.
 
 #![allow(
     dead_code,
@@ -43,5 +49,6 @@
 
 pub mod clause;
 pub mod headless;
+pub mod probe;
 pub mod retained;
 pub mod scene;

@@ -79,6 +79,10 @@ use quorra_scene::{
     Affine, BlendMode, Color, Compose, FillRule, Paint, Point, Scene, SceneBuilder, Segment,
 };
 
+mod common;
+
+use common::probe::alpha;
+
 /// The fixture in its own units, magnified so that its tile is far too large for the atlas
 /// below and the lane chooser sends it to the device (the recipe `coverage_lanes.rs` uses,
 /// for the same reason).
@@ -152,9 +156,17 @@ fn render(samples: u32) -> Vec<u8> {
 }
 
 /// The alpha at the middle of unit cell `(x, y)`.
+///
+/// `coverage_lanes.rs` carries the same probe over the same `UNITS × MAGNIFY` fixture; both
+/// now read through `common::probe::alpha`, and what stays here is the *unit-to-device* map,
+/// which is this fixture's own arithmetic rather than a raster's.
 fn at_unit(pixels: &[u8], x: u32, y: u32) -> u8 {
-    let (px, py) = (x * MAGNIFY + MAGNIFY / 2, y * MAGNIFY + MAGNIFY / 2);
-    pixels[((py * SIZE + px) * 4 + 3) as usize]
+    alpha(
+        pixels,
+        SIZE,
+        x * MAGNIFY + MAGNIFY / 2,
+        y * MAGNIFY + MAGNIFY / 2,
+    )
 }
 
 /// **A sample count that is not a multiple of the pass width still covers a covered

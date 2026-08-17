@@ -44,6 +44,10 @@ use quorra_scene::{
     Affine, BlendMode, Color, Compose, GroupSpec, Point, Rect, Scene, SceneBuilder,
 };
 
+mod common;
+
+use common::probe::max_byte_diff;
+
 /// Every Vulkan adapter on this machine, by name. The determinism promises quoted in
 /// the module docs are made for Vulkan adapters (RADV and lavapipe are what the
 /// caller's CI relies on); a GL adapter that wgpu also enumerates is out of scope and
@@ -269,19 +273,12 @@ fn render_golden(device: &mut Device) -> Vec<u8> {
 /// The stated cross-implementation bound (module docs, ADR 0006): ±1 unorm step per
 /// blend stage in premultiplied space, amplified to at most ±2 by the straight-alpha
 /// conversion on this golden (minimum alpha 128).
+///
+/// **A property of this golden, which is why it did not move to `common::probe` with
+/// [`max_byte_diff`].** The `255/α` amplification is read off *this* fixture's minimum
+/// alpha; `m3.rs` states its own for the same reason, and its page's is 29 rather than
+/// 128. One name over two fixtures would be one number claiming two derivations.
 const UNORM_TOLERANCE: i32 = 2;
-
-/// Largest per-byte difference between two rasters, or a panic with PNG artefacts if
-/// the shapes differ.
-fn max_byte_diff(actual: &[u8], expected: &[u8]) -> i32 {
-    assert_eq!(actual.len(), expected.len());
-    actual
-        .iter()
-        .zip(expected)
-        .map(|(a, e)| (i32::from(*a) - i32::from(*e)).abs())
-        .max()
-        .unwrap_or(0)
-}
 
 /// The golden: every Vulkan adapter agrees with the CPU reference within the stated
 /// unorm-conversion bound.

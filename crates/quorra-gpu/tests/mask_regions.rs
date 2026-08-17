@@ -29,6 +29,11 @@
 use quorra_gpu::{Device, Options, Target, Viewport};
 use quorra_scene::{Affine, Color, MaskKind, Point, Rect, Scene, SceneBuilder, Transfer};
 
+mod common;
+
+use common::headless::render;
+use common::probe::alpha;
+
 /// 64 pixels wide: 64 × 4 bytes = 256, the buffer-copy row alignment.
 const SIZE: u32 = 64;
 
@@ -45,24 +50,6 @@ fn device() -> Device {
 
 fn device_with(options: &Options) -> Device {
     Device::headless(options).expect("llvmpipe is present wherever this suite runs")
-}
-
-fn render(device: &mut Device, scene: &Scene) -> Vec<u8> {
-    device
-        .render(
-            scene,
-            &Viewport::full(SIZE, SIZE, Affine::IDENTITY),
-            Target::Readback,
-        )
-        .expect("renders")
-        .into_raster()
-        .unwrap()
-        .into_pixels()
-}
-
-/// The alpha of one pixel of a straight-alpha RGBA readback.
-fn alpha(pixels: &[u8], x: u32, y: u32) -> u8 {
-    pixels[((y * SIZE + x) * 4 + 3) as usize]
 }
 
 /// §11.5's mask value where the mask's group marks nothing, derived from the clause.
@@ -156,11 +143,16 @@ fn masked_page(kind: MaskKind, transfer: Option<Transfer>, mask_marks: bool) -> 
 fn a_mask_is_its_transparent_reduction_where_its_group_marks_nothing() {
     let mut device = device();
     for (kind, transfer) in cases() {
-        let pixels = render(&mut device, &masked_page(kind, transfer.clone(), true));
+        let pixels = render(
+            &mut device,
+            &masked_page(kind, transfer.clone(), true),
+            SIZE,
+            SIZE,
+        );
         let expected = transparent_mask_value(kind, transfer.as_ref());
         for (x, y) in [(40, 40), (SIZE - 1, SIZE - 1), (0, 40), (40, 0)] {
             assert_eq!(
-                alpha(&pixels, x, y),
+                alpha(&pixels, SIZE, x, y),
                 expected,
                 "({x}, {y}) is outside the mask group under {kind:?} \
                  (transfer: {})",
@@ -180,11 +172,16 @@ fn a_mask_is_its_transparent_reduction_where_its_group_marks_nothing() {
 fn a_mask_is_its_groups_reduction_inside_the_rectangle_it_marks() {
     let mut device = device();
     for (kind, transfer) in cases() {
-        let pixels = render(&mut device, &masked_page(kind, transfer.clone(), true));
+        let pixels = render(
+            &mut device,
+            &masked_page(kind, transfer.clone(), true),
+            SIZE,
+            SIZE,
+        );
         let expected = transfer.as_ref().map_or(255, |t| t.apply(255));
         for (x, y) in [(0, 0), (8, 8), (MARKED as u32 - 1, MARKED as u32 - 1)] {
             assert_eq!(
-                alpha(&pixels, x, y),
+                alpha(&pixels, SIZE, x, y),
                 expected,
                 "({x}, {y}) is inside the mask group under {kind:?} \
                  (transfer: {})",
@@ -193,13 +190,13 @@ fn a_mask_is_its_groups_reduction_inside_the_rectangle_it_marks() {
         }
         // The step is exactly at the group's edge, in both axes.
         assert_ne!(
-            alpha(&pixels, MARKED as u32 - 1, 0),
-            alpha(&pixels, MARKED as u32, 0),
+            alpha(&pixels, SIZE, MARKED as u32 - 1, 0),
+            alpha(&pixels, SIZE, MARKED as u32, 0),
             "the mask changes value at its group's right edge under {kind:?}",
         );
         assert_ne!(
-            alpha(&pixels, 0, MARKED as u32 - 1),
-            alpha(&pixels, 0, MARKED as u32),
+            alpha(&pixels, SIZE, 0, MARKED as u32 - 1),
+            alpha(&pixels, SIZE, 0, MARKED as u32),
             "the mask changes value at its group's bottom edge under {kind:?}",
         );
     }
@@ -274,11 +271,16 @@ fn a_mask_over_a_corner_is_priced_for_the_corner() {
 fn a_mask_whose_group_marks_nothing_is_transparent_everywhere() {
     let mut device = device();
     for (kind, transfer) in cases() {
-        let pixels = render(&mut device, &masked_page(kind, transfer.clone(), false));
+        let pixels = render(
+            &mut device,
+            &masked_page(kind, transfer.clone(), false),
+            SIZE,
+            SIZE,
+        );
         let expected = transparent_mask_value(kind, transfer.as_ref());
         for (x, y) in [(0, 0), (1, 1), (32, 32), (SIZE - 1, SIZE - 1)] {
             assert_eq!(
-                alpha(&pixels, x, y),
+                alpha(&pixels, SIZE, x, y),
                 expected,
                 "({x}, {y}) under an unmarked mask group, {kind:?} \
                  (transfer: {})",

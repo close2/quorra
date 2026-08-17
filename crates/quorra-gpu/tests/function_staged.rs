@@ -54,15 +54,17 @@
     clippy::arithmetic_side_effects
 )]
 
-use quorra_gpu::{Device, Options, Target, Viewport};
+use quorra_gpu::{Device, Options};
 use quorra_scene::{
     Affine, BlendMode, Color, Compose, FillRule, FnOp, FnRange, FunctionId, OutlineId, Paint,
-    Point, Rect, Scene, SceneBuilder, Segment,
+    Point, Rect, SceneBuilder, Segment,
 };
 
 mod common;
 
 use common::clause::deviation_from_the_clause;
+use common::headless::render;
+use common::probe::pixel;
 
 const SIZE: u32 = 64;
 
@@ -90,24 +92,6 @@ fn device() -> (Device, String) {
     .expect("the requested adapter is present");
     let name = device.description().to_string();
     (device, name)
-}
-
-fn render(device: &mut Device, scene: &Scene) -> Vec<u8> {
-    device
-        .render(
-            scene,
-            &Viewport::full(SIZE, SIZE, Affine::IDENTITY),
-            Target::Readback,
-        )
-        .expect("the frame is drawn")
-        .into_raster()
-        .unwrap()
-        .into_pixels()
-}
-
-fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
-    let at = ((y * SIZE + x) * 4) as usize;
-    [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
 }
 
 /// A triangle with two diagonal edges, so partially covered pixels exist: axis-aligned
@@ -227,14 +211,14 @@ fn the_staged_pair_over_a_function_paint_is_the_clause() {
             Some(background),
             Compose::SrcOver,
         );
-        render(device, &builder.finish())
+        render(device, &builder.finish(), SIZE, SIZE)
     };
     let shape = onto_transparency(&mut device, opaque);
     let deposit = onto_transparency(&mut device, translucent);
 
     let mut before = SceneBuilder::new();
     backdrop(&mut before);
-    let before = render(&mut device, &before.finish());
+    let before = render(&mut device, &before.finish(), SIZE, SIZE);
 
     let mut staged_scene = SceneBuilder::new();
     backdrop(&mut staged_scene);
@@ -252,7 +236,7 @@ fn the_staged_pair_over_a_function_paint_is_the_clause() {
         Some(translucent),
         Compose::Plus,
     );
-    let staged = render(&mut device, &staged_scene.finish());
+    let staged = render(&mut device, &staged_scene.finish(), SIZE, SIZE);
 
     let mut over_scene = SceneBuilder::new();
     backdrop(&mut over_scene);
@@ -263,7 +247,7 @@ fn the_staged_pair_over_a_function_paint_is_the_clause() {
         Some(translucent),
         Compose::SrcOver,
     );
-    let over = render(&mut device, &over_scene.finish());
+    let over = render(&mut device, &over_scene.finish(), SIZE, SIZE);
 
     let (worst_staged, partial) = deviation_from_the_clause(&before, &shape, &deposit, &staged);
     let (worst_over, _) = deviation_from_the_clause(&before, &shape, &deposit, &over);
@@ -311,17 +295,17 @@ fn dest_out_over_a_function_paint_erases_only_where_the_clause_paints() {
 
     let mut before = SceneBuilder::new();
     backdrop(&mut before);
-    let before = render(&mut device, &before.finish());
+    let before = render(&mut device, &before.finish(), SIZE, SIZE);
 
     let mut builder = SceneBuilder::new();
     backdrop(&mut builder);
     function_mark(&mut builder, outline, program, None, Compose::DestOut);
-    let erased = render(&mut device, &builder.finish());
+    let erased = render(&mut device, &builder.finish(), SIZE, SIZE);
 
     // x < 16 is inside the transformed domain rectangle; x >= 16 is outside it.
     for x in [0_u32, 8, 15] {
         assert_eq!(
-            pixel(&erased, x, 32),
+            pixel(&erased, SIZE, x, 32),
             [0, 0, 0, 0],
             "{adapter}: at x = {x} the paint marks at full shape, so `1 − shape` leaves \
              nothing of the page"
@@ -329,8 +313,8 @@ fn dest_out_over_a_function_paint_erases_only_where_the_clause_paints() {
     }
     for x in [16_u32, 32, 63] {
         assert_eq!(
-            pixel(&erased, x, 32),
-            pixel(&before, x, 32),
+            pixel(&erased, SIZE, x, 32),
+            pixel(&before, SIZE, x, 32),
             "{adapter}: at x = {x} §8.7.4.5.2 leaves the point unpainted, so §11.6.4.2 \
              gives it no shape and `DestOut` has nothing to erase with"
         );
@@ -371,7 +355,7 @@ fn dest_out_over_a_function_paint_ignores_the_paints_own_opacity() {
             Some(Color::new(0.2, 0.4, 0.6, alpha)),
             Compose::DestOut,
         );
-        render(device, &builder.finish())
+        render(device, &builder.finish(), SIZE, SIZE)
     };
 
     let opaque = erase_with(&mut device, 1.0);
@@ -383,7 +367,7 @@ fn dest_out_over_a_function_paint_ignores_the_paints_own_opacity() {
     );
     for (x, y) in [(2_u32, 2_u32), (32, 32), (63, 63)] {
         assert_eq!(
-            pixel(&opaque, x, y),
+            pixel(&opaque, SIZE, x, y),
             [0, 0, 0, 0],
             "{adapter}: with a `Background` the clause paints every point of the mark, so \
              its shape is the whole rectangle and `1 − shape` is 0 at ({x}, {y})"

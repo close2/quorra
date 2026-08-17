@@ -61,6 +61,10 @@ mod function_support;
 
 use function_support::programs::{DISCONTINUOUS, UNIT_RGB, unit_domain};
 
+mod common;
+
+use common::probe::pixel;
+
 /// The target every frame is drawn into: [`CELL`] × the largest scale, so the whole shading
 /// fits at every zoom and the comparison is over the same shading rather than over a
 /// differently cropped one.
@@ -154,11 +158,6 @@ fn render_at(device: &mut Device, scene: &Scene, scale: f32) -> Vec<u8> {
         .into_pixels()
 }
 
-fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
-    let at = ((y * SIZE + x) * 4) as usize;
-    [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
-}
-
 /// #551's question answered in the strongest form available: at 1×, 2× and 4× the colour of
 /// **every** device pixel is the program's value at that pixel's own centre.
 ///
@@ -188,7 +187,7 @@ fn every_device_pixel_carries_the_program_s_value_at_its_own_centre() {
             // input.
             let x = (i as f32 + 0.5) / (CELL as f32 * scale);
             let expected = (x * 255.0).round() as u8;
-            let actual = pixel(&pixels, i, row);
+            let actual = pixel(&pixels, SIZE, i, row);
             assert!(
                 i32::from(actual[0]).abs_diff(i32::from(expected)) <= 1,
                 "{adapter}, scale {scale}, column {i}: red is {} where the program's value \
@@ -228,7 +227,7 @@ fn magnifying_the_page_adds_detail_rather_than_repeating_it() {
         let pixels = render_at(&mut device, &scene, scale);
         let span = (CELL as f32 * scale) as u32;
         let row = span / 2;
-        let distinct: BTreeSet<u8> = (0..span).map(|i| pixel(&pixels, i, row)[0]).collect();
+        let distinct: BTreeSet<u8> = (0..span).map(|i| pixel(&pixels, SIZE, i, row)[0]).collect();
         counts.push(distinct.len() as u32);
     }
     assert_eq!(
@@ -274,14 +273,14 @@ fn a_discontinuity_lands_where_the_program_puts_it_and_not_on_the_zoom_s_grid() 
         // The first column whose centre is at or past shading x = 0.5.
         let step = (16.25_f32 * scale - 0.5).ceil() as u32;
         assert_eq!(
-            pixel(&pixels, step - 1, row),
+            pixel(&pixels, SIZE, step - 1, row),
             [0, 0, 255, 255],
             "{adapter}, scale {scale}: column {} is left of the step and must be the \
              program's second branch",
             step - 1
         );
         assert_eq!(
-            pixel(&pixels, step, row),
+            pixel(&pixels, SIZE, step, row),
             [255, 0, 0, 255],
             "{adapter}, scale {scale}: column {step} is at the step and must be the \
              program's first branch — a grid baked before the zoom would still be blue here"

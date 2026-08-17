@@ -38,6 +38,10 @@ use quorra_scene::{
     Scene, SceneBuilder, Segment,
 };
 
+mod common;
+
+use common::probe::pixel;
+
 /// The device this file's assertions are made on, named so a failure says where.
 ///
 /// `QUORRA_ADAPTER` picks another: the suite runs on the software rasteriser by default,
@@ -87,11 +91,6 @@ fn render(device: &mut Device, scene: &Scene, width: u32, height: u32) -> Vec<u8
         .into_raster()
         .unwrap()
         .into_pixels()
-}
-
-fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
-    let at = ((y * width + x) * 4) as usize;
-    [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
 }
 
 /// `x y 0.5` — the shortest program that is a function of both inputs and leaves three

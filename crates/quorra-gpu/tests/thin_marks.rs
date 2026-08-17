@@ -91,6 +91,10 @@ use quorra_scene::{
     SceneBuilder, Segment, Stroke,
 };
 
+mod common;
+
+use common::probe::alpha;
+
 /// The target the analytic-lane and stroke fixtures draw into. 64 × 4 = 256 bytes a row,
 /// exactly the buffer-copy alignment.
 const SIZE: u32 = 64;
@@ -157,10 +161,6 @@ fn row_ink(pixels: &[u8], side: u32, y: u32) -> f32 {
             f32::from(pixels[at + 3]) / 255.0
         })
         .sum()
-}
-
-fn alpha(pixels: &[u8], side: u32, x: u32, y: u32) -> u8 {
-    pixels[((y * side + x) * 4 + 3) as usize]
 }
 
 /// How many pixels of one row carry any ink at all.

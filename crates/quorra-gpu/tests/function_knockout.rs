@@ -61,15 +61,17 @@
     clippy::arithmetic_side_effects
 )]
 
-use quorra_gpu::{Device, Options, Target, Viewport};
+use quorra_gpu::{Device, Options};
 use quorra_scene::{
     Affine, BlendMode, Color, Compose, FillRule, FnOp, FnRange, FunctionId, GroupSpec, OutlineId,
-    Paint, Point, Rect, Scene, SceneBuilder, Segment,
+    Paint, Point, Rect, SceneBuilder, Segment,
 };
 
 mod common;
 
 use common::clause::{deviation_from_the_clause, premul};
+use common::headless::render;
+use common::probe::pixel;
 
 const SIZE: u32 = 64;
 
@@ -106,24 +108,6 @@ fn device() -> (Device, String) {
     .expect("the requested adapter is present");
     let name = device.description().to_string();
     (device, name)
-}
-
-fn render(device: &mut Device, scene: &Scene) -> Vec<u8> {
-    device
-        .render(
-            scene,
-            &Viewport::full(SIZE, SIZE, Affine::IDENTITY),
-            Target::Readback,
-        )
-        .expect("the frame is drawn")
-        .into_raster()
-        .unwrap()
-        .into_pixels()
-}
-
-fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
-    let at = ((y * SIZE + x) * 4) as usize;
-    [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
 }
 
 /// A triangle with two diagonal edges, so partially covered pixels exist: axis-aligned
@@ -263,7 +247,7 @@ fn a_function_fill_inside_a_knockout_group_takes_the_replacement() {
             Ok(())
         })
         .unwrap();
-    let before = render(&mut device, &before.finish());
+    let before = render(&mut device, &before.finish(), SIZE, SIZE);
 
     // S, and the shape f that weights it, read from the device rather than assumed. The
     // deposit is drawn under Normal because that is what §11.3.6 leaves of any mode against
@@ -277,7 +261,7 @@ fn a_function_fill_inside_a_knockout_group_takes_the_replacement() {
         None,
         BlendMode::Normal,
     );
-    let deposit = render(&mut device, &alone.finish());
+    let deposit = render(&mut device, &alone.finish(), SIZE, SIZE);
 
     // The shape of the same mark drawn opaquely. The function paint is opaque wherever it
     // marks — §8.7.4.5.2's domain covers the whole shape here and the generated shader
@@ -296,7 +280,7 @@ fn a_function_fill_inside_a_knockout_group_takes_the_replacement() {
             None,
         )
         .unwrap();
-    let shape = render(&mut device, &opaque.finish());
+    let shape = render(&mut device, &opaque.finish(), SIZE, SIZE);
     let worst_alpha = shape
         .iter()
         .skip(3)
@@ -320,7 +304,7 @@ fn a_function_fill_inside_a_knockout_group_takes_the_replacement() {
                 Ok(())
             })
             .unwrap();
-        render(device, &builder.finish())
+        render(device, &builder.finish(), SIZE, SIZE)
     };
     let knocked = in_group(&mut device, true);
     let ordinary = in_group(&mut device, false);
@@ -381,7 +365,7 @@ fn a_point_the_domain_leaves_unpainted_knocks_nothing_out() {
             Ok(())
         })
         .unwrap();
-    let before = render(&mut device, &before.finish());
+    let before = render(&mut device, &before.finish(), SIZE, SIZE);
 
     let mut builder = SceneBuilder::new();
     builder
@@ -398,13 +382,13 @@ fn a_point_the_domain_leaves_unpainted_knocks_nothing_out() {
             Ok(())
         })
         .unwrap();
-    let knocked = render(&mut device, &builder.finish());
+    let knocked = render(&mut device, &builder.finish(), SIZE, SIZE);
 
     // x < 16 is inside the transformed domain rectangle; x >= 16 is outside it.
     for x in [20_u32, 32, 48, 63] {
         assert_eq!(
-            pixel(&knocked, x, 32),
-            pixel(&before, x, 32),
+            pixel(&knocked, SIZE, x, 32),
+            pixel(&before, SIZE, x, 32),
             "{adapter}: at x = {x} the clause leaves the point unpainted, so the knockout \
              element has no shape there and the group keeps what it accumulated"
         );
@@ -413,7 +397,7 @@ fn a_point_the_domain_leaves_unpainted_knocks_nothing_out() {
     // reached the target: inside the domain the group carries the function's own value at
     // the pixel's centre (§10.7.4), which at f = 1 is §11.4.6's replacement in full.
     for (x, want) in [(2_u32, 2.5_f32), (8, 8.5)] {
-        let got = pixel(&knocked, x, 32);
+        let got = pixel(&knocked, SIZE, x, 32);
         let expected = (want / SIZE as f32 * 255.0).round() as i32;
         assert!(
             (i32::from(got[0]) - expected).abs() <= 1,
@@ -471,7 +455,7 @@ fn a_background_alpha_knocks_out_at_full_shape() {
                 Ok(())
             })
             .unwrap();
-        render(device, &builder.finish())
+        render(device, &builder.finish(), SIZE, SIZE)
     };
     let knocked = in_group(&mut device, true);
     let ordinary = in_group(&mut device, false);
@@ -512,7 +496,7 @@ fn a_background_alpha_knocks_out_at_full_shape() {
                 composited[channel]
             );
         }
-        let alpha = f32::from(pixel(&knocked, x, 32)[3]) / 255.0;
+        let alpha = f32::from(pixel(&knocked, SIZE, x, 32)[3]) / 255.0;
         assert!(
             (alpha - expected[3]).abs() <= 3.0 / 255.0,
             "{adapter}: at x = {x} the knockout replaces the group's alpha with the \
@@ -521,7 +505,7 @@ fn a_background_alpha_knocks_out_at_full_shape() {
             expected[3]
         );
         assert_eq!(
-            pixel(&ordinary, x, 32)[3],
+            pixel(&ordinary, SIZE, x, 32)[3],
             255,
             "{adapter}: where the ordinary group keeps the opaque cover underneath"
         );

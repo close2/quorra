@@ -45,6 +45,10 @@ use quorra_scene::{
     Point, Rect, Scene, SceneBuilder, Segment,
 };
 
+mod common;
+
+use common::probe::pixel;
+
 /// The target the pages below are drawn into. 192 × 4 = 768 bytes a row, a multiple of
 /// the 256-byte buffer-copy alignment, and wide enough that the two marks of
 /// [`a_function_tile_and_a_device_drawn_tile_share_one_sheet`] do not overlap — which they
@@ -86,11 +90,6 @@ fn rect_outline(rect: Rect) -> Vec<Segment> {
         Segment::LineTo(Point::new(rect.min.x, rect.max.y)),
         Segment::Close,
     ]
-}
-
-fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
-    let at = ((y * SIZE + x) * 4) as usize;
-    [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
 }
 
 /// One function-painted fill whose `Matrix` maps the unit square onto a `side`-pixel square
@@ -203,7 +202,7 @@ fn the_function_lane_draws_the_same_bytes_under_either_coverage_setting() {
 
     // And the page is the page, not two blank frames agreeing: the rectangle's own
     // position colours it (§10.7.4), which is what says the fixture drew.
-    let inside = pixel(&gpu, 20, 20);
+    let inside = pixel(&gpu, SIZE, 20, 20);
     let want = ((20.5_f32 - 8.0) / 48.0 * 255.0).round() as i32;
     assert!(
         (i32::from(inside[0]) - want).abs() <= 1,
@@ -249,7 +248,7 @@ fn a_function_tile_and_a_device_drawn_tile_share_one_sheet() {
         .1
         .clone()
         .flat_map(|y| BLOB_BOX.0.clone().map(move |x| (x, y)))
-        .any(|(x, y)| pixel(&gpu, x, y) != pixel(&cpu, x, y));
+        .any(|(x, y)| pixel(&gpu, SIZE, x, y) != pixel(&cpu, SIZE, x, y));
     assert!(
         blob_edge_moved,
         "{adapter}: the solid mark must actually take the device lane under Coverage::Gpu, \
@@ -262,8 +261,8 @@ fn a_function_tile_and_a_device_drawn_tile_share_one_sheet() {
     for y in FUNCTION_BOX.1.clone() {
         for x in FUNCTION_BOX.0.clone() {
             assert_eq!(
-                pixel(&gpu, x, y),
-                pixel(&cpu, x, y),
+                pixel(&gpu, SIZE, x, y),
+                pixel(&cpu, SIZE, x, y),
                 "{adapter}: ({x}, {y}) is the function fill's, whose coverage is the \
                  processor's under either setting"
             );
@@ -277,7 +276,7 @@ fn a_function_tile_and_a_device_drawn_tile_share_one_sheet() {
 /// leaves its coverage somewhere.
 fn assert_each_mark_read_its_own_tile(gpu: &[u8], adapter: &str) {
     assert_eq!(
-        pixel(gpu, 110, 58),
+        pixel(gpu, SIZE, 110, 58),
         [0, 0, 0, 255],
         "{adapter}: the middle of the blob"
     );
@@ -287,7 +286,7 @@ fn assert_each_mark_read_its_own_tile(gpu: &[u8], adapter: &str) {
         ((device_coord as f32 + 0.5 - origin) / 40.0 * 255.0).round() as i32
     };
     for (x, y) in [(12_u32, 134_u32), (20, 142)] {
-        let got = pixel(gpu, x, y);
+        let got = pixel(gpu, SIZE, x, y);
         assert!(
             (i32::from(got[0]) - want(x, 8.0)).abs() <= 1
                 && (i32::from(got[1]) - want(y, 130.0)).abs() <= 1,
@@ -299,7 +298,7 @@ fn assert_each_mark_read_its_own_tile(gpu: &[u8], adapter: &str) {
         assert_eq!(got[3], 255, "{adapter}: and it is opaque there");
     }
     assert_eq!(
-        pixel(gpu, 180, 180),
+        pixel(gpu, SIZE, 180, 180),
         [0, 0, 0, 0],
         "{adapter}: neither tile reaches the far corner"
     );

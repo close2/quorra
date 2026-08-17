@@ -25,6 +25,7 @@ use quorra_scene::{
 mod common;
 
 use common::headless::device;
+use common::probe::max_byte_diff;
 use common::scene::rect_outline;
 
 /// The reference for clipped rectangles: ADR 0005's coverage and compositing rule
@@ -115,18 +116,21 @@ fn cpu_reference(scene: &Scene, viewport: &Viewport<'_>, clip_rects: &[Rect]) ->
     out
 }
 
-/// ADR 0006's cross-implementation bound, as in m1.rs.
+/// This gate's bound, kept apart from `m1.rs`'s on purpose — and **not** derived the way
+/// that one is, which is what this comment used to imply by pointing at it.
+///
+/// `m1.rs` derives ±2 from *its own* golden: ADR 0006's ±1 unorm step per blend stage in
+/// premultiplied space, which the straight-alpha conversion amplifies by `255/α`, and that
+/// golden's minimum alpha is 128. **That derivation does not reach this page.** Measured
+/// on 2026-08-17, the alphas this fixture produces are `{0, 29, 57, 86, 115, 172, 230}` —
+/// its quarter-pixel grid puts an eighth of a cell under a 0.9-alpha rect at the corners —
+/// so the same premise gives `255/29 ≈ 9` here, not 2.
+///
+/// What the number actually is, measured the same day: **slack this gate has never
+/// spent.** The page and [`cpu_reference`] agree to **0** unorm steps. It is left at 2
+/// rather than tightened because a threshold is behaviour and this round moves none;
+/// `doc/notes-test-probes.md` §3 records the measurement and what tightening it buys.
 const UNORM_TOLERANCE: i32 = 2;
-
-fn max_byte_diff(actual: &[u8], expected: &[u8]) -> i32 {
-    assert_eq!(actual.len(), expected.len());
-    actual
-        .iter()
-        .zip(expected)
-        .map(|(a, e)| (i32::from(*a) - i32::from(*e)).abs())
-        .max()
-        .unwrap_or(0)
-}
 
 /// The page-6 shape at a window scale: 303 clip identifiers over one identical
 /// region, thousands of clipped fills — the counter says **1**, and the pixels agree

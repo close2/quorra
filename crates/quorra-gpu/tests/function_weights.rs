@@ -46,8 +46,13 @@
 use quorra_gpu::{Device, Options, Target, Viewport};
 use quorra_scene::{
     Affine, BlendMode, ClipId, Color, Compose, FillRule, FnOp, FnRange, FunctionId, MaskId,
-    MaskKind, Paint, Point, Rect, Scene, SceneBuilder, Segment,
+    MaskKind, Paint, Point, Rect, SceneBuilder, Segment,
 };
+
+mod common;
+
+use common::headless::render;
+use common::probe::pixel;
 
 /// 64 pixels wide: 64 × 4 bytes = 256, the buffer-copy row alignment.
 const SIZE: u32 = 64;
@@ -78,24 +83,6 @@ fn device() -> (Device, String) {
     (device, name)
 }
 
-fn render(device: &mut Device, scene: &Scene) -> Vec<u8> {
-    device
-        .render(
-            scene,
-            &Viewport::full(SIZE, SIZE, Affine::IDENTITY),
-            Target::Readback,
-        )
-        .expect("the frame is drawn")
-        .into_raster()
-        .unwrap()
-        .into_pixels()
-}
-
-fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
-    let at = ((y * SIZE + x) * 4) as usize;
-    [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
-}
-
 /// One channel of a readback pixel back in the premultiplied space the weight was applied
 /// in, as a byte of 255.
 ///
@@ -103,7 +90,7 @@ fn pixel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
 /// invisible in a straight-alpha channel and visible in this one — which is why every
 /// colour assertion below is made here rather than on the raw byte.
 fn premul(pixels: &[u8], x: u32, y: u32, channel: usize) -> f32 {
-    let got = pixel(pixels, x, y);
+    let got = pixel(pixels, SIZE, x, y);
     f32::from(got[channel]) * f32::from(got[3]) / 255.0
 }
 
@@ -184,7 +171,7 @@ fn value_at(x: u32, y: u32, channel: usize) -> f32 {
 /// lane that weighted only the alpha, or only the colour, passes neither.
 fn assert_weighted(pixels: &[u8], x: u32, y: u32, weight: f32, what: &str) {
     let alpha = (weight * 255.0).round() as i32;
-    let got = pixel(pixels, x, y);
+    let got = pixel(pixels, SIZE, x, y);
     assert!(
         (i32::from(got[3]) - alpha).abs() <= 1,
         "{what}: the weight is the paint's alpha — expected {alpha} ± 1, got {got:?}"
@@ -236,7 +223,7 @@ fn a_rectangular_clip_weights_the_paint_by_the_area_it_admits() {
         .clip(clip_shape, Affine::IDENTITY, FillRule::NonZero, None)
         .expect("a valid clip");
     function_fill(&mut builder, outline, program, Some(clip), None);
-    let pixels = render(&mut device, &builder.finish());
+    let pixels = render(&mut device, &builder.finish(), SIZE, SIZE);
 
     for y in [8_u32, 32, 55] {
         assert_weighted(
@@ -254,7 +241,7 @@ fn a_rectangular_clip_weights_the_paint_by_the_area_it_admits() {
             &format!("{adapter}: (40, {y}) is a quarter inside the clip's region"),
         );
         assert_eq!(
-            pixel(&pixels, 41, y),
+            pixel(&pixels, SIZE, 41, y),
             [0, 0, 0, 0],
             "{adapter}: (41, {y}) is outside the region §8.5.4 intersects to, so the \
              clause paints nothing there"
@@ -337,17 +324,17 @@ fn a_residue_clip_weights_the_paint_by_the_region_the_clause_intersects() {
     );
 
     // The region §8.5.4 admits, measured by geometry alone.
-    let region = render(&mut device, &scene_of(false));
+    let region = render(&mut device, &scene_of(false), SIZE, SIZE);
 
     let mut worst = 0_u32;
     let mut partial = 0_u32;
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let admitted = pixel(&region, x, y)[3];
+            let admitted = pixel(&region, SIZE, x, y)[3];
             if admitted > 0 && admitted < 255 {
                 partial += 1;
             }
-            worst = worst.max(u32::from(pixel(&painted, x, y)[3].abs_diff(admitted)));
+            worst = worst.max(u32::from(pixel(&painted, SIZE, x, y)[3].abs_diff(admitted)));
         }
     }
     assert!(
@@ -371,7 +358,7 @@ fn a_residue_clip_weights_the_paint_by_the_region_the_clause_intersects() {
         &format!("{adapter}: the middle of the diamond"),
     );
     assert_eq!(
-        pixel(&painted, 4, 4),
+        pixel(&painted, SIZE, 4, 4),
         [0, 0, 0, 0],
         "{adapter}: a corner the diamond clips away"
     );
@@ -423,7 +410,7 @@ fn an_alpha_soft_mask_weights_the_paint_by_11_5_2s_mask_value() {
     let mut builder = SceneBuilder::new();
     let mask = alpha_mask(&mut builder, 0.4);
     function_fill(&mut builder, outline, program, None, Some(mask));
-    let pixels = render(&mut device, &builder.finish());
+    let pixels = render(&mut device, &builder.finish(), SIZE, SIZE);
 
     for y in [8_u32, 32, 55] {
         assert_weighted(
@@ -434,7 +421,7 @@ fn an_alpha_soft_mask_weights_the_paint_by_11_5_2s_mask_value() {
             &format!("{adapter}: (10, {y}), where §11.5.2 derives 0.4 from the group"),
         );
         assert_eq!(
-            pixel(&pixels, 50, y),
+            pixel(&pixels, SIZE, 50, y),
             [0, 0, 0, 0],
             "{adapter}: at (50, {y}) the mask's group marks nothing, so §11.5.2 derives \
              0 and the mask admits nothing"
@@ -442,12 +429,12 @@ fn an_alpha_soft_mask_weights_the_paint_by_11_5_2s_mask_value() {
     }
     // The boundary is the group's, to the pixel.
     assert_eq!(
-        pixel(&pixels, 31, 32)[3],
-        pixel(&pixels, 10, 32)[3],
+        pixel(&pixels, SIZE, 31, 32)[3],
+        pixel(&pixels, SIZE, 10, 32)[3],
         "{adapter}: the last column the mask's group marks"
     );
     assert_eq!(
-        pixel(&pixels, 32, 32),
+        pixel(&pixels, SIZE, 32, 32),
         [0, 0, 0, 0],
         "{adapter}: and the first column it does not"
     );
@@ -501,7 +488,7 @@ fn a_luminosity_soft_mask_weights_the_paint_by_11_5_3s_luminosity() {
         )
         .expect("a valid mask");
     function_fill(&mut builder, outline, program, None, Some(mask));
-    let pixels = render(&mut device, &builder.finish());
+    let pixels = render(&mut device, &builder.finish(), SIZE, SIZE);
 
     // §11.5.3's coefficients, over the bytes the group's colour is stored as.
     let inside = 0.30_f32.mul_add(
@@ -569,7 +556,7 @@ fn a_clip_and_a_soft_mask_multiply() {
         .clip(clip_shape, Affine::IDENTITY, FillRule::NonZero, None)
         .expect("a valid clip");
     function_fill(&mut builder, outline, program, Some(clip), Some(mask));
-    let pixels = render(&mut device, &builder.finish());
+    let pixels = render(&mut device, &builder.finish(), SIZE, SIZE);
 
     assert_weighted(
         &pixels,
@@ -586,7 +573,7 @@ fn a_clip_and_a_soft_mask_multiply() {
         &format!("{adapter}: (40, 32), a quarter of the clip's region under the mask"),
     );
     assert_eq!(
-        pixel(&pixels, 41, 32),
+        pixel(&pixels, SIZE, 41, 32),
         [0, 0, 0, 0],
         "{adapter}: and outside the clip the mask has nothing to weight"
     );
