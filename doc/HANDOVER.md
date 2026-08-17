@@ -12,15 +12,23 @@ happened, here if it changes how you *work*.
 Nine milestones are done; the swap landed on 2026-08-03 and the caller consumes this
 library as a git dependency, pinned by their `Cargo.lock`.
 
-**The 2026-08-16/17 improvement rounds are merged and unpushed.** Nine rounds in parallel
+**The 2026-08-16/17 improvement rounds are merged and unpushed.** Fifteen rounds in parallel
 worktrees: ADR 0057 (a clipped mark's tile is bounded by its chain's box — one corpus page
 refused → agrees), ADR 0058 (a present layer draws its own rectangle), ADR 0059 (a gate over
-a private list lives inside the crate), the `error.rs` split, ADR 0023's amendment (the
-residue multiply is geometry, not recording), the archetype re-cut, and the caller's
-`HAYRO_ISSUES_FOR_QUORRA.md` answered in full. The suite went **445 → 501** tests, every new
-gate verified able to fail.
+a private list lives inside the crate), ADR 0060 (a page has one definition and every example
+is run), ADR 0061 and ADR 0062 (the `raster.rs` and `pipeline.rs` splits, and how a test is
+filed), the `error.rs` split, ADR 0023's amendment (the residue multiply is geometry, not
+recording), the archetype re-cut, the caller's `HAYRO_ISSUES_FOR_QUORRA.md` answered in full,
+and **§11.2's census, open since M5**. The suite went **445 → 551** tests, every new gate
+verified able to fail.
 
-**Four defects that no test in the tree could see**, and they are the reason the rounds were
+**§11.2 is answered and §1.1's premise survives** — 9.4 % of marks miss the glyph and
+rectangle lanes at a page's own scale, and 81 % of what does is strokes, so §1.6's candidate 2
+is confirmed by the population rather than chosen ahead of it. The finding the plan did not
+anticipate: **by work it inverts**, the sheet being at least 66 % of rasterised coverage at 1×.
+`PLAN.md` §1.1, §1.6 and §1.10 carry it; `doc/notes-census.md` is the record.
+
+**Six defects that no test in the tree could see**, and they are the reason the rounds were
 worth running rather than the features:
 
 - **`raster::direction` overflowed above `1.9e19`** — eight orders below the contract's own
@@ -366,8 +374,8 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
   2026-08-17 round the `quorra-gpu` source files past the smell are `resources.rs` (606),
   `outline.rs` (566), `atlas.rs` (537) and `encode/parallel.rs` (532), plus `quorra-scene`'s
   `geom.rs` (634); `raster.rs` is 61 lines over three clause modules and `pipeline.rs` 428
-  over five (`doc/notes-raster-pipeline-read.md`). One test module is past it on purpose:
-  `raster/tests.rs` at 704, by ADR 0061. **The whole file is the number this rule is about**
+  over five (`doc/notes-raster-pipeline-read.md`). No test module is past it any more: `raster/tests.rs` divided by ADR 0062 into 80 lines of
+  map and fixtures over `tests/{flatten,fill,stroke}.rs` at 184, 266 and 261. **The whole file is the number this rule is about**
   — a reviewer holds the test module too, which is CLAUDE.md's own reason — and quoting the
   count to `#[cfg(test)]` is what let a 1 563-line file be called "one irreducible thing"
   twice. *(This list has now named the wrong files three times; the correction above is the
@@ -417,17 +425,24 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
 - **`tests/shader_copies.rs` keeps its own `include_str!` list of the shader files**, which
   since the layout gate is the second such list beside `src/shaders.rs`. An integration test
   cannot reach a private module, so closing it means deciding whether that list is public.
-- **What the test reorganisation deliberately did not unify.** The two-argument `render`,
-  `alpha`, `pixel` and `deviation_from_the_clause` each index a raster through their own
-  file's `SIZE`, so one home for them is one home for `SIZE` — and `SIZE` means 64 in six
-  files and something else in four others, which is a decision about what those probes are
-  rather than a refactor. **`alpha` is the reason to be careful**: its text is identical in
-  `coverage_lanes.rs` and `mask_regions.rs` and the `SIZE` it reads is *not*.
-  `deviation_from_the_clause` is §11.4.6's arithmetic written out three times, two identical
-  and the third in `function_knockout.rs`; giving it one home is a round that must touch that
-  file too. Two smaller ones left where they were: `m1.rs`'s `max_byte_diff` doc credits the
-  function with PNG artefacts its *caller* writes, and `m1.rs` and `m3.rs` each state their
-  own derivation of `UNORM_TOLERANCE = 2`, which is why the constant was not merged.
+- **The shared probes have a home, and one number in the list was wrong.**
+  `tests/common/probe.rs` holds `pixel`, `alpha` and `max_byte_diff`; the eight private
+  two-argument `render`s point at `common::headless::render`. The obstacle this list carried
+  for two rounds — one home for them is one home for `SIZE` — **did not survive being read**:
+  a probe needs the raster's **stride**, not the suite's `SIZE`, and a stride is an argument,
+  so nothing shares a dimension and `alpha`'s hazard dissolves rather than being managed.
+  Verified per caller by shimming each import to pass `width + 1`: **18 of 20 red**, and both
+  greens are fixtures where every stride reads the same byte (a uniformly-marked target; an
+  absence assertion on an empty page), each red when forced on the value instead. **The list
+  of four was not complete** — `sample_tail.rs::at_unit` was a fifth copy, found by checking
+  a claim before writing it down. Five inline `alpha` indexings remain by choice, named in
+  `doc/notes-test-probes.md` §1.
+- **`UNORM_TOLERANCE` stays two constants, for the opposite of the recorded reason.** They
+  were never two derivations: `m3.rs` cited `m1.rs`'s, which is `255/α` on a golden whose
+  minimum alpha is 128, while `m3.rs`'s page produces `{0, 29, 57, 86, 115, 172, 230}` — the
+  same premise gives ≈9 there. **And m3's page agrees with its reference to 0 unorm steps**,
+  so that gate has never spent any slack; tightening it is a round with a real question
+  attached, since that file pins llvmpipe while `m1.rs` is the one that asks every adapter.
 - **Three gaps in the function lane**, named in `doc/notes-function-wiring.md` §4.5 and found
   by reading rather than by a failure: a clip and a soft mask over a function paint are never
   anything but 1 anywhere in the tree, no function test runs `Coverage::Gpu`, and ADR 0025's
