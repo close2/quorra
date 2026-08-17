@@ -141,12 +141,20 @@ Separating the two is what `--check` is.
 
 ## Verified able to fail
 
-- **The round's whole point.** `examples/retained.rs`'s signature gate, broken
-  deliberately by moving `DENSE_TEXT`'s recorded `tiles` from 40 to 41: today that is a
-  silent panic nobody sees until someone runs the example by hand; now
-  `cargo test --workspace` fails at `the_archetypes_cost_what_they_are_recorded_to_cost`
-  **and** the CI `--check` step fails at `retained`. One edit, two red gates, where before
-  it was one edit and no signal for two days.
+- **The round's whole point, in two experiments rather than one**, because the two
+  defects fail differently.
+
+  *An assertion only the example makes.* `examples/retained.rs`'s signature gate forced to
+  expect `tiles: 41` where the page draws 40 — the defect ADR 0057 caused, in the same
+  place. `cargo test` **exits 0** (it neither builds nor runs an example: that is today's
+  silence, reproduced), and `cargo run --example retained -- --check` **exits 101** naming
+  both rows. That is the arrangement failing where the tree passes silently.
+
+  *A row the test and the example share.* `DENSE_TEXT`'s recorded `tiles` moved 40 → 41 in
+  `quorra-pages`, with both consumers untouched. `cargo test -p quorra-gpu --test
+  archetypes` **exits 101** at `the_archetypes_cost_what_they_are_recorded_to_cost`, and
+  `--check` **exits 101** at `retained`. One edit, two red gates — where the same change
+  made in one of five copies produced no signal for two days.
 - `every_example_is_run_by_ci` — a `probe_unlisted.rs` added to `examples/` and named
   nowhere: `["probe_unlisted"] exist under examples/ and are not run by …`.
 - `every_example_reads_the_check_flag` — run before `window_smoke` and `present_thread`

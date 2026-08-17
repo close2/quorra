@@ -200,19 +200,39 @@ the code separates `marks` from `rectangle` with a comment saying so.
 
 ## 7. Verified able to fail
 
-**The round's whole point**, forced by moving `DENSE_TEXT`'s recorded `tiles` from 40 to
-41 — the shape of the defect ADR 0057 caused:
+**The round's whole point, in two experiments** — the two defects fail differently and
+each needs its own.
+
+*Experiment 1: an assertion only the example makes.* `examples/retained.rs`'s signature
+gate forced to expect `tiles: 41` where the page draws 40, which is the defect ADR 0057
+caused in exactly that place. Run:
 
 ```
-(before this round) examples/retained.rs panics; cargo test --workspace is green;
-                    CI is green; nobody knows for two days
-(after)             cargo test --workspace fails:
-                      the_archetypes_cost_what_they_are_recorded_to_cost
-                        dense text: got … tiles: 40 …  recorded … tiles: 41 …
-                    and the CI --check step fails at `retained`
+cargo test -p quorra-gpu --test archetypes --test example_checks   → exit 0   (5 passed)
+cargo run --release --example retained -- --check                  → exit 101
+  assertion `left == right` failed: this is not `quorra_pages::DENSE_TEXT` …
+    left:  … tiles: 40 …
+    right: … tiles: 41 …
 ```
 
-One edit, two red gates, where the same edit produced no signal at all before.
+**Exit 0 is the whole finding.** `cargo test` does not build an example, let alone run
+one, so a false assertion inside one is invisible to it — reproduced here rather than
+asserted from the history. The `--check` step is what sees it.
+
+*Experiment 2: a row the test and the example share.* `DENSE_TEXT`'s recorded `tiles`
+moved 40 → 41 in `quorra-pages`, both consumers untouched:
+
+```
+cargo test -p quorra-gpu --test archetypes         → exit 101
+  the archetype signature moved …
+    dense text:
+      got      Recorded { … tiles: 40 … }
+      recorded Recorded { … tiles: 41 … }
+cargo run --release --example retained -- --check  → exit 101 (the same pair)
+```
+
+One edit, two red gates — where the same change made in one of five copies produced no
+signal for two days.
 
 **The list gate**, with a `probe_unlisted.rs` added to `examples/` and named nowhere:
 
