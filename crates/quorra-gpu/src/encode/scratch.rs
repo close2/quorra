@@ -259,6 +259,33 @@ mod tests {
         assert_eq!(stray, 0, "{stray} texels of somebody else's coverage");
     }
 
+    /// **A tile with a zero side takes no place on the sheet**, and the sheet it was
+    /// offered to is unchanged — no shelf opened, no cursor moved, nothing counted.
+    ///
+    /// A zero extent is what a mark that rounds to no pixel in one axis produces, and the
+    /// lanes above already return before offering one (`coverage_tile` and `visible_tile`
+    /// both test `width == 0 || height == 0`). This states the door's own answer rather
+    /// than relying on every caller to have asked first: a zero-height reservation would
+    /// open a shelf at `next_y` that every later tile is seated *inside*, and a
+    /// zero-width one would seat two tiles at the same cursor.
+    #[test]
+    fn a_tile_with_a_zero_side_takes_no_place_on_the_sheet() {
+        let mut packer = ScratchPacker::new(64, 64);
+        assert_eq!(packer.reserve(0, 12), None, "zero width takes no place");
+        assert_eq!(packer.reserve(10, 0), None, "nor does zero height");
+        assert_eq!(packer.placed, 0, "and neither is counted as a tile");
+        assert!(
+            packer.finish().is_none(),
+            "a sheet offered only zero-extent tiles holds nothing, which is a legitimate \
+             frame rather than a refusal"
+        );
+        // A second packer, to show the refusals leave the layout alone: the first real
+        // tile still lands at the origin.
+        let mut packer = ScratchPacker::new(64, 64);
+        assert_eq!(packer.reserve(0, 12), None);
+        assert_eq!(packer.reserve(10, 12), Some((0, 0)));
+    }
+
     /// **Shelves stay near one width, so the sheet stays near square** (ADR 0034).
     ///
     /// Six tiles of roughly 2 000 × 500 — `issue16287.pdf` at 4×, which is where this was

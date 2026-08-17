@@ -486,6 +486,34 @@ mod tests {
         assert!(atlas.insert(key(3, (0, 0)), &tile(16, 16)).is_some());
     }
 
+    /// **A tile with a zero side is refused rather than packed**, and refusing it is a
+    /// `None` the coverage lane already handles by rasterising into the frame's sheet
+    /// instead — not a frame that fails.
+    ///
+    /// A zero extent is what a mark that rounds to no pixel in one axis produces, and
+    /// `doc/PLAN.md` states that a blank scene and the zero-length buffer slice that
+    /// follows from one are both legitimate. What must not happen is the packing
+    /// arithmetic running on it: a zero-width shelf entry would sit at the same cursor as
+    /// its neighbour, and a zero-height one would open a shelf that every later tile is
+    /// seated inside.
+    #[test]
+    fn a_tile_with_a_zero_side_is_never_admitted() {
+        let mut atlas = AtlasStore::new(64 * 64, 4096);
+        assert!(!atlas.admits(0, 12), "zero width is not admitted");
+        assert!(!atlas.admits(10, 0), "nor zero height");
+        assert!(atlas.insert(key(1, (0, 0)), &tile(0, 12)).is_none());
+        assert!(atlas.insert(key(2, (0, 0)), &tile(10, 0)).is_none());
+        assert_eq!(atlas.entry_count(), 0, "and neither is stored");
+        assert!(
+            atlas.take_pending().is_empty(),
+            "nor queued for upload — a zero-extent write is a wgpu validation error"
+        );
+        // The atlas is untouched by the refusals: an ordinary tile still packs at the
+        // origin, which it would not if a zero-height shelf had been opened above it.
+        let entry = atlas.insert(key(3, (0, 0)), &tile(10, 12)).expect("fits");
+        assert_eq!((entry.x, entry.y), (0, 0));
+    }
+
     /// The census's half: a shape the scene places once is not worth an entry, and one
     /// it places again is — which is the whole of ADR 0029's criterion, on an atlas with
     /// room to spare so that nothing else can be the cause.
