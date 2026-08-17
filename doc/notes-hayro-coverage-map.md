@@ -58,8 +58,8 @@ this is the vocabulary.
 
 | their issue | the question for us | gate |
 |---|---|---|
-| #1315 — a stencil mask at a **different resolution** from its image, 5× slower | §8.9.6.4 allows it and scanners produce it constantly; the caller says *"the second is the one that is quorra's"* | `doc/notes-hayro-questions.md` Q3 |
-| #2 — downsampling a mask larger than its image | same mismatched grid, quality side | Q3 |
+| #1315 — a stencil mask at a **different resolution** from its image, 5× slower | **§8.9.6.3**, not §8.9.6.4 — see the corrections below; it allows it and scanners produce it constantly, and the caller says *"the second is the one that is quorra's"* | `tests/mask_grid.rs` |
+| #2 — downsampling a mask larger than its image | same mismatched grid, quality side | `tests/mask_grid.rs` |
 | #1319 — per-sample `BitReader` + f32 interpolate to expand a 1-bit mask | decoding is the caller's; pixels reach us decoded | not ours |
 | #1310 — overriding `/Interpolate` globally | integration note 1: the **resolved** filter decision arrives on the image *command*. So the gate is that we honour it and never substitute our own | **open** |
 | #494 — `/Width`,`/Height` disagreeing with the JPEG codestream | §7.4.8 vs §7.4.9; resolved upstream, we receive pixels | not ours |
@@ -68,7 +68,7 @@ this is the vocabulary.
 
 | their issue | the question for us | gate |
 |---|---|---|
-| #296 — every glyph outline began with a spurious `MoveTo((0,0))` | a degenerate leading `MoveTo` is invisible to a fill and **not** to a stroke: §8.4.3.3's caps apply to the ends of every open subpath, and a one-point subpath is open. Do we deposit a dot? | `doc/notes-hayro-questions.md` Q1 |
+| #296 — every glyph outline began with a spurious `MoveTo((0,0))` | do we deposit a dot? **No, and unconditionally** — see the corrections below | `tests/degenerate_subpaths.rs` |
 | #23 — bitmap glyph strikes resampled | font loading is §9's non-goal; outlines reach us already | not ours |
 | #6 — font fallback | not our layer | not ours |
 
@@ -76,8 +76,8 @@ this is the vocabulary.
 
 | their issue | the question for us | gate |
 |---|---|---|
-| #4 — `/All` and `/None` colourants | `/None` "must composite as though it were never issued". Colour is not ours (integration note 6), so the question that **is** ours: does a mark contributing nothing leave the target byte-identical, including inside a knockout group where §11.4.6 *replaces*? | `doc/notes-hayro-questions.md` Q2 |
-| #630 — `mul_add` falling into libc software emulation without FMA | do we call `f32::mul_add` on a hot CPU path? | Q4 |
+| #4 — `/All` and `/None` colourants | `/None` "must composite as though it were never issued". Colour is not ours (integration note 6), so the question that **is** ours: does a mark contributing nothing leave the target byte-identical, including inside a knockout group where §11.4.6 *replaces*? | `tests/no_ink.rs` |
+| #630 — `mul_add` falling into libc software emulation without FMA | do we call `f32::mul_add` on a hot CPU path? | `tests/mul_add_hazard.rs` |
 | #205/#235/#355/#390 — the ICC engine panicking on a document's profile | an `ICCBased` profile is attacker-supplied data evaluated on the rendering path. **We reach no CMS at all** — `deny.toml` forbids a colour-management crate by design. Testable as the dependency assertion | **open** |
 | #60 — `u16`/`f16`/`f32` channels and dithering | ADR 0010 settled rgba8 layers. Their question underneath is banding: *"what an 8-bit raster does to a mark whose ink is under one of its levels"* | **open** |
 
@@ -97,6 +97,25 @@ this is the vocabulary.
 |---|---|---|
 | #1195 — a profile taken at the wrong scale pointed at `memset`/`memcpy`; corrected, 65 % was interpretation | the same finding CLAUDE.md states as a standing rule, reached independently. **"A benchmark run at the wrong scale points at whatever scales with area"** — that is a trap, not a test | not testable |
 | #1188 — a whole-repository LLM review posted as an issue | one real finding in a long list, and it took reading the code to know which. The reason every finding in our own rounds must name the document-derived input that reaches it | not testable |
+
+## Two corrections for the owner to carry back to their document
+
+Both checked against the sponsored EC3 text in this tree before being written here, and both
+leave the caller's substantive point standing — each is a citation, not a reading.
+
+1. **Their §4 cites §8.9.6.4 for a mask on a grid of its own.** §8.9.6.4 is *Colour key masking*.
+   The sentence they want is **§8.9.6.3** *Explicit masking*: "The base image and the image mask
+   need not have the same resolution ( Width and Height values), but since all images shall be
+   defined on the unit square in user space, their boundaries on the page will coincide; that is,
+   they will overlay each other."
+
+2. **Their §5 reasons from §8.4.3.3 that a leading degenerate `MoveTo` "can deposit a dot at the
+   origin" under round or square caps.** §8.5.3.2 overrides that, and its last sentence carries no
+   cap condition where the two above it do: "A single-point open subpath (specified by a trailing
+   m operator) shall produce no output." The cap-dependent rule — round caps produce a filled
+   circle, butt and projecting square produce nothing "because the orientation of the caps would
+   be indeterminate" — is for a *closed* single-point path or two or more coincident points, not
+   for a bare `m`. So the answer to their question is no dot, under every cap style.
 
 ## What is open, in the order it is worth doing
 
