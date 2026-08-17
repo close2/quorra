@@ -654,6 +654,14 @@ file's comment claimed one was there when the file contained none.
 `tests/encode_threads_nested.rs` now holds it. **Before believing a set of drains is gated,
 delete each one and watch which test goes red.**
 
+**A fixture on integer pixel boundaries cannot tell the two coverage lanes apart.** ADR 0016
+says they agree *exactly* where no edge crosses a pixel — 255 is 255 and 0 is 0 — so a bar at
+`x = 20.0` draws the same bytes under `Cpu` and `Gpu`, and any test whose subject is the lane
+then compares one lane with itself. `tests/rare_lane_coverage.rs` was written that way first;
+its solid-painted control is what caught it, and moving the geometry to `20.3` fixed it. Same
+family as `m45.rs`'s rectangle-as-glyph: **when a fixture's subject is a difference, assert the
+difference is reachable.**
+
 **A sampled coverage rule and an area coverage rule disagree about what is *there*, not only
 about how much.** `Coverage::Gpu`'s 4 × 4 ordered grid puts its columns a quarter-pixel apart,
 so a 0.1-pixel bar falls between them at six of ten sub-pixel positions and is drawn as
@@ -811,6 +819,13 @@ shell matches its own pattern. Two rounds were lost to a `cargo test` that never
 Each has an ADR stating the measurement and why it was left. Do not re-propose one without
 reading it:
 
+- `Options::coverage` reaches a solid fill or stroke and no other paint; the marks it would
+  move are 0.11 % of a frame's rasterised coverage at scale 1 and 0.63 % at 4×, and two thirds
+  of them are glyph-sized, which is the shape class the processor lane is the accurate one for
+  (0064). It is an **oversight, not a constraint** — the device lane's output is already the R8
+  sheet tile a rare paint is drawn through, verified by making the change and reverting it — so
+  reopen it by measuring, not by re-deriving. The trigger that changes the arithmetic is a
+  residue multiply on the device: 82 % of all rare-painted coverage is under one;
 - the census cannot see how often a shape is placed, at phase granularity (0029);
 - a pane is cut in sheet order rather than by what packs tightest (0028);
 - tiles are packed in encounter order; sorting them needs positions assigned after the walk,

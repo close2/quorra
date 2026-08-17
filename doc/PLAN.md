@@ -229,6 +229,19 @@ who could remove it.
   processor" where they quote 32000-1's "shall … conforming reader" — a correction that
   *strengthens* their point, since §8.9.5.3 adds that the flag "is only a hint".
   One row is left open on purpose, and it is the next bullet.
+- **Whether `Options::coverage` should reach a rare paint — asked, priced, and left**
+  (ADR 0064, 2026-08-17, `doc/notes-rare-lane.md`). The setting is consulted in the solid arm
+  alone, so `Coverage::Gpu` draws every shading, image, mesh and §7.10.5 paint exactly as
+  `Coverage::Cpu` does. Over the caller's corpus the marks it would move are **0.110 % of a
+  frame's rasterised coverage at scale 1 and 0.629 % at 4×** — 82 % of all rare-painted
+  coverage is under a residue clip and takes the processor lane under either setting anyway.
+  The finding that decided it is not the size: **56 of the 88 eligible marks at 4× are under
+  100 × 100 device pixels**, because a rare paint's coverage is never offered to the atlas, so
+  `take_gpu_lane`'s *cache* condition — the one that keeps reading-size text off the sampled
+  grid — cannot apply, and only a comparison monotone in the magnification would be left. The
+  omission is an **oversight rather than a design constraint**: the device lane's output is
+  already the R8 sheet tile a rare paint is drawn through, verified by making the change and
+  reverting it.
 - **The two coverage lanes disagree about whether a thin mark is *there*.** `Coverage::Gpu`
   samples a 4 × 4 ordered grid, so its columns sit a quarter of a pixel apart; a
   0.1-device-pixel bar swept across ten sub-pixel positions **vanishes entirely at six of
@@ -241,6 +254,10 @@ who could remove it.
   subject of the caller's own `QUORRA_HAIRLINE_MARKS.md`, and it wants an ADR with their view
   in it. Note that `coverage_lanes.rs`'s eighth-of-a-pixel agreement bound was derived for an
   edge *crossing* a pixel and says nothing about a shape narrower than the sample grid.
+  It is also now a *lane-policy* constraint and not only a characterisation: **ADR 0064
+  declined to let rare paints take the device lane largely because doing so would move
+  shading-painted text onto this grid at exactly the magnification a caller switches to
+  `Coverage::Gpu`.** An area rule here would remove that objection as well as this bullet.
 - **Whether a soft mask is a knockout element's shape or its opacity is unresolved, and
   the tree and ADR 0025 disagree about it.** `fs_shape` in `rect.wgsl`, `coverage.wgsl`
   and `image.wgsl` multiplies the mark's soft mask into the shape it returns; ADR 0025's
@@ -369,6 +386,12 @@ no coverage at all by construction, so the scratch sheet — which is the path l
 is **at least 66 % of the frame's rasterised coverage at 1× and 76 % at 4×**. A tenth of the
 marks cause two thirds of the coverage. That is the number to design against, and it is why
 `Counters::coverage` (ADR 0057) rather than a mark count is what a later round should read.
+
+**And that coverage is almost entirely a solid paint's.** Split by the site that seats each
+tile (ADR 0064, `doc/notes-rare-lane.md`): **98.6 % of the sheet at scale 1 and 93.1 % at 4×
+is solid fills and strokes**, 0.98 % and 4.70 % is a shading, image or §7.10.5 paint, and the
+rest is soft masks. So the inversion is a statement about *strokes and clipped fills*, not
+about the rare-paint lanes.
 
 **The population is concentrated, not a tail**: 704 of 954 pages draw no path-lane mark at
 all, ten pages are 93 % of it, and `issue12810.pdf` alone — 34 970 sub-pixel strokes — is 54 %.
