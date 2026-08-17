@@ -117,17 +117,52 @@ leave the caller's substantive point standing — each is a citation, not a read
    be indeterminate" — is for a *closed* single-point path or two or more coincident points, not
    for a bare `m`. So the answer to their question is no dot, under every cap style.
 
+3. **Their §3 cites §8.7.4.3 for a shading's coordinate space.** §8.7.4.3 is *Shading
+   dictionaries*, and its NOTE 2 only names the target space. The rule is **§8.7.2**: "Changes
+   to the page's transformation matrix that occur within the page's content stream, such as
+   rotation and scaling, have no effect on the pattern; it maintains its original relationship
+   to the page no matter where on the page it is used." And **§8.7.4.1** states it for the very
+   operators their #968 and #102 are about: "…painting operators such as f (fill), S (stroke),
+   Tj (show text) … When a shading is used in this way, the geometry of the gradient fill is
+   independent of that of the object being painted." Their substantive point stands unchanged.
+
 ## What is open, in the order it is worth doing
 
-1. **§8.7.4.3's coordinate space on a stroke and on a glyph** (#968, #102) — a paint anchored to the
-   page rather than to the mark, composed in a defined order, and wrong by one matrix if it is
-   wrong at all.
-2. **Thin marks** (#104, #1023) — the caller's standing ask, and the place our two lanes could
-   disagree with each other.
-3. **`/Interpolate` honoured, never overridden** (#1310) — integration note 1's whole point.
-4. **A mesh is drawn as the raster it already is** (#3) — integration note 5.
-5. **A function paint is evaluated, not baked** (#551) — ADR 0053's claim, stated as resolution
-   independence.
-6. **No CMS is reachable** (#205 family) — a dependency assertion, cheap.
-7. **Banding under one 8-bit level** (#60).
-8. **`encode_threads` nested, and `Scene: Send + Sync` still asserted** (#1316, #1343).
+1. **The two coverage lanes disagree about whether a thin mark is *there*** (#104) — not a
+   citation and not a gap in a test, but a scan-conversion decision with a cost either way.
+   See below; it wants an ADR and the caller's view.
+2. **`/Interpolate` honoured, never overridden** (#1310) — integration note 1's whole point.
+3. **No CMS is reachable** (#205 family) — a dependency assertion, cheap.
+4. **Banding under one 8-bit level** (#60).
+5. **`encode_threads` nested, and `Scene: Send + Sync` still asserted** (#1316, #1343).
+
+**Closed 2026-08-17**: §8.7.2's coordinate space on a fill, a stroke and a glyph-sized outline
+(`tests/shading_space.rs`, 7 tests, three drawings of the same device pixels required identical
+to the byte); a mesh reproduced texel-for-texel and unstretched at three viewport scales
+(`tests/mesh_raster.rs`, 7); a function paint evaluated at every device pixel's own centre with
+its distinct-byte count going 32 → 64 → 128 as it magnifies, and a discontinuity landing at
+column 16/32/**65** where a pre-zoom bake says 64 (`tests/function_resolution.rs`, 4); and thin
+marks characterised on both lanes (`tests/thin_marks.rs`, 7).
+
+## The one finding that is a decision rather than a gate
+
+**A sampled coverage rule and an area coverage rule disagree about what is *there*, not only
+about how much.** `Coverage::Gpu` samples a 4 × 4 ordered grid, so its columns sit a quarter of
+a pixel apart. A 0.1-device-pixel bar, 768 tall, swept across ten sub-pixel positions:
+
+| left edge | `Coverage::Cpu` | `Coverage::Gpu` |
+|---|---|---|
+| 20.0 / 20.2 / 20.4 / 20.5 / 20.7 / 20.9 | 0.10196 | **0** |
+| 20.1 / 20.3 / 20.6 / 20.8 | 0.10196 | 0.25098 |
+
+**Six of ten vanish; the other four draw 2.5× the ink.** Byte-identical on llvmpipe and RADV, so
+it is the design and not an adapter. It is reachable rather than contrived: a long thin rule is
+exactly the shape `take_gpu_lane` prefers. No sample count removes it — only an area rule does.
+Gated as a characterisation that fails if the gap closes silently, and *not* fixed here, because
+the fix is a scan-conversion decision with a cost either way.
+
+**What §10.7.4 actually decides**, since the question presumes more than it says: its rule is
+binary — paint any pixel the shape intersects — and §10.7.1's NOTE says the algorithm is
+undefined by PDF. §11.3.7.2's NOTE 1 is where antialiased fractional coverage gets a meaning, as
+*shape*. So proportionality is ADR 0005's choice and is asserted as ours; only "no disappearance"
+and "ink ≥ the shape's area" are asserted as the clause's.

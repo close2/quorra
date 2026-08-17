@@ -601,6 +601,15 @@ new gate *in both directions* — a test that passes proves only that a test exi
 `m45.rs` using a rectangle as a stand-in glyph: one failed, and two would have gone on
 passing while comparing one lane with itself.
 
+**A sampled coverage rule and an area coverage rule disagree about what is *there*, not only
+about how much.** `Coverage::Gpu`'s 4 × 4 ordered grid puts its columns a quarter-pixel apart,
+so a 0.1-pixel bar falls between them at six of ten sub-pixel positions and is drawn as
+**nothing**, while the other four draw 2.5× its ink; `Coverage::Cpu` draws 0.10196 at all ten.
+The tempting reading of `coverage_lanes.rs` — that the lanes agree to an eighth of a pixel — is
+**not** a bound on this: it was derived for an edge *crossing* a pixel, and says nothing about a
+shape narrower than the sample grid. Any claim that the two lanes agree needs to name the shape
+class it was measured on.
+
 **A claim that something cannot be done is a claim, and it decays.** "`fill_solid`'s duplicate
 lookup needs a lifetime that fights `&mut self`" was written once from a reading, and travelled
 from `notes-encode-split.md` §5 through `notes-recording-shares.md` §5 into this file's debt

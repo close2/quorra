@@ -160,6 +160,18 @@ who could remove it.
   that inside a 256 MiB budget, and the question to ask the caller before spending a round
   on it is whether it refuses in the product or only in the gate: the frame that refuses
   is a whole page at 4× in one target, and a viewer's viewport is its window.
+- **The two coverage lanes disagree about whether a thin mark is *there*.** `Coverage::Gpu`
+  samples a 4 × 4 ordered grid, so its columns sit a quarter of a pixel apart; a
+  0.1-device-pixel bar swept across ten sub-pixel positions **vanishes entirely at six of
+  them and draws 2.5× the ink at the other four**, where `Coverage::Cpu`'s analytic area
+  draws 0.10196 at every one. Byte-identical on llvmpipe and RADV, so it is the design and
+  not an adapter, and it is reachable rather than contrived — a long thin rule is exactly the
+  shape `take_gpu_lane` prefers. **No sample count removes it; only an area rule does.**
+  Characterised and gated 2026-08-17 (`tests/thin_marks.rs`, `doc/notes-hayro-paints.md`) and
+  deliberately not fixed: it is a scan-conversion decision with a cost either way, it is the
+  subject of the caller's own `QUORRA_HAIRLINE_MARKS.md`, and it wants an ADR with their view
+  in it. Note that `coverage_lanes.rs`'s eighth-of-a-pixel agreement bound was derived for an
+  edge *crossing* a pixel and says nothing about a shape narrower than the sample grid.
 - **Whether a soft mask is a knockout element's shape or its opacity is unresolved, and
   the tree and ADR 0025 disagree about it.** `fs_shape` in `rect.wgsl`, `coverage.wgsl`
   and `image.wgsl` multiplies the mark's soft mask into the shape it returns; ADR 0025's
