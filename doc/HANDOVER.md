@@ -52,9 +52,13 @@ was taken on the fixture above *and* counted a bounding scan that is recording);
 §11.4.5 for a group's constant alpha, which is §11.6.4.4's in §11.3.7.2's range.
 
 **What needs the owner, not another round:** the caller must drop
-`bug1703683_page2_reduced.pdf` from their scale-4 `REFUSED` ratchet; `issue1905.pdf` needs
-their answer on whether it refuses in the product or only in the gate; the `AIS` question in
-`PLAN.md` needs their answer before it can become an ADR; two clause corrections go back to
+`bug1703683_page2_reduced.pdf` from their scale-4 `REFUSED` ratchet — and, in doing so, note
+that **`REFUSED_AT_FOUR` holds two kinds of refusal under one name** (their finding,
+2026-08-18): `issue1905.pdf` refuses at *render* with `RenderError::ScratchExhausted`, while
+the other two refuse in *translation*, before a scene exists at all. The two are different
+types on this side and the ratchet flattens them.
+`issue1905.pdf` is **answered** — gate only — and the `AIS` question is **settled** by
+ADR 0066 from the clause rather than by them; two clause corrections go back to
 their `HAYRO_ISSUES_FOR_QUORRA.md` (`doc/notes-hayro-coverage-map.md` has both). **ADR 0058's open number is delivered**: the present pass is 4.4 % of a refresh (2026-08-17).
 
 **The 2026-08-15 release round is pushed** (`a64a908`): ADR 0047 (a document's rectangles
@@ -245,11 +249,13 @@ weaken when the frame is an error.
 
 **What is left, in order:**
 
-- **`issue1905.pdf` at 4× still refuses, and correctly.** Its marks *are* the page:
-  1 339 315 879 texels, no residue clip anywhere. **Ask the caller first** whether it refuses
-  in the product or only in the gate — the frame that refuses is a whole page at 4× in one
-  target, and a viewer's viewport is its window. That answer decides whether this half of the
-  seam is worth any work at all.
+- **`issue1905.pdf` at 4× refuses only in the gate — answered, and the seam is retired.**
+  The caller measured it on the real adapter (2026-08-18): the whole page at 4× outgrows the
+  16 384² scratch image, and **every window frame draws, even at 64× zoom**. A viewer's
+  viewport is its window, so the refusing frame is a shape only the gate constructs. **This
+  half of the tiling seam has no product behind it**; reopen it only if a caller appears that
+  renders a whole page at once. The question was worth asking rather than assuming — the
+  answer went the other way from the arithmetic's implication.
 - **The caller must re-baseline their scale-4 `REFUSED` list**, dropping
   `bug1703683_page2_reduced.pdf`. Their ratchet fails loudly with both lists printed, which
   is it doing its job.

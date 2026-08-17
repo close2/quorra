@@ -240,12 +240,15 @@ who could remove it.
   narrower than the row implied. On the page that now exists, artwork reads **600 tiles,
   66 residue regions and 384 per-tile rasterisations** — 450 rasterisations for 600
   clipped commands, both branches of the admission rule gated by one page.
-  **One page still refuses at 4× and does so correctly**: `issue1905.pdf`, whose marks
-  *are* the page — seven fills wider than it under a rectangular clip that already bounds
-  them, 1 339 315 879 texels, no residue clip anywhere. Nothing on the tiling side draws
-  that inside a 256 MiB budget, and the question to ask the caller before spending a round
-  on it is whether it refuses in the product or only in the gate: the frame that refuses
-  is a whole page at 4× in one target, and a viewer's viewport is its window.
+  **One page still refuses at 4×, correctly, and it needs no round** — the caller answered
+  the question this bullet used to ask. `issue1905.pdf`'s marks *are* the page: seven fills
+  wider than it under a rectangular clip that already bounds them, 1 339 315 879 texels, no
+  residue clip anywhere. **It refuses only in the gate.** Measured on the real adapter by
+  the caller (2026-08-18): the whole page at 4× outgrows the 16 384² scratch image, and
+  **every window frame draws, even at 64× zoom** — because a viewer's viewport is its
+  window, which is what made the question worth asking rather than assuming. So the
+  remaining half of the tiling seam has no product behind it and is **retired rather than
+  deferred**; reopen it only if a caller appears that renders a whole page at once.
 - **The caller's `HAYRO_ISSUES_FOR_QUORRA.md` is answered in full** (2026-08-17;
   `doc/notes-hayro-coverage-map.md` is the row-by-row map, with
   `notes-hayro-questions.md`, `notes-ceilings-audit.md`, `notes-hayro-paints.md` and
