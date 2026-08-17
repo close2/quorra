@@ -42,6 +42,8 @@ row, since a number without one is not evidence.
 | — the same page's encode, before → after ADR 0049 | geometry **37.8 → 28.9 ms**, encode 46.3 → 37.2 | `examples/residue_clip.rs`, 2026-08-15 — **a number about a page whose clips met 8 of the 600 marks they clipped.** The mechanism and the saving were real; the fixture was re-cut on 2026-08-17 and no number taken on it before that date is comparable with one taken after (`doc/notes-clipped-instrument.md`) |
 | — what the residue multiply costs that page, and where the clock puts it | **4 683 942 Ir, 0.62 % of the encode**; inside `geometry` since ADR 0023's amendment | callgrind on the re-cut page, counters checked against `tests/archetypes.rs`, 2026-08-17. It was reported as `recording` until then, so every `recording` share published for a clipped page was too large by it |
 | the artwork and dense-text archetypes' curve clips, before the re-cut | overlapped **8 of 600** and **0 of 40** of the marks they clipped | counted from the generator's own arithmetic, 2026-08-17 (ADR 0057 found it) — a mark whose chain admits nothing still got a mark-sized tile multiplied by zero, so the rows looked like they gated the residue lane for two ADRs |
+| the presenter at the display's own refresh — does the split hold 119.96 Hz | **149 of 149 presents landed on the next refresh**, 1.02 per refresh of the span | `examples/present_thread`, RADV at the real display, 2026-08-17, four runs over two loop rounds, loads 8.89–12.21; a fifth at load 23.74 misses 2 of 37 (`doc/notes-present-rate.md`) |
+| the present pass, the caller's four layers at 1280×1600 (7 506 609 fragments) | **0.367 ms, 4.4 % of a refresh** | same. The **count** is the bracket — 16 copies still land every refresh, 32 never do; the 0.367 slope is two host clocks, the minimum of five, and indicative |
 | first frames, presenting | pipeline compiles: **none**, eight of eight | same; ADR 0043 |
 | a path-heavy page's encode geometry, 1 thread → 24 | **309.0 → 46.9 ms** (encode 406.8 → 132.2) | `examples/encode_threads.rs`, llvmpipe, minima of five round-robin, load 17.6, ADR 0054 |
 | a generated function shader's compile, at the 482-instruction witness's length | **8.25 ms** RADV, 6.88 ms llvmpipe | `examples/function_compile.rs`, minima of 12 round-robin rounds × 3 alternating runs per adapter, load 5.1–8.6, 2026-08-15 |
@@ -179,8 +181,12 @@ renders on a second thread while the main thread presents — **three to five pr
 a single render, where the old arrangement allows none** — the finished raster lands under
 `scale(2) ∘ translate(64, 32)` with chrome at identity, six window points are read back with
 `xwd`, and the gate was verified able to fail in three of the ways it exists to catch.
-**Whether it holds 60 or 120 Hz cannot be measured here** — `Xvfb` reports a refresh of 0.00
-— so that number is the owner's on the real display. §1.7's determinism is untouched: nothing
+**It holds 119.96 Hz, measured on the owner's display on 2026-08-17** (ADR 0056's amendment,
+`doc/notes-present-rate.md`): **149 of 149 presents landed on the next refresh** while a second
+thread held the device rendering, at 1.02 presents per refresh of the span, over four runs at
+load 8.9–12.2. A fifth at load **23.74** misses 2 refreshes of 37, which is the boundary of the
+claim rather than a counterexample: it holds on a machine that is not oversubscribed. `Xvfb`
+still reports 0.00, so the gate that runs under it asserts counts and never a duration. §1.7's determinism is untouched: nothing
 on this path draws a page, and the corpus and the oracle both use `Target::Readback`.
 
 **And a layer now draws its own rectangle rather than the whole window** (ADR 0058,

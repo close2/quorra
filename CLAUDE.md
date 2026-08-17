@@ -266,7 +266,14 @@ written in prose is a non-goal that arrives as a transitive dependency.
 
 ## Environment notes
 
-- Arch Linux. GPU: AMD Strix (Radeon 880M/890M, RDNA 3.5) — RADV. Session: X11.
+- Arch Linux. GPU: AMD Strix (Radeon 880M/890M, RDNA 3.5) — RADV. Display: eDP-1,
+  2880×1800 at 119.96 Hz (one refresh is 8.34 ms). **Session: Wayland** — corrected
+  2026-08-17; this line read "X11" and the claim was stale. It matters because `winit`
+  prefers the Wayland backend whenever `WAYLAND_DISPLAY` is set, and a Wayland window is
+  **not in the X tree at all**: `xwd`, `xdotool search` and `xwininfo -root -tree` find
+  nothing, and the error names a missing window rather than the wrong protocol. Anything
+  that reads its own window back — `examples/window_smoke.rs`, `examples/present_thread/` —
+  runs under `env -u WAYLAND_DISPLAY`, which takes the X11 backend through XWayland.
 - Claude Code may run as user `AI` via `sudo -u AI`, reaching this tree through the
   `coders` group. That user has no X authority cookie, so it cannot open a window on
   *the user's* display — but it can run headless on its own: `Xvfb` and `lavapipe` are

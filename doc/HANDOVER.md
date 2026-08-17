@@ -55,8 +55,7 @@ was taken on the fixture above *and* counted a bounding scan that is recording);
 `bug1703683_page2_reduced.pdf` from their scale-4 `REFUSED` ratchet; `issue1905.pdf` needs
 their answer on whether it refuses in the product or only in the gate; the `AIS` question in
 `PLAN.md` needs their answer before it can become an ADR; two clause corrections go back to
-their `HAYRO_ISSUES_FOR_QUORRA.md` (`doc/notes-hayro-coverage-map.md` has both); and ADR 0058
-wants one number from the real display — what share of a refresh the present pass takes.
+their `HAYRO_ISSUES_FOR_QUORRA.md` (`doc/notes-hayro-coverage-map.md` has both). **ADR 0058's open number is delivered**: the present pass is 4.4 % of a refresh (2026-08-17).
 
 **The 2026-08-15 release round is pushed** (`a64a908`): ADR 0047 (a document's rectangles
 reach the rectangle lane), ADR 0048 (`RetainedScene`), ADR 0049 (a clip chain's residue
@@ -690,6 +689,29 @@ The tempting reading of `coverage_lanes.rs` — that the lanes agree to an eight
 **not** a bound on this: it was derived for an edge *crossing* a pixel, and says nothing about a
 shape narrower than the sample grid. Any claim that the two lanes agree needs to name the shape
 class it was measured on.
+
+**`xwd` cannot see a Wayland window, and the failure does not say "Wayland".**
+`examples/present_thread` had only ever run under `Xvfb`. On the owner's machine it opened its
+window, warmed, rendered on a thread, presented — and died on `xwd: error: No window with name
+… exists!`. It is not renamed and not reparented: `xdotool search`, `xwininfo -root -tree` and a
+50 ms poll for five seconds all find **nothing**, because `XDG_SESSION_TYPE=wayland` and `winit`
+prefers the Wayland backend whenever `WAYLAND_DISPLAY` is set, so the window is not in the X
+tree at all. **`CLAUDE.md` said "Session: X11" and that was stale** — corrected 2026-08-17. Run
+anything that reads its own window back under `env -u WAYLAND_DISPLAY`. Cost two loop rounds.
+
+**Under `Fifo` the minimum interval is not the refresh.** A swapchain has more than one image,
+so a burst gets through whatever settling you do: measured minima over 120 empty presents were
+**0.064 to 0.201 ms** against a refresh of 8.34. Taking the minimum would have divided every
+number in that round by forty. **The median of a run of presents with nothing to draw is what
+measures the refresh** — print both, which is how this became visible rather than becoming a
+result.
+
+**A gate's forced defect has to be forced where the number can move.** `arrangement.rs`'s
+fragment gate was first forced by moving the page layer's *width* by one texel and **it
+passed**: the page sits at x = 480 with width 1568, so its right edge is the window's own and
+the outward pixel is clamped away at either width. Moving the *height* failed it by exactly
+1569. **A fixture at a boundary can be wrong on the axis of that boundary without anything
+noticing.**
 
 **A stale worktree argues that your brief is wrong.** A round given the four files past the
 size smell reported three "corrections" — that the highest ADR is 0056, that the suite is 445
