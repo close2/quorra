@@ -155,7 +155,19 @@ Three consequences, stated rather than absorbed:
   smaller than the page*, because a page-sized clip is refused by ADR 0049's admission rule
   and a mark-sized one exercises nothing.
 
-The new archetype baseline, with the tenth column (`coverage.texels`) ADR 0057 added:
+  **Done, 2026-08-17 — `doc/notes-clipped-instrument.md`.** A curve clip is now cut around
+  the run of three or four consecutive marks that draw under it, in `tests/archetypes.rs`
+  and in all three examples that copy that page. All 600 of artwork's clipped commands and
+  all 40 of dense text's now meet the clip that clips them, and
+  `a_curve_clip_clips_the_marks_that_draw_under_it` fails if that ever stops being true —
+  from the generator's arithmetic *and* from `tiles == clipped`. The rows below are
+  superseded by that round's and are not comparable with them.
+
+The archetype baseline as this round left it, with the tenth column (`coverage.texels`)
+ADR 0057 added. **Two of these rows were re-taken on 2026-08-17 when the fixture was
+re-cut** — dense text now reads `[4320, 0, 818, 2164, 1, 40, 0, 0, 40, 8956]` and artwork
+`[684, 0, 300, 300, 1, 600, 3, 66, 384, 3542360]` — and neither pair is comparable with
+the other, because the page changed rather than the library:
 
 | archetype | signature |
 |---|---|
@@ -212,7 +224,8 @@ round-trip to find:
   `residue_clip`, `encode_threads` and four ADRs read numbers off it — and re-cutting its
   clip placement inside a round about tiling would change what every one of those means,
   in a round where two other agents are merging. Written down instead, with the count that
-  proves it.
+  proves it. **(Taken on 2026-08-17, with exactly that blast radius handled one reader at a
+  time: `doc/notes-clipped-instrument.md` §4.)**
 - **`commands_culled` does not count a mark whose chain admits nothing.** The bound now
   drops those marks from the sheet, so they cost no coverage; what is missing is the
   *count*, and moving a caller-visible number is its own decision.

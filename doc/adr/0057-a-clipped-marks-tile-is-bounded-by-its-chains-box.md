@@ -223,6 +223,12 @@ quietly absorbed:
   repeated rasterisation of tiles that drew nothing. The saving was real and the mechanism
   is unchanged; what the fixture demonstrated is narrower than the row implied. A fixture
   round is owed, and it is the first thing anybody measuring the residue lane must do.
+  **Taken the same day** (`doc/notes-clipped-instrument.md`): a curve clip is now cut
+  around the run of marks that draw under it, in this file's fixture and in the four
+  examples that copy it, and `a_curve_clip_clips_the_marks_that_draw_under_it` fails if
+  that stops being true. The three rows in the table above are the *middle* of three
+  columns and are not comparable with either neighbour — the first differs from them by a
+  change in the library, the third by a change in the page.
 
 ## What it costs
 

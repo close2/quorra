@@ -1,6 +1,10 @@
 # 0049 — A clip chain's residue is rasterised once, over the region it occupies
 
-Date: 2026-08-15. Status: accepted, and built.
+Date: 2026-08-15. Status: **accepted, and built — with a correction to what its numbers
+were taken on**, 2026-08-17, at the end of this file. The mechanism and the saving are
+unchanged and were re-measured; **the fixture that demonstrated them was weaker than this
+ADR says it was**, and two of its sentences about which chains are admitted are wrong for
+the page that now exists.
 
 Takes `HANDOVER.md`'s item 2 — the only work left in the tree with milliseconds in it —
 and finishes what ADR 0030 started. That ADR read ISO 32000-2 §8.5.4 as saying a clip
@@ -232,3 +236,48 @@ was already at a rounding boundary.
 - **The accumulator's arithmetic changes.** A fixed-point accumulator would make a tile
   the crop of a region *exactly*, and the 1-of-255 residual would go with it. That is a
   change to the hottest loop in the tree and nothing needs it today.
+
+## Correction, 2026-08-17 — what the fixture demonstrated, and what it did not
+
+**The decision is unchanged, the mechanism is unchanged, and the saving is real.** A
+chain's residue is rasterised once over its own region and cropped per mark; the
+admission rule is what it says; the border cut and its corpus evidence are untouched.
+What is wrong is the **page** every number in "What it buys" was taken on, and two
+sentences that describe which chains that page admitted.
+
+`tests/archetypes.rs` placed a curve clip at `position(j, side × 6)` and the marks under
+it at `position(i, side)` — two grids of different step — so **8 of artwork's 600 clipped
+commands and 0 of dense text's 40** had a mark whose box met the box of the clip clipping
+it. ADR 0057 found this by taking away the tiles those marks were getting for nothing
+(`doc/notes-tiling-bound.md` §3); the fixture was re-cut on 2026-08-17
+(`doc/notes-clipped-instrument.md`).
+
+What follows for this ADR, item by item:
+
+- **"600 residue rasterisations become 185" stands as arithmetic and was measured on the
+  wrong page.** 585 of those 600 rasterisations were of a chain that admitted no pixel of
+  the mark asking, and 177 of the 185 regions served no mark at all. The saving was real —
+  the work removed was real work — but it was **the removal of repeated rasterisation of
+  tiles that were then multiplied by zero**, which is not the case this ADR exists for.
+- **The 37.78 → 28.89 ms of geometry is a number about that page** and is not comparable
+  with any number taken on the page that exists now. `examples/residue_clip.rs` copies the
+  archetype, so it was the same page; it has been re-cut with it.
+- **"dense text's two chains are admitted because its clips are small" is now false, and
+  it was true only because the clips were mark-sized by accident.** A clip cut around the
+  twenty marks it clips is *larger* than any of them, and the admission rule refuses it:
+  dense text now reads **0 regions and 40 per-tile rasterisations**. That is the rule
+  working exactly as the sentence beside it describes — "a page whose clip is much larger
+  than its marks gets nothing" — and it is worth having on a page in the tree.
+- **Both branches are now exercised by one page.** Artwork reads **66 regions and 384
+  per-tile rasterisations** against 600 clipped commands: a run of three or four marks on
+  one line keeps its region, and a run that wraps to the next line has a box the width of
+  the grid and is refused one. 450 rasterisations where the page has 600 clipped commands
+  is this ADR's mechanism, measured on marks that are actually clipped.
+- **The 8 956 residue pixels the Context table records for dense text are exactly what the
+  re-cut page's `coverage.texels` now reads** — the same number from an independent
+  direction, five days and two ADRs apart, which is the one piece of evidence in this file
+  that the re-cut did not disturb.
+
+The general lesson is `doc/HANDOVER.md`'s trap about fixtures that do not overlap, arriving
+a second time in the same tree: **a gate on an interaction must fail when the interaction
+stops happening.** `tests/archetypes.rs` now has one that does.

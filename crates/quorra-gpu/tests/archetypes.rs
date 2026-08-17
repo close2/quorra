@@ -286,6 +286,14 @@ fn position(index: u32, side: f32) -> Affine {
     Affine::translate(x, y % (HEIGHT as f32 - 24.0))
 }
 
+/// The device side of the `i`th outline: five sizes about `shape.side`, so that a page's
+/// marks are not all one box. **The one statement of it** — the clip cutter below sizes a
+/// clip from the marks it will clip, and a second copy of this arithmetic is how the two
+/// come apart.
+fn outline_side(shape: &Archetype, i: u32) -> f32 {
+    shape.side * (1.0 + (i % 5) as f32 * 0.05)
+}
+
 /// The archetype's resources: outlines to place, and one image if it has any.
 fn upload(
     device: &mut Device,
@@ -293,9 +301,8 @@ fn upload(
 ) -> (Vec<OutlineId>, Option<quorra_scene::ImageId>) {
     let outlines = (0..shape.distinct.max(1))
         .map(|i| {
-            let side = shape.side * (1.0 + (i % 5) as f32 * 0.05);
             device
-                .upload_outline(&outline_of(shape.segments, side))
+                .upload_outline(&outline_of(shape.segments, outline_side(shape, i)))
                 .unwrap()
         })
         .collect();
@@ -313,6 +320,59 @@ fn upload(
     (outlines, image)
 }
 
+/// Which clip the `index`th command draws under: a run of consecutive marks in reading
+/// order, so that a clip and the marks it clips are in the same part of the page.
+///
+/// **This is the fixture's whole subject on a curve-clipped page** and it is why the
+/// mapping is stated here rather than written inline at its one call site. A clip that
+/// does not overlap the marks it clips exercises nothing: before 2026-08-17 this file
+/// placed a clip at `position(j, side × 6)` and its marks at `position(i, side)`, two
+/// grids of different step, and **0 of dense text's 40 and 8 of artwork's 600** clipped
+/// commands had a mark that met the clip clipping it. The rows still read 40 and 600
+/// tiles, because a mark whose chain admits nothing was rasterised anyway and multiplied
+/// by a residue of zero — so the signature looked like it gated the residue lane through
+/// ADR 0049 and ADR 0057, and did not (`doc/notes-tiling-bound.md` §3).
+fn clip_of(shape: &Archetype, index: u32) -> usize {
+    if shape.clipped == 0 {
+        return 0;
+    }
+    // `index < clipped`, so this is `< clips`: every clipped command names a clip the
+    // archetype defines, and the last clip is named by the last run.
+    ((u64::from(index) * u64::from(shape.clips)) / u64::from(shape.clipped)) as usize
+}
+
+/// The device box the marks under clip `j` occupy — the generator's own arithmetic, with
+/// nothing of the crate in it.
+///
+/// `outline_of` traces an ellipse `side` across and `1.3 × side` tall about the origin,
+/// and its cubics' control points are interpolations between points on it, so every
+/// point of the curve and of its hull is inside that box. A stroke's expansion reaches
+/// half its width outside — which is deliberate: it means a stroked mark under one of
+/// these clips is genuinely cut at its rim rather than merely admitted.
+fn marks_box(shape: &Archetype, j: usize) -> Option<(f32, f32, f32, f32)> {
+    let mut box_of: Option<(f32, f32, f32, f32)> = None;
+    for index in 0..shape.clipped {
+        if clip_of(shape, index) != j {
+            continue;
+        }
+        let at = position(index, shape.side);
+        let side = outline_side(shape, index % shape.distinct.max(1));
+        let (hx, hy) = (side * 0.5, side * 0.65);
+        box_of = Some(box_of.map_or(
+            (at.e - hx, at.f - hy, at.e + hx, at.f + hy),
+            |(x0, y0, x1, y1)| {
+                (
+                    x0.min(at.e - hx),
+                    y0.min(at.f - hy),
+                    x1.max(at.e + hx),
+                    y1.max(at.f + hy),
+                )
+            },
+        ));
+    }
+    box_of
+}
+
 /// The archetype's clip chains.
 ///
 /// A clip is either an axis-aligned rectangle, which ADR 0007 resolves at encode time,
@@ -323,6 +383,11 @@ fn upload(
 /// A rectangular clip here covers the page and differs from its neighbours by a hair, so
 /// it admits every command under it: the subject is the resolver and
 /// `clip_distinct_regions`, not culling, which has a gate of its own.
+///
+/// **A curve clip is cut around the run of marks that draw under it** ([`clip_of`]): the
+/// ellipse is scaled onto their box, so it is three or four marks across, a fraction of
+/// the page, and it cuts every mark under it — which is the `q W n` shape ADR 0049 and
+/// ADR 0057 both exist for, and the one a clip on a grid of its own never was.
 fn define_clips(
     builder: &mut SceneBuilder,
     device: &mut Device,
@@ -340,13 +405,26 @@ fn define_clips(
                 let half = HEIGHT as f32 * 0.6 + i as f32 * 0.01;
                 Affine::scale(half, half).then(centre)
             } else {
-                position(i, shape.side * 6.0)
+                curve_clip(shape, i)
             };
             builder
                 .clip(outline, transform, FillRule::NonZero, None)
                 .unwrap()
         })
         .collect()
+}
+
+/// The transform that puts clip `i`'s ellipse over the marks it clips.
+///
+/// A clip nothing draws under keeps the old placement: it marks nothing either way, and
+/// a box computed from an empty set is not a box.
+fn curve_clip(shape: &Archetype, i: u32) -> Affine {
+    let Some((x0, y0, x1, y1)) = marks_box(shape, i as usize) else {
+        return position(i, shape.side * 6.0);
+    };
+    let side = outline_side(shape, i % shape.distinct.max(1));
+    Affine::scale((x1 - x0) / side, (y1 - y0) / (side * 1.3))
+        .then(Affine::translate((x0 + x1) * 0.5, (y0 + y1) * 0.5))
 }
 
 /// One drawing command: a stroke while the archetype's stroke budget lasts, a fill
@@ -359,8 +437,8 @@ fn emit(
     index: u32,
 ) {
     let outline = outlines[(index as usize) % outlines.len()];
-    let clip =
-        (index < shape.clipped && !clips.is_empty()).then(|| clips[(index as usize) % clips.len()]);
+    let clip = (index < shape.clipped && !clips.is_empty())
+        .then(|| clips[clip_of(shape, index).min(clips.len() - 1)]);
     let ink = Color::new(0.12, 0.13, 0.16, 1.0);
     if index < shape.strokes {
         builder
@@ -487,8 +565,13 @@ fn render(device: &mut Device, scene: &Scene) -> (Counters, Duration) {
 /// textures, residue regions, residue tiles, coverage texels)`. Every field is an exact
 /// function of the scene and the viewport, so these compare by equality on any machine
 /// and any adapter. Recorded 2026-08-12; the residue pair joined it on 2026-08-15
-/// (ADR 0049) and the coverage texels on 2026-08-17 (ADR 0057), which also moved three
-/// rows — see the two entries below that say why.
+/// (ADR 0049) and the coverage texels on 2026-08-17 (ADR 0057).
+///
+/// **The dense-text and artwork rows were re-taken on 2026-08-17 and are not comparable
+/// with the rows before them**, because the page is not the same page: the curve clips
+/// were cut around the marks they clip ([`clip_of`], [`curve_clip`]), where before they
+/// sat on a grid of their own and met almost nothing. Every other row is untouched, and
+/// no library behaviour changed with it — `doc/notes-clipped-instrument.md` §3.
 ///
 /// **`coverage texels` is what the tiles on the sheet hold**, and it is here because two
 /// rounds in a row measured a change this signature could not see: `tiles` is a count of
@@ -500,29 +583,36 @@ fn render(device: &mut Device, scene: &Scene) -> (Counters, Duration) {
 /// - **dense text** — 4 320 placements over 818 outlines collapse to 2 164 keys, which
 ///   is the quantised phase doing its job.
 ///
-///   **Its two curve clips overlap none of the forty marks they clip**, which ADR 0057
-///   made visible and did not cause: the clip curve is placed on a grid of `side × 6` and
-///   the marks on a grid of `side`, and counting the boxes says **0 of 40** meet. Until a
-///   clipped mark's tile was bounded by its chain, those forty drew a tile each anyway —
-///   coverage rasterised, packed, uploaded and multiplied by a residue of zero — so this
-///   row read **40 tiles and 2 residue regions** for a page that marks nothing under a
-///   clip. It now reads zero for both, which is what the page is. **The fixture owes a
-///   round**: as it stands, nothing here exercises the residue lane, and
-///   `tests/tiling_ceiling.rs` is where that property is held instead.
+///   **40 tiles and 8 956 coverage texels are its two curve clips, cut around their
+///   marks.** Each clip takes a run of twenty consecutive marks, so its box is twenty
+///   cells wide and one tall — larger than any mark under it, a thirtieth of the page —
+///   and every one of the forty clipped commands rasterises a tile that the residue then
+///   multiplies into. **No region is kept**, and that is ADR 0049's admission rule
+///   working rather than failing: the chain's box costs more than the twenty small tiles
+///   it would serve, which is the clause of that ADR written for exactly this shape — a
+///   `q W n` around a line of text. So the residue is rasterised once per asking tile,
+///   forty times, and `clip_residue_tiles` says so. (Before 2026-08-17 this row read
+///   40 tiles and **2 regions** for a page whose clips met **0 of 40** marks: the clips
+///   were on a grid of their own, the tiles were rasterised and multiplied by zero, and
+///   the two regions served nothing. ADR 0057 made that visible by taking the tiles away;
+///   the re-cut makes the row mean what it says.)
 /// - **artwork** — 684 top-level nodes are 676 draws plus 8 groups (`Counters::commands`
 ///   counts the scene's top level). **3 layer textures** are the root's accumulator, one
 ///   group's at a time, and the copy of the pixels that group's composite covers —
 ///   ADR 0020's depth pricing showing its work on eight sibling groups, at ADR 0038's one
 ///   texture per plan. It was 4 while a plan ping-ponged between two.
 ///
-///   **8 tiles, not 600, and the same fixture defect is why**: of the 600 curve-clipped
-///   commands, **8** have a mark whose box meets its clip's box, counted from the
-///   generator's own arithmetic and confirmed to the unit by this row. The other 592 were
-///   rasterising a mark-sized tile and multiplying it by zero. So the **185 residue
-///   regions against 600 tiles** this row carried for ADR 0049 was 185 regions serving 8
-///   marks; what is left is 2 regions and 6 per-tile rasterisations, and
-///   `examples/residue_clip.rs` — the instrument ADR 0049 measured on — copies this page
-///   and so measured the same thing.
+///   **600 tiles, 3 542 360 coverage texels, and both halves of ADR 0049 on one page.**
+///   Every one of the 600 curve-clipped commands meets its clip and rasterises a tile of
+///   about 5 900 texels; of the 185 chains, **66 keep a region** — cut around three or
+///   four marks in one line, it costs less than the tiles it serves — and the rest are
+///   refused one and rasterise per tile, **384** times, which is the wrapped runs whose
+///   box is the width of the page's grid. 66 + 384 = 450 rasterisations where the page
+///   has 600 clipped commands, and that difference is what ADR 0049 buys, measured on a
+///   page where the clips actually clip. (This row read **8 tiles, 2 regions, 6 residue
+///   tiles, 12 284 texels** until 2026-08-17, and 600 tiles / 185 regions / 0 residue
+///   tiles before ADR 0057 — none of the three is comparable with the others, because the
+///   first two are a page whose 185 clips met 8 of its 600 marks.)
 /// - **image page** — 200 fills and 32 images under *rectangular* clips: **no tiles at
 ///   all**. Where dense text's clips leave a residue this one's resolve to a rectangle,
 ///   which is ADR 0007's whole claim and the reason `rect_clips` is a field of the
@@ -546,8 +636,8 @@ fn render(device: &mut Device, scene: &Scene) -> (Counters, Duration) {
 ///   **245 coverage texels** are those six strokes' expansions and nothing else.
 const BASELINE: [(&str, [u64; 10]); 7] = [
     ("median page", [12, 0, 9, 12, 0, 0, 0, 0, 0, 0]),
-    ("dense text", [4320, 0, 818, 2164, 1, 0, 0, 0, 0, 0]),
-    ("artwork", [684, 0, 300, 300, 1, 8, 3, 2, 6, 12_284]),
+    ("dense text", [4320, 0, 818, 2164, 1, 40, 0, 0, 40, 8_956]),
+    ("artwork", [684, 0, 300, 300, 1, 600, 3, 66, 384, 3_542_360]),
     ("image page", [232, 0, 60, 158, 4, 0, 0, 0, 0, 0]),
     ("clip mountain", [1200, 0, 200, 800, 1200, 0, 0, 0, 0, 0]),
     ("giant", [1500, 0, 1500, 1500, 0, 0, 0, 0, 0, 0]),
@@ -601,6 +691,92 @@ fn the_archetypes_cost_what_they_are_recorded_to_cost() {
     );
 }
 
+/// **A curve clip clips the marks under it** — asserted as an interaction, in the two
+/// quantities that say the interaction happened, on both sides of the library's boundary.
+///
+/// The trap this exists for is written down in `doc/notes-tiling-bound.md` §3 and cost
+/// two ADRs: a fixture whose subject is an *interaction* needs a gate that fails when the
+/// interaction stops happening, and the signature above was not one. It counted 40 and
+/// 600 tiles for two pages whose clips and marks did not overlap at all, because until
+/// ADR 0057 a mark whose chain admitted nothing still got a mark-sized tile — so the
+/// count survived the property it was standing in for.
+///
+/// Two assertions, each from a different side:
+///
+/// - **from the generator's own arithmetic**, with nothing of the crate in it: every one
+///   of the `clipped` commands has a mark box that meets the box of the clip that clips
+///   it. This is the property [`curve_clip`] is written to hold.
+/// - **from the counters**: `tiles == clipped`. A mark whose chain admits no pixel is not
+///   rasterised (ADR 0057), so the library agreeing that there are exactly `clipped`
+///   tiles is the same statement measured through the encode. It is exact and
+///   adapter-independent, like every other row of the signature.
+///
+/// The residue lane's own numbers — how many chains were rasterised once over a region
+/// and how many per tile — are in `BASELINE`, which compares by equality; what is
+/// asserted here is only that a rasterisation happened at all and that none of them is
+/// unaccounted for.
+#[test]
+fn a_curve_clip_clips_the_marks_that_draw_under_it() {
+    for shape in ARCHETYPES {
+        if shape.rect_clips || shape.clips == 0 || shape.clipped == 0 {
+            continue;
+        }
+        let meeting = (0..shape.clipped)
+            .filter(|index| {
+                // The clip's box as the *scene* will carry it: `curve_clip`'s transform
+                // applied to the ellipse `outline_of` traces. Deliberately not
+                // `marks_box` — that is the box `curve_clip` was built from, so testing
+                // against it would assert an identity and pass however the clip is
+                // placed. (It does: the first version of this gate was tautological and
+                // survived the forced defect, and only the counter below caught it.)
+                let clip = clip_of(shape, *index) as u32;
+                let placed = curve_clip(shape, clip);
+                let clip_side = outline_side(shape, clip % shape.distinct.max(1));
+                let (chx, chy) = (placed.a * clip_side * 0.5, placed.d * clip_side * 0.65);
+                let at = position(*index, shape.side);
+                let side = outline_side(shape, index % shape.distinct.max(1));
+                let (hx, hy) = (side * 0.5, side * 0.65);
+                at.e - hx < placed.e + chx
+                    && at.e + hx > placed.e - chx
+                    && at.f - hy < placed.f + chy
+                    && at.f + hy > placed.f - chy
+            })
+            .count() as u32;
+        assert_eq!(
+            meeting, shape.clipped,
+            "{}: the fixture's own arithmetic says only {meeting} of its {} clipped \
+             commands have a mark that meets the clip clipping it — a clip that admits \
+             nothing exercises nothing, whatever the tile count says",
+            shape.name, shape.clipped,
+        );
+
+        let mut device = cold_device();
+        let scene = build(&mut device, shape);
+        let (counters, _) = render(&mut device, &scene);
+        assert_eq!(
+            counters.tiles, shape.clipped,
+            "{}: {} clipped commands and {} coverage tiles. Every mark under a curve clip \
+             rasterises one and nothing else on this page does, so a difference is a \
+             clipped mark whose chain admits no pixel of it (ADR 0057)",
+            shape.name, shape.clipped, counters.tiles,
+        );
+        assert!(
+            counters.clip_residue_regions + counters.clip_residue_tiles <= shape.clipped,
+            "{}: {} residue rasterisations for {} clipped commands — a chain is \
+             rasterised once over its region or once per asking tile (ADR 0049), never \
+             both",
+            shape.name,
+            counters.clip_residue_regions + counters.clip_residue_tiles,
+            shape.clipped,
+        );
+        assert!(
+            counters.clip_residue_regions + counters.clip_residue_tiles > 0,
+            "{}: the page draws under curve clips and rasterised no residue at all",
+            shape.name,
+        );
+    }
+}
+
 /// The scenes are what the profile says they are: the generator cannot drift from the
 /// numbers it was built from without this failing.
 #[test]
@@ -639,17 +815,28 @@ fn the_generator_builds_the_shape_the_profile_states() {
 /// recorded at 1.79 — the same code, the same scene, a neighbour compiling something.
 /// A gate that fails for that reason teaches people to ignore failures. Run it
 /// deliberately, on a quiet machine, when a number is what you want:
-/// `cargo test --release -p quorra-gpu --test archetypes -- --ignored --nocapture`. Measured on llvmpipe,
-/// release, cold device, 2026-08-12: median page 18 ms, dense text 41, artwork 160,
-/// image page 29, clip mountain 30, giant 27. Software rasterisation dominates every
-/// one of them, which is why the gate is a multiple rather than a bound.
+/// `cargo test --release -p quorra-gpu --test archetypes -- --ignored --nocapture`.
+/// Measured on llvmpipe, release, cold device, **2026-08-17 at load average 4.95, with
+/// the curve clips cut around their marks**: median page 20 ms, dense text 44, artwork
+/// **148**, image page 29, clip mountain 30, giant 36, drawing 46. Software rasterisation
+/// dominates every one of them, which is why the gate is a multiple rather than a bound.
+///
+/// The same list on 2026-08-12 read 18 / 41 / **160** / 29 / 30 / 27 on a page whose
+/// clips met 8 of the 600 marks they clipped — nearly the same numbers for a page doing
+/// nearly the same work to no effect, which is what makes the two look comparable when
+/// they are not. The same run at load average 380 read artwork at **605 ms**, four times
+/// the quiet figure, which is the whole argument for `#[ignore]`.
 #[test]
 #[ignore = "a wall clock is a measurement here, not a gate; see the doc comment"]
 fn no_archetype_takes_absurdly_long() {
     // The rasteriser is a byte loop, so an unoptimised build is an order of magnitude
-    // slower and one threshold cannot serve both. Measured 2026-08-12 on llvmpipe, cold
-    // device, whole frame including readback: release, the worst archetype is **artwork
-    // at 160 ms**; debug, **dense text at 1.79 s**. Each build gets ~4× its own worst.
+    // slower and one threshold cannot serve both. Re-measured 2026-08-17 on llvmpipe, cold
+    // device, whole frame including readback, load average 5–8, with the curve clips cut
+    // around their marks: release, the worst archetype is **artwork at 148 ms**; debug,
+    // **dense text at 2.29 s** (artwork 0.76 s). Each build gets ~4× its own worst, and
+    // both thresholds are unchanged by the re-cut — artwork does about the work it did
+    // before ADR 0057 took its empty tiles away, which is why the release figure moved by
+    // 12 ms and not by a factor.
     let limit = if cfg!(debug_assertions) {
         Duration::from_secs(8)
     } else {

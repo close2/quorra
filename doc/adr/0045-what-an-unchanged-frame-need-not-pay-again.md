@@ -82,6 +82,14 @@ cubics, 405 strokes, 600 commands under a curve clip — reads 621 599 548 → 6
 almost all of it is 600 residue tiles being rasterised, so bounding is a fifth of a per
 cent of it either way. Two page shapes, one direction: a fifth of the encode where the
 brief's §0 premise holds, a wash where it does not, and no shape that loses.
+> **Dated note, 2026-08-17.** The artwork reading above was taken on the archetype before
+> its clips were cut around its marks, when 592 of its 600 clipped commands rasterised a
+> tile and multiplied it by a residue of zero (`doc/notes-clipped-instrument.md`). The
+> sentence "almost all of it is 600 residue tiles being rasterised" was true of the work
+> and not of the picture, and it is *still* what the page is after the re-cut — so the
+> direction and the conclusion here stand, and only the absolute instruction counts belong
+> to a page that no longer exists.
+
 
 ## What survives which viewport change — the precise form of their obstacle (b)
 
