@@ -166,9 +166,18 @@ pub(crate) enum CacheProspect {
     ///
     /// A tile the atlas would take but has no *room* for is deliberately not a case
     /// here. Asking about room was implemented and measured, and it moved nothing on any
-    /// page shape tried — the census keeps single-use tiles out of the atlas, so a full
-    /// atlas is one holding tiles that are being reused, and those are worth their space.
-    /// The ADR records the numbers.
+    /// page shape tried. The ADR records the numbers.
+    ///
+    /// ADR 0029's reason for that — "the census keeps single-use tiles out of the atlas,
+    /// so a full atlas is one holding tiles that are being reused" — **holds on
+    /// [`Coverage::Gpu`](crate::startup::Coverage::Gpu) and nowhere else**, because
+    /// [`worth_caching`](CacheProspect::worth_caching) is read by `take_gpu_lane` alone
+    /// and the census is not even taken under `Coverage::Cpu`. On the caller's default
+    /// lane a full atlas is one holding **earlier pages'** tiles, 98.6 % of whose keys
+    /// were placed exactly once (ADR 0063, ADR 0065). The measured conclusion is
+    /// unchanged — a room test still buys nothing — but it is now the same conclusion for
+    /// a different reason on each lane, and ADR 0065 is why filtering the other one is
+    /// refused rather than merely unimplemented.
     TooLarge,
     /// It may be cached, under this key.
     Admitted {
@@ -200,6 +209,15 @@ impl CacheProspect {
     /// whole cost and none of its benefit. Yes has one shape — an entry that is read
     /// more than it is written — and it is worth twenty to sixty times what either lane
     /// can do, which is why the test is asked in this direction.
+    ///
+    /// **The question is about *this frame*, and that only answers the lane choice where
+    /// a faster single-use lane exists.** Under `Coverage::Gpu` a `false` sends the tile
+    /// to the device, which ADR 0029 measured at two to three times the scratch path for
+    /// one use. Under `Coverage::Cpu` there is no such lane — the alternative is the same
+    /// rasteriser writing to the sheet instead of the atlas, no faster now and with no
+    /// entry on the next frame — so a `false` there would convert a one-off cost into a
+    /// per-frame one. That asymmetry, not the census's 25 µs, is why this is consulted on
+    /// one lane; ADR 0065 measured both sides of it.
     pub(crate) fn worth_caching(self) -> bool {
         match self {
             Self::TooLarge => false,
