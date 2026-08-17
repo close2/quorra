@@ -16,12 +16,18 @@ replaced**: `arrangement.rs` (exact arithmetic, no adapter in it) and `rate.rs` 
 display's own clock) beside the pixel proof that was already there. CI runs all of it under
 `--check`.
 
-**The short answers.** The split holds the rate exactly — **100 % of presents landed on the
-next refresh** while a render held the device, and 1.03 presents happened per refresh of the
-span. And the present pass is **0.37 ms, 4.4 % of a refresh**, at the caller's four-layer
-arrangement at the window this could be measured at; scaled to their own window by fragment
-count, **11.4 %**. So ADR 0058's own guess about itself was right: *"if it is 0.3 ms, this
-bought them a fifth of a percent and its real value is that sizing a layer now pays."*
+**The short answers.** The split holds the rate exactly — **149 of 149 presents landed on the
+next refresh** while a render held the device, in four runs at load averages 8.9 to 12.2, at
+1.02 presents per refresh of the span. And the present pass is **0.367 ms, 4.4 % of a
+refresh**, at the caller's four-layer arrangement at the window this could be measured at;
+scaled to their own window by fragment count, **11.4 %**. So ADR 0058's own guess about
+itself was right: *"if it is 0.3 ms, this bought them a fifth of a percent and its real value
+is that sizing a layer now pays."*
+
+**And the boundary, because a claim with no boundary is not a measurement.** A fifth run at
+load average 23.74 misses 2 refreshes of 37 and reads the pass 1.9× slower. Everything below
+is a statement about a machine that is not oversubscribed, and the instrument says so rather
+than averaging it away.
 
 ## 0. Which numbers here are exact and which are indicative
 
@@ -96,10 +102,20 @@ rounds, load averages 12.21 / 10.94 / 10.71 / 8.89:
 | 2 | 303.3 ms | 69 | 37 | **1.01** | **1 refresh × 37 (100 %)** |
 | 3 | 302.2 ms | 133 | 37 | **1.02** | **1 refresh × 37 (100 %)** |
 | 4 | 302.3 ms | 76 | 37 | **1.02** | **1 refresh × 37 (100 %)** |
+| 5 — *load 23.74* | 300.2 ms | 41 | 37 | 1.04 | 1 × 35 (94.6 %), **2 × 1**, **3 × 1** |
 
-**Every present landed on the next refresh. Not one was missed, in any of the four runs —
-149 of 149.** The `presents per refresh` slightly above 1 is the measured refresh being a
-fraction under the stated one, not a present arriving twice.
+**Every present landed on the next refresh. Not one was missed, in any of the first four
+runs — 149 of 149.** The `presents per refresh` slightly above 1 is the measured refresh
+being a fraction under the stated one, not a present arriving twice.
+
+**Run 5 is the fifth run and it is deliberately in the table**, because it is the one that
+says what the first four are a statement about. It was taken while another agent's release
+build had the load average at **23.74**, twice the 8.89 – 12.21 of the others, and there the
+presenting thread misses **2 refreshes of 37**. That is the right answer, not a defect: a
+thread that has to be scheduled to present will miss a refresh on a machine with nothing left
+to schedule it with. **So the claim is "the split holds 119.96 Hz on a machine that is not
+oversubscribed", and the instrument is sensitive enough to say when it does not** — which is
+what makes the 149-of-149 rows worth anything.
 
 **What the failure would have looked like**, so that "it held" means something: the histogram
 would carry a `2 refresh ×n` bucket — a present that took two refreshes to land — and
@@ -142,8 +158,9 @@ Minima of three round-robin rounds of 32 presents, at 1280 × 1600, window-sized
 
 **The bracket, which is the exact part.** Sixteen copies of the caller's whole four-layer
 arrangement — **120 105 744 fragments in one present** — still land every refresh in all four
-runs; thirty-two never do. So one present of that arrangement is **at most 1/16 of a refresh,
-0.52 ms**.
+unloaded runs; thirty-two never do. So one present of that arrangement is **at most 1/16 of a
+refresh, 0.52 ms**. (Under run 5's load the bracket honestly moves to 8, which is the same
+statement as its slower slope and not a second finding.)
 
 **The slope, which is the indicative part.** Rows 1 through 16 are floored by the display and
 say nothing about the pass — dividing a floored row by `n` measures the refresh divided by
@@ -157,11 +174,14 @@ between the two loaded rows divides out everything that does not scale with the 
 | 2 | **0.378 ms** | 4.5 % | 8.89 |
 | 3 | **0.367 ms** | 4.4 % | 12.21 |
 | 4 | 0.469 ms | 5.6 % | 10.71, and 17.40 by the end of it |
+| 5 | 0.680 ms | 8.1 % | **23.74**, and the bracket falls to 8 copies rather than 16 |
 
-**Take the minimum: 0.367 ms, 4.4 % of a refresh.** Three of four runs agree to 3 %; the
-fourth is the one whose load average had risen to 17.40 by the time it finished, which is
-`HANDOVER.md`'s trap arriving on schedule and is why the row is printed with its load beside
-it rather than averaged in.
+**Take the minimum: 0.367 ms, 4.4 % of a refresh.** Three of five runs agree to 3 %; run 4's
+load average had risen to 17.40 by the time it finished and run 5's stood at 23.74
+throughout. That is `HANDOVER.md`'s trap arriving on schedule — *"wall clocks lie under load,
+and this machine is somebody's desktop"* — and it is why every row is printed with its load
+beside it rather than averaged in. **A reader who took the mean of these five would publish
+0.46 ms and be 25 % wrong.**
 
 **The two instruments agree**, which is the reason to trust either: 8.31 / 0.367 = 22.6
 copies is where the crossing should be, and it is observed between 16 (holds, four times out
@@ -195,7 +215,33 @@ if anything understated: the marginal copy in this round carries four bind group
 uniform buffers of host work that the timestamped pass did not include. **Nobody should quote
 the offscreen figure as the window's cost** — it overstates it by half again.
 
-## 4. Two traps this round paid for
+## 4. One defect found in the pixel proof, not fixed here, and why
+
+`examples/present_thread`'s existing step 6 — the `ImageFilter::Linear` present, asserted by
+reading the window back — **failed once in five real-display runs**, at load average 25.22:
+
+```
+thread 'main' panicked at examples/present_thread/main.rs:459:
+where the chrome was: the window shows [0, 204, 51], the scene says [51, 102, 204]
+```
+
+`[0, 204, 51]` is the *chrome*, which the previous present carried and this one did not. So
+the window `xwd` read was **one present behind** — the assertion is right and the picture
+arrived late. The cause is `present_until_settled`: it presents for a fixed 300 ms and then
+captures, and **a wall clock is not a synchronisation**. Under `Xvfb` there is no compositor
+between the present and the dump and 300 ms was always enough; through a real compositor at
+load 25 it is not.
+
+**It is recorded and not fixed in this round**, deliberately. The right shape is *capture
+until two consecutive captures agree, then assert* — "wait until the window is stable", which
+can still fail on a stable-but-wrong window — and **not** "retry until it passes", which is a
+gate that cannot fail. That is a change to how a green proof synchronises, on the evidence of
+one observation, and it deserves its own round rather than being folded into a measurement.
+Nothing this round touched caused it: the pixel proof runs at 640 × 480 *before* the rate
+phase resizes anything, and it is a pre-existing wall clock newly exposed by being run
+somewhere it had never run.
+
+## 5. Two traps this round paid for
 
 **`xwd` cannot see a Wayland window, and the failure does not say "Wayland".** `present_thread`
 had only ever run under `Xvfb`. On the owner's machine it opened its window, warmed its
@@ -218,7 +264,7 @@ document by forty. **The median is what a run of presents with nothing to draw m
 it reads 8.300 and 8.315 against a stated 8.34. Both are printed, which is how the trap
 became visible rather than becoming a result.
 
-## 5. What was built, and how each part was verified able to fail
+## 6. What was built, and how each part was verified able to fail
 
 `crates/quorra-gpu/examples/present_thread/` gains two modules and keeps its nine existing
 steps unchanged:
