@@ -370,16 +370,26 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
   first and lost to three facts: five of its seven vocabularies are raised in exactly one
   subsystem each, its module comment was already eight lines of map, and three commits had
   added a whole vocabulary at a stroke.
-- **The ~500-line list, measured on the whole file rather than to `#[cfg(test)]`.** After the
-  2026-08-17 round the `quorra-gpu` source files past the smell are `resources.rs` (606),
-  `outline.rs` (566), `atlas.rs` (537) and `encode/parallel.rs` (532), plus `quorra-scene`'s
-  `geom.rs` (634); `raster.rs` is 61 lines over three clause modules and `pipeline.rs` 428
-  over five (`doc/notes-raster-pipeline-read.md`). No test module is past it any more: `raster/tests.rs` divided by ADR 0062 into 80 lines of
-  map and fixtures over `tests/{flatten,fill,stroke}.rs` at 184, 266 and 261. **The whole file is the number this rule is about**
-  — a reviewer holds the test module too, which is CLAUDE.md's own reason — and quoting the
-  count to `#[cfg(test)]` is what let a 1 563-line file be called "one irreducible thing"
-  twice. *(This list has now named the wrong files three times; the correction above is the
-  fourth statement of it and the first with a stated unit.)*
+- **The files past the ~500-line smell, with the unit stated: `wc -l` over
+  `crates/**/src/**.rs`, whole file including its test module, because that is what a
+  reviewer holds.** This is the bullet's fifth statement; **each of the previous four named
+  files that were not the largest ones**, so read the table rather than a remembered
+  sentence, and re-measure rather than quoting it. Measured 2026-08-17 after
+  `doc/notes-final-splits.md`:
+
+  | file | lines | state |
+  |---|---|---|
+  | `resources.rs` | 635 | **declined**, with the evidence in its module comment: the candidate seam would cut `charge` and `allocate_id` from the only callers they have |
+  | `atlas.rs` | 567 | untouched; a round was in it on 2026-08-17 |
+  | `encode/parallel.rs` | 559 | **declined**, with the evidence in its module comment: `rasterise` is the join rather than a member of either half, and no test is a statement about a `Job` alone |
+  | `frame.rs` | 537 | untouched, and the only one nobody has read for this purpose |
+
+  Nothing else in the workspace reaches 490. `error.rs` (68 over seven modules), `raster.rs`
+  (61 over three), `pipeline.rs` (428 over five), `encode.rs`, `device.rs`, `geom.rs` (three
+  ways) and `outline.rs` (two) have all left the list. **A declined file is not an untouched
+  one**: two of the four above carry a module comment that earns the exemption, which is what
+  CLAUDE.md asks for and what makes the decline re-checkable.
+
 - **`max_frame_bytes` is not the host-memory ceiling its name suggests.** `charge_tile`
   charges `width × height` bytes; `fill_mask` holds an `f32` accumulator of
   `(width + 1) × height` *and* the coverage bytes, so the peak is **5×** the charge. Priced,
@@ -670,6 +680,18 @@ The tempting reading of `coverage_lanes.rs` — that the lanes agree to an eight
 **not** a bound on this: it was derived for an edge *crossing* a pixel, and says nothing about a
 shape narrower than the sample grid. Any claim that the two lanes agree needs to name the shape
 class it was measured on.
+
+**A stale worktree argues that your brief is wrong.** A round given the four files past the
+size smell reported three "corrections" — that the highest ADR is 0056, that the suite is 445
+passing, and that `raster.rs` is 1 400 lines and untouched. All three are true of the session's
+first commit and false of `main`; the worktree was sixty commits behind and the agent read the
+difference as an error in the instructions rather than in its own base. Its code was sound —
+the four files it touched had not moved — but **its whole account of the rest of the tree was
+of a repository that no longer existed**, including a recommendation to split two files that
+had already been split. The cost is not in the diff, it is in the report, and a report is what
+the next round reads. **A statement about a file you did not open is a statement about your
+base.** Confirm `git log --oneline -1` against `main` before writing any claim about the tree,
+and re-measure a size rather than quoting one.
 
 **A split is a whole-file replacement, so its base is part of its correctness.** A `raster.rs`
 split prepared on a base twenty commits stale would have merged out `direction`'s `hypot` path
