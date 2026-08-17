@@ -57,6 +57,33 @@
 //! ([`Options::encode_threads`](crate::startup::Options::encode_threads)), and one is
 //! the default: a host that has not asked for threads runs the walk it ran before, and
 //! a host whose process cannot spawn one is not made to.
+//!
+//! # Why this is one file, having been looked at as two
+//!
+//! It is 559 lines, which CLAUDE.md's file-scale rule calls a smell, and it has already
+//! given up the seam it had: `commit` is step 3, in its own module. The division
+//! proposed for what is left — the [`Job`] record in one module and the fan-out
+//! (`partition`, `rasterise_all`, `fan_out`) in another — was looked for and is not
+//! there:
+//!
+//! - **[`rasterise`] is the join, not a member of either half.** It is the pure function
+//!   of a [`Job`] that the whole design rests on, and it would have to be filed with the
+//!   record or with the threads while being the reason both exist.
+//! - **The fan-out balances by [`Job::weight`] and is bounded by [`Job::held`]**, so a
+//!   module holding `partition` without the record holds arithmetic over fields it
+//!   cannot see. The two constants are the same: `IN_FLIGHT_BUDGET_SHARE` bounds what
+//!   jobs may sit queued and `PARALLEL_FLOOR_SEGMENTS` decides whether any go off-thread
+//!   at all, and neither means anything without the other side.
+//! - **The four tests do not divide.** Three are statements about the partition and the
+//!   floor and the fourth about the queue's bound — none is a statement about a `Job` on
+//!   its own, which is the tell that the record is not a subject.
+//!
+//! Of the 559 lines, **313 carry code and 96 of those are the tests**; sixty are this
+//! comment, which is the design argument the caller's `doc/QUORRA_ENCODE_THREADS.md`
+//! asked for and the reason a reader can check the determinism claim at all.
+//! `doc/HANDOVER.md` recorded that this file "was left because ADR 0054 had landed in it
+//! two commits earlier" — that reason has expired, and this paragraph replaces it with
+//! one that does not.
 
 use std::thread;
 
