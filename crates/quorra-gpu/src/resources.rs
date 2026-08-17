@@ -15,6 +15,35 @@
 //! the image lane's textures (M7) — and each lane builds its form from this copy when
 //! it first needs it. That staging is deliberate and stated here rather than implied:
 //! M2 owns identity, validation and budget; the lanes own bytes on the GPU.
+//!
+//! # The one thing this file is, and why it is not two
+//!
+//! It is **one admission, written five times**: a resource is checked against the clause
+//! that governs it, converted into the form a lane will want, priced, given an identifier
+//! and charged — *in that order* — or it is refused and none of those things happened.
+//! CLAUDE.md's file-scale rule asks a file this long to say what its one thing is, and
+//! that sentence is it. The obvious division — the five `upload_*` in one module, the
+//! registry in another — is refused for a reason that is checkable rather than
+//! aesthetic:
+//!
+//! - **[`ResourceStore::charge`] and [`ResourceStore::allocate_id`] have no caller
+//!   anywhere but those five methods.** A seam between them would separate two private
+//!   helpers from every call site they have, which is a cut through the middle of one
+//!   operation rather than along a join between two.
+//! - **The order is the subject.** "Nothing is stored and nothing is charged" is promised
+//!   by each of the five and kept by the two, and the only thing that checks the five
+//!   promises against the two implementations is a reader with both in front of them.
+//!   `allocate_id` is called *before* `charge` on purpose, and the bound it states — an
+//!   identifier is never reused — is what [`ResourceStore::generation`]'s soundness rests
+//!   on, three screens away.
+//! - The five uploads are not five subjects but one shape repeated, and reviewing the
+//!   fifth *is* comparing it with the first four.
+//!
+//! What the length actually buys is written down rather than left to be discovered: of
+//! the 635 lines here, **417 carry code and 150 of those are the tests**; the longest
+//! single item is `upload_outline` at forty. The rest is clause citation and stated
+//! invariant, which is the part a reader of a security boundary is here for — and it is
+//! why the count that matters for this file is the code line rather than the line.
 
 use std::collections::HashMap;
 
