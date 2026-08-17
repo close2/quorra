@@ -269,9 +269,12 @@ who could remove it.
   geometry at 47 after ADR 0054 divided it. ADR 0023's "revisit when" is closer than it
   was, and the caller's `QUORRA_ENCODE_THREADS.md` §4 excluded recording from its ask
   deliberately.
-- **§11.2's census** still has not run against a real corpus in the form M5 asked for; the
-  path lane's design stands on the shapes `doc/corpus-profile.md` measured instead, and
-  ADR 0008 names the lever if the census ever overturns it.
+- **§11.2's census has run** (2026-08-17, `doc/notes-census.md`), and the path lane's design
+  no longer stands on `doc/corpus-profile.md`'s shapes alone. §1.1's premise survives at
+  **9.4 %** and §1.6 now picks candidate 2 by measurement. ADR 0008's lever was not pulled.
+  What the census left open is one thing it was not asked about: the glyph lane surrenders
+  69 834 marks at 4× to the atlas **budget**, on 19 pages, reversibly — §1.1's stated
+  mechanism accounts for one mark in 27 507.
 
 ---
 
@@ -292,7 +295,7 @@ ours is the opposite premise, held to the same standard of measurement.
 |---|---|---|
 | **glyph** | a fill of an uploaded outline whose device-space size fits the atlas — §1.1's dominant case, 5 933 of one dense page's commands over 107 distinct outlines | one instanced quad sampling the R8 coverage atlas (§6.3) |
 | **rectangle** | axis-aligned rectangles under axis-preserving transforms: rules, backgrounds, underlines, table cells — and most clips | exact analytic coverage in the fragment shader; no tiling, no binning, no edge list (§6.4) |
-| **path** | everything else: large fills, arbitrary transforms, strokes — the rare case, by assumption until §11.2's census makes it a number | the general coverage path, whose design M5 chooses *after* the census (§1.6 below) |
+| **path** | everything else — and the census says what that is: **81 % strokes**, 23 % fills under a residue clip, 2.7 % atlas overflow, ~1 % non-solid paints, and *nothing* from arbitrary transforms. **9.4 % of marks, and at least 66 % of the coverage** | the general coverage path of ADRs 0008/0016/0026 — §1.6's candidate 2, chosen by the census rather than ahead of it |
 | **image** | decoded RGBA8 with the filter decision already resolved upstream (§4.5, integration note 1) | a textured quad |
 | **mesh** | the caller's pre-rasterised mesh, shared between its backends on purpose (integration note 5) | drawn as the raster it already is; never re-triangulated |
 
@@ -311,10 +314,27 @@ Two properties of the sorter matter more than the lanes themselves:
   same viewport → same lanes, same batches, same draw order. Determinism (§4.6) is
   designed in here, not tested in later.
 
-**Overturned by:** §11.2. If the corpus census shows the path lane is not rare — that a
-substantial share of real commands miss the glyph and rectangle lanes — then the path
-lane's design gets the engineering attention this table currently gives the atlas, and
-this section is rewritten with the number in it.
+**Measured, and it holds** (§11.2's census, 2026-08-17, `doc/notes-census.md`). Over 948
+corpus pages on the coverage lane the viewer uses, **9.4 % of a page's marks miss the glyph
+and rectangle lanes** at the page's own scale — 10.4 % with the 1/16 quantum the viewer
+actually runs, and 11.0 % at 4×. Glyph and rectangle together are 88 %, images 1.5 %. This
+paragraph used to say the section would be "rewritten with the number in it" if the premise
+failed; it did not fail, and the number is here because a premise confirmed by measurement is
+worth more than one merely not contradicted.
+
+**By work it inverts, and the plan did not anticipate that.** The rectangle lane rasterises
+no coverage at all by construction, so the scratch sheet — which is the path lane's own bill —
+is **at least 66 % of the frame's rasterised coverage at 1× and 76 % at 4×**. A tenth of the
+marks cause two thirds of the coverage. That is the number to design against, and it is why
+`Counters::coverage` (ADR 0057) rather than a mark count is what a later round should read.
+
+**The population is concentrated, not a tail**: 704 of 954 pages draw no path-lane mark at
+all, ten pages are 93 % of it, and `issue12810.pdf` alone — 34 970 sub-pixel strokes — is 54 %.
+
+**One clause of this table is wrong and is corrected below**: the glyph lane's surrender at
+zoom is not "when its device size outgrows what an atlas entry can hold". That mechanism moves
+**one mark in 27 507**. What moves the other 69 834 at 4× is the atlas *budget*, and it is
+reversible by turning the quantum on. `HANDOVER.md` carries the round that is measuring it.
 
 ## 1.2 A frame, from call to pixels
 
@@ -462,10 +482,30 @@ worth stating as design rather than leaving implicit in the phases:
   same arithmetic we will do, so a refusal can happen before a frame is attempted at
   all — §5's second preference, satisfied in addition to the first, not instead of it.
 
-## 1.6 The path lane: designed after the census, and here is the shortlist
+## 1.6 The path lane: the census has now chosen, and it chose what was built
 
-The one lane whose design is deliberately not chosen yet, because §11.2 asks the
-question and the honest answer is a measurement we do not have: **how many of a real
+**The census ran on 2026-08-17** (`doc/notes-census.md`) and answers this section's question
+twice over — how large the lane is, and *what is in it*. The second answer is the one that
+picks a design, and it is not what this section assumed:
+
+**81 % of the path lane is strokes** (89 % on the wider population), 23 % are fills under a
+non-rectangular clip residue, 2.7 % are glyph tiles the atlas had no room for, and about 1 %
+are non-solid paints. **Arbitrary transforms contribute nothing** — a rotated outline is still
+an outline the atlas holds — which is the assumption this section carried without checking.
+
+That retires **candidate 1 by measurement rather than by argument**: tile-binned compute is
+machinery for a population of large general fills, and the population is strokes. It confirms
+**candidate 2**, which is what ADRs 0008, 0016 and 0026 already built — and the reason it fits
+is the one the section worried about in reverse: strokes reach the lane *already expanded to
+polygons*, so the CPU flattening cost candidate 2 was charged with is paid for the dominant
+case either way. **Candidate 3 stays refused** on the oracle bound. ADR 0008's lever was not
+pulled.
+
+The three candidates are kept below as written, because what they were weighed against is why
+the answer means anything.
+
+The one lane whose design was deliberately not chosen at M5, because §11.2 asked the
+question and the honest answer was a measurement we did not have: **how many of a real
 corpus's commands miss the glyph and rectangle lanes?** The candidates, so that M5
 chooses among named options rather than improvising:
 
@@ -555,7 +595,7 @@ M8.
 | §11 question | answered | what turns on the answer |
 |---|---|---|
 | 1. How much of the fixed cost is the readback? | **Answered at M1**: ~90% of an offscreen dense-page frame on RADV (4.1 ms of 4.6; execute is 48 µs). The M1 record is in `doc/history/`. | tiers 2–3 are confirmed as the headline; per-pixel work is second-order for tier 2/3 hosts |
-| 2. Does the glyph path want tiles at all? | M5, corpus census before design | which of §1.6's three candidates the path lane becomes — and whether §1.1's premise survives |
+| 2. Does the glyph path want tiles at all? | **Answered 2026-08-17**: the path lane is 9.4 % of marks at the page's own scale and 81 % of it is strokes (`doc/notes-census.md`) | §1.1's premise **survives**; §1.6 picks candidate 2, which is what ADRs 0008/0016/0026 built. Candidate 1 is retired by the population, candidate 3 by the oracle bound |
 | 3. What does the atlas cost on a page it cannot help? | M4 | whether the atlas is unconditional, adaptive, or off by default on low-reuse pages |
 | 4. Is byte-identical output across adapters achievable? | **Answered at M1**: no, for the fixed-function path (ADR 0006); same-adapter identity holds, cross-adapter is bounded and gated | M6's compositor ADR decides whether shader-owned quantisation buys identity back; the caller's CI model needs the conversation now |
 | 5. What does a `Scene` cost to hold? | M2 number, M8 verdict | whether the dozen-resident-pages roadmap item needs a compact encoding or gets it for free |
@@ -765,6 +805,11 @@ whichever of §1.6's candidates the census justifies.
 **Done when:** the census number is in the ADR; the three day-one scenes that involve
 paths pass; every command a real corpus page contains renders through some lane with no
 refusals left except genuine budget refusals.
+
+**The census has since run** (2026-08-17, `doc/notes-census.md`): §11.2 is answered, §1.1's
+premise holds at 9.4 %, and §1.6's candidate 2 — what was built — is confirmed by the
+population rather than assumed. The sentence below about the census "not having run" was true
+from M5 until then.
 
 **Done in implementation, open in measurement** (2026-08-02): fills (both rules,
 nested same-winding pinned end to end), strokes (caps/joins/miter, cross-checked
