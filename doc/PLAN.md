@@ -160,6 +160,20 @@ who could remove it.
   that inside a 256 MiB budget, and the question to ask the caller before spending a round
   on it is whether it refuses in the product or only in the gate: the frame that refuses
   is a whole page at 4× in one target, and a viewer's viewport is its window.
+- **The caller's `HAYRO_ISSUES_FOR_QUORRA.md` is answered in full** (2026-08-17;
+  `doc/notes-hayro-coverage-map.md` is the row-by-row map, with
+  `notes-hayro-questions.md`, `notes-ceilings-audit.md`, `notes-hayro-paints.md` and
+  `notes-hayro-boundary.md` behind it). Every issue it names that is checkable against this
+  tree now has a gate, including the ones we already got right, because a written argument
+  decays and a gate does not. Two defects that no test could see came out of it — see
+  `HANDOVER.md`'s state of play — and **four citation corrections go back to them**, each
+  leaving their substantive point standing: §8.9.6.3 not §8.9.6.4 for a mask on its own grid;
+  §8.5.3.2's last sentence, not §8.4.3.3, for a bare `m` (no dot under *any* cap, rather than
+  a dot under two); §8.7.2 and §8.7.4.1, not §8.7.4.3, for a shading's independence from the
+  mark it paints; and ISO 32000-**2**'s `/Interpolate` wording, which is "should … PDF
+  processor" where they quote 32000-1's "shall … conforming reader" — a correction that
+  *strengthens* their point, since §8.9.5.3 adds that the flag "is only a hint".
+  One row is left open on purpose, and it is the next bullet.
 - **The two coverage lanes disagree about whether a thin mark is *there*.** `Coverage::Gpu`
   samples a 4 × 4 ordered grid, so its columns sit a quarter of a pixel apart; a
   0.1-device-pixel bar swept across ten sub-pixel positions **vanishes entirely at six of

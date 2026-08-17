@@ -126,15 +126,29 @@ leave the caller's substantive point standing — each is a citation, not a read
    Tj (show text) … When a shading is used in this way, the geometry of the gradient fill is
    independent of that of the object being painted." Their substantive point stands unchanged.
 
+4. **Their §4 quotes ISO 32000-1's wording for `/Interpolate`.** They give it as "…**shall** be
+   performed by a **conforming reader**". The EC3 text of §8.9.5.1 Table 87 reads: "( Optional )
+   A flag indicating whether image interpolation **should** be performed by a **PDF processor**
+   (see 8.9.5.3, "Image interpolation"). Default value: false." **Their point stands and
+   strengthens**: §8.9.5.3 says "However, this is only a hint, and a PDF processor may ignore
+   it", so the clause hands the choice to the processor by name — which is *them*. What must not
+   happen is the renderer taking it behind the viewer's back, and integration note 1's shape (a
+   resolved decision on the image *command*) is what makes that impossible.
+
 ## What is open, in the order it is worth doing
 
-1. **The two coverage lanes disagree about whether a thin mark is *there*** (#104) — not a
-   citation and not a gap in a test, but a scan-conversion decision with a cost either way.
-   See below; it wants an ADR and the caller's view.
-2. **`/Interpolate` honoured, never overridden** (#1310) — integration note 1's whole point.
-3. **No CMS is reachable** (#205 family) — a dependency assertion, cheap.
-4. **Banding under one 8-bit level** (#60).
-5. **`encode_threads` nested, and `Scene: Send + Sync` still asserted** (#1316, #1343).
+**One row, and it is a decision rather than a gate**: the two coverage lanes disagree about
+whether a thin mark is *there* (#104). See below. Everything else the document names is
+answered.
+
+`/Interpolate` is honoured per **command** and never substituted (`tests/interpolate_filter.rs`);
+no colour-management engine is reachable from a published crate, now held by an **allowlist**
+rather than by `deny.toml`'s blocklist (`tests/no_colour_management.rs`); rgba8's cost is a
+number — **a mark whose opacity is under `1/510` is not drawn, the quantisation is per
+composite, and no number of such marks accumulates**, group or no group
+(`tests/eight_bit_floor.rs`); and `Options::encode_threads` reaches a nested plan unchanged
+while one `Scene` is read concurrently by four threads on four devices
+(`tests/encode_threads_nested.rs`, `tests/scene_across_threads.rs`).
 
 **Closed 2026-08-17**: §8.7.2's coordinate space on a fill, a stroke and a glyph-sized outline
 (`tests/shading_space.rs`, 7 tests, three drawings of the same device pixels required identical

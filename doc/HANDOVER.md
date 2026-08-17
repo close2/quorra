@@ -382,6 +382,14 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
   reason — moving a caller-visible number is its own decision with its own measurement.
 - **The four examples that copy an archetype page still carry private copies of it.** One
   page under one name lives in five places; see the trap below for what that already cost.
+- **`deny.toml` bans by name, which is a blocklist**, and a blocklist is silent about next
+  year's crate. `tests/no_colour_management.rs` closes the shape with an allowlist over the
+  published crates' direct dependencies plus a pattern walk of the shipping graph. What
+  `deny.toml` still does not name is `ttf-parser` / `owned_ttf_parser` / `ab_glyph` and
+  **`tiny-skia` / `tiny-skia-path` — the caller's own oracle** — all of which are in
+  `Cargo.lock` through `winit → sctk-adwaita` and reachable from no published crate.
+  `doc/notes-hayro-boundary.md` carries a `wrappers` block for them. `cargo-deny` is not
+  installed for the `AI` user, so it has not been run.
 - **Four things the `encode.rs` split found and left**, in `doc/notes-encode-split.md` §5:
   `push_op`'s doc comment is two openings for one function — the same defect this file's
   traps record from `take_pass_query`, now in `encode/plan.rs`; `CULL_MARGIN`'s comment cites
@@ -600,6 +608,15 @@ new gate *in both directions* — a test that passes proves only that a test exi
 **A fixture that names a lane should say which lane it means.** ADR 0047 found three tests in
 `m45.rs` using a rectangle as a stand-in glyph: one failed, and two would have gone on
 passing while comparing one lane with itself.
+
+**A drain site can be covered by every fixture and gated by none of them.**
+`tests/encode_threads.rs` fails when `plan_child`'s inner drain is removed — so ADR 0054's
+fixture does contend — but **`push_op`'s drain can be deleted and all four of its tests pass**,
+because every op `busy_page` pushes follows a `plan_child` that drained already. Reaching it
+needs a *rare-lane* command (image, shading, function paint) mid-run of queued fills, and that
+file's comment claimed one was there when the file contained none.
+`tests/encode_threads_nested.rs` now holds it. **Before believing a set of drains is gated,
+delete each one and watch which test goes red.**
 
 **A sampled coverage rule and an area coverage rule disagree about what is *there*, not only
 about how much.** `Coverage::Gpu`'s 4 × 4 ordered grid puts its columns a quarter-pixel apart,
