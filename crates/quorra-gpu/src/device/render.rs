@@ -321,6 +321,7 @@ impl Device {
             atlas_entries: u32::try_from(self.atlas.entry_count()).unwrap_or(u32::MAX),
             atlas_distinct_keys: encoded.atlas_distinct_keys,
             atlas_working_set_bytes: encoded.atlas_requested_bytes,
+            atlas_overflow_tiles: encoded.atlas_overflow_tiles,
             // Set by the caller of `draw_encoded`, which is where the repack is
             // decided: a frame that has not settled its atlas yet has not repacked
             // it, and a `Frame` may not carry a number that is not true.
@@ -357,8 +358,7 @@ impl Device {
     ///   the end. Taking it anyway was an atlas that reset on every frame of a page it
     ///   could never hold, and a retained encode that never survived one.
     fn settle_atlas(&mut self, encoded: &Encoded) -> bool {
-        let (atlas_width, atlas_height) = self.atlas.dimensions();
-        let atlas_bytes = u64::from(atlas_width).saturating_mul(u64::from(atlas_height));
+        let atlas_bytes = self.atlas.byte_size();
         let resident = u32::try_from(self.atlas.entry_count()).unwrap_or(u32::MAX);
         let repack = encoded.atlas_pressure
             && encoded.atlas_requested_bytes <= atlas_bytes

@@ -79,6 +79,9 @@ pub(crate) struct Encoded {
     /// is the whole of what a repack can reclaim, and ADR 0050 is the argument that when
     /// it is zero a repack provably cannot change the outcome.
     pub atlas_entries_used: u32,
+    /// Glyph-lane marks this frame drew through the scratch sheet because the packer had
+    /// no room — see `Counters::atlas_overflow_tiles`, which reports it.
+    pub atlas_overflow_tiles: u32,
     /// What the walk above spent its time on, when the caller asked for the
     /// subdivision (ADR 0023); empty otherwise.
     pub encode_phases: EncodeClock,
@@ -200,6 +203,7 @@ pub(super) fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encode
         atlas_pressure: encoder.atlas_pressure,
         atlas_requested_bytes: encoder.atlas_requested_bytes,
         atlas_entries_used: encoder.atlas_entries_used,
+        atlas_overflow_tiles: encoder.atlas_overflow_tiles,
     })
 }
 

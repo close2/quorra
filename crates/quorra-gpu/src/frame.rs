@@ -283,19 +283,64 @@ pub struct Counters {
     /// because the key was a name rather than the region.
     pub atlas_distinct_keys: u32,
     /// Atlas bytes this frame's distinct glyph keys asked for, hits included — the
-    /// **working set**, which is the number [`Options::atlas_budget`] has to be compared
+    /// **working set**, which is the number [`Limits::atlas_bytes`] has to be compared
     /// against (ADR 0050).
     ///
     /// [`atlas_distinct_keys`](Counters::atlas_distinct_keys) says how many things a
     /// page repeats; this says what holding all of them would cost. A page whose working
-    /// set exceeds the budget cannot keep its glyphs cached however the packer behaves,
+    /// set exceeds the atlas cannot keep its glyphs cached however the packer behaves,
     /// and will rasterise the remainder into the scratch sheet on every frame that
-    /// encodes — so this is the number a host raises the budget from, and the only one
-    /// that distinguishes "the atlas is too small for this page" from "the atlas is
-    /// holding another page's tiles".
+    /// encodes — so this is the number a host raises the budget from, and, **beside
+    /// [`atlas_overflow_tiles`](Counters::atlas_overflow_tiles)**, the pair that
+    /// distinguishes "the atlas is too small for this page" from "the atlas is holding
+    /// another page's tiles".
+    ///
+    /// **Against [`Limits::atlas_bytes`] and not against
+    /// [`Options::atlas_budget`]**, which is a request rather than a size: the atlas is
+    /// sized near-square with its width capped at 2048 and both sides clamped to the
+    /// adapter's texture limit, so a budget above `2048 × max_target_size` buys nothing
+    /// (ADR 0063). This rustdoc named the request until that ADR measured the difference.
     ///
     /// [`Options::atlas_budget`]: crate::startup::Options::atlas_budget
+    /// [`Limits::atlas_bytes`]: crate::device::Limits::atlas_bytes
     pub atlas_working_set_bytes: u64,
+    /// Glyph-lane marks this frame drew through the **scratch sheet** because the atlas
+    /// packer had no room for their tiles (ADR 0063).
+    ///
+    /// The pixels are the same either way — one rasteriser feeds both paths — so this is
+    /// a cost and never a defect: each of these marks was rasterised, packed onto the
+    /// sheet, uploaded and sampled, where a resident entry would have cost a quad. It is
+    /// counted per **placement**, because that is the work the frame did.
+    ///
+    /// **A named part of [`LaneCounts::path`]**, which is the whole of it and therefore
+    /// cannot say why any mark is there: over the corpus at 1× that lane is 81 % strokes
+    /// and 2.8 % this, and at 4× the proportions invert (`doc/notes-census.md` §4). §11.2's
+    /// census needed the breakdown and had to build a throwaway instrument for it; this is
+    /// the one reason-code worth keeping, because it is the only one that is a property of
+    /// the *device's history* rather than of the page.
+    ///
+    /// **What it is for is telling two states apart that look identical from outside.**
+    /// A page whose
+    /// [`atlas_working_set_bytes`](Counters::atlas_working_set_bytes) exceeds
+    /// [`Limits::atlas_bytes`] is a page the atlas cannot hold, and raising the budget is
+    /// the answer. A page whose working set fits and which still reports tiles here found
+    /// the atlas **full of another page's**, and no budget fixes that — the repack that
+    /// follows the frame does, once. Over the caller's corpus at 4× the second is the only
+    /// case that occurs: 74 820 marks on 19 of 948 pages, not one of which asks for more
+    /// than half the default atlas, and the worst of them asks for a tenth of it
+    /// (`doc/notes-atlas-budget.md`).
+    ///
+    /// Zero on a frame the atlas served and on a frame that asked it for nothing. A
+    /// **replayed** frame reports what its retained encode did, exactly as
+    /// [`tiles`](Counters::tiles) and
+    /// [`atlas_distinct_keys`](Counters::atlas_distinct_keys) do — those tiles are on the
+    /// sheet the replay draws again, so the cost is paid on every frame that replays and
+    /// reporting zero would be the number that is not true. This is the one atlas counter
+    /// that differs from [`atlas_repacked`](Counters::atlas_repacked) in that respect, and
+    /// for the opposite reason: a replay repacks nothing, and it redraws everything.
+    ///
+    /// [`Limits::atlas_bytes`]: crate::device::Limits::atlas_bytes
+    pub atlas_overflow_tiles: u32,
     /// Whether the atlas was repacked after this frame — the one event that moves every
     /// tile, and so the one that makes a [`RetainedScene`] encode stale (ADR 0050).
     ///

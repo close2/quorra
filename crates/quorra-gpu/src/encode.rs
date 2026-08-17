@@ -206,6 +206,8 @@ struct Encoder<'a> {
     atlas_requested_bytes: u64,
     /// See `Encoded::atlas_entries_used`.
     atlas_entries_used: u32,
+    /// See `Encoded::atlas_overflow_tiles`.
+    atlas_overflow_tiles: u32,
     /// Sheet bytes already charged tile by tile, so the sheet's own extent can be
     /// charged once at the end without paying twice (ADR 0021).
     scratch_charged: u64,
@@ -326,6 +328,7 @@ pub(crate) fn encode(
         atlas_pressure: false,
         atlas_requested_bytes: 0,
         atlas_entries_used: 0,
+        atlas_overflow_tiles: 0,
         scratch_charged: 0,
         clock: EncodeClock::new(instrument),
         hulls: hull::HullMemo::default(),

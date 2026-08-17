@@ -212,6 +212,11 @@ impl<'a> Encoder<'a> {
                 // after the frame. Same pixels either way — one rasteriser feeds both
                 // paths.
                 self.atlas_pressure = true;
+                // Counted per *placement* and not per key, because what this measures is
+                // the work the frame did rather than the keys it wanted: a mark whose key
+                // another placement already failed to insert is rasterised, packed and
+                // sampled all over again (`Counters::atlas_overflow_tiles`).
+                self.atlas_overflow_tiles = self.atlas_overflow_tiles.saturating_add(1);
                 let dest = Point::new(ix + tile.left as f32, iy + tile.top as f32);
                 return self
                     .push_scratch_quad(&tile, dest, draw.color, draw.clip, draw.style, draw.mask);
