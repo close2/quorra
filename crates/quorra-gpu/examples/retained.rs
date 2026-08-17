@@ -108,12 +108,48 @@ fn position(index: u32, side: f32) -> Affine {
     Affine::translate(x, y % (HEIGHT as f32 - 24.0))
 }
 
+/// The side of the `i`th outline — one statement of it, because the clip cutter below
+/// sizes a clip from the marks it will clip.
+fn outline_side(i: u32) -> f32 {
+    SIDE * (1.0 + (i % 5) as f32 * 0.05)
+}
+
+/// Which clip the `index`th command draws under: a run of consecutive marks in reading
+/// order, as in `tests/archetypes.rs`. Before 2026-08-17 the two clips sat on a grid of
+/// `side × 6` and met **0 of the 40** marks they clip, which is why this file's own
+/// signature gate had `40` tiles for a page that (once ADR 0057 stopped rasterising a
+/// tile for a mark its chain admits nothing of) drew none.
+fn clip_of(index: u32) -> usize {
+    ((index as usize) * (CLIPS as usize)) / (CLIPPED as usize)
+}
+
+/// The transform that puts clip `j`'s ellipse over the marks it clips.
+fn curve_clip(j: u32) -> Affine {
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for index in 0..CLIPPED {
+        if clip_of(index) != j as usize {
+            continue;
+        }
+        let at = position(index, SIDE);
+        let side = outline_side(index % DISTINCT);
+        let (hx, hy) = (side * 0.5, side * 0.65);
+        x0 = x0.min(at.e - hx);
+        y0 = y0.min(at.f - hy);
+        x1 = x1.max(at.e + hx);
+        y1 = y1.max(at.f + hy);
+    }
+    let side = outline_side(j % DISTINCT);
+    Affine::scale((x1 - x0) / side, (y1 - y0) / (side * 1.3))
+        .then(Affine::translate((x0 + x1) * 0.5, (y0 + y1) * 0.5))
+}
+
 /// The dense-text archetype, built on this device.
 fn build(device: &mut Device) -> Scene {
     let outlines: Vec<OutlineId> = (0..DISTINCT)
         .map(|i| {
-            let side = SIDE * (1.0 + (i % 5) as f32 * 0.05);
-            device.upload_outline(&outline_of(SEGMENTS, side)).unwrap()
+            device
+                .upload_outline(&outline_of(SEGMENTS, outline_side(i)))
+                .unwrap()
         })
         .collect();
     let mut builder = SceneBuilder::new();
@@ -122,7 +158,7 @@ fn build(device: &mut Device) -> Scene {
             builder
                 .clip(
                     outlines[(i as usize) % outlines.len()],
-                    position(i, SIDE * 6.0),
+                    curve_clip(i),
                     FillRule::NonZero,
                     None,
                 )
@@ -131,7 +167,7 @@ fn build(device: &mut Device) -> Scene {
         .collect();
     let ink = Color::new(0.12, 0.13, 0.16, 1.0);
     for index in 0..COMMANDS {
-        let clip = (index < CLIPPED).then(|| clips[(index as usize) % clips.len()]);
+        let clip = (index < CLIPPED).then(|| clips[clip_of(index)]);
         builder
             .fill(
                 outlines[(index as usize) % outlines.len()],

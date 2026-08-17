@@ -1,8 +1,10 @@
 # ADR 0023 — An instrument for `encode`, and which clock each phase is on
 
-Status: accepted, 2026-08-11. Answers the caller's feedback §13, which is explicitly a
-request for an instrument before a request for speed. Also records why quorra does not
-spawn threads, which is the question that led here.
+Status: **accepted, with one amendment** — 2026-08-11, amended 2026-08-17. Answers the
+caller's feedback §13, which is explicitly a request for an instrument before a request
+for speed. Also records why quorra does not spawn threads, which is the question that led
+here. The amendment is at the end: one seam was in the wrong place, and every `recording`
+share this project published for a **clipped** page was wrong because of it.
 
 ## Context
 
@@ -101,3 +103,99 @@ neither is answered by running the same work on more cores.
 The subdivision stops being able to attribute — the candidate is `recording`, which is a
 remainder and would need splitting again if it grew. That is the same question one level
 down, and the same answer: measure before optimising.
+
+## Amendment, 2026-08-17 — the residue multiply is geometry, and the line is written down
+
+The decision stands and the three phases are unchanged. **One seam was in the wrong
+place**, and the consequence is that every `recording` number this project has published
+for a page with a **curve clip** on it was too large by the same amount that `geometry`
+was too small.
+
+### What was outside the span
+
+`encode/coverage.rs`'s `coverage_tile` opened a geometry span around `raster::fill_mask`
+and closed it there. The next thing it did was multiply the chain's residue into the tile
+it had just rasterised — one multiply, one add and one divide per pixel — with no span
+open. Almost everything inside `residue_intersection` was already spanned — the flatten,
+the links' `min`, and the crop on the path a second mark under the same chain takes — so
+the product was the whole of the unattributed per-pixel work, and it was reported as
+`recording`, the remainder.
+
+The fix is one seam: `residue_product` is its own function and its own span. A second,
+much smaller one goes with it: a region's crop was spanned at one of its two call sites
+and not at the other (the first mark under an admitted chain), which is the same defect at
+a hundredth of the size — once per chain rather than once per clipped mark.
+
+### The line between geometry and recording, now stated
+
+The definitions in §1 above did not decide this case, so the amendment states the rule
+they imply:
+
+> **Geometry is the work that *makes* coverage. Recording is the work that decides what to
+> do with it.**
+
+- Flattening, stroke expansion, the scanline pass, the links' intersection, a region's
+  crop, **and the residue product** are the mark's coverage being computed. Geometry.
+- Bounding a shape, choosing a lane, charging a budget, keying the atlas, writing an
+  instance are decisions taken *about* coverage. Recording.
+
+The second half is not a technicality: the largest single row of a path-heavy page's
+`recording` is `HullMemo::bounds` at 56 % (`doc/notes-recording-shares.md` §2.2), which is
+per-point float arithmetic over 9.1 million control points — so "it is per-pixel, therefore
+it is geometry" would move that row too, and it should not move. `raster::polyline_bounds`
+and the flattened triangle count in `push_coverage_styled` stay in `recording` for the
+same reason.
+
+### What it costs
+
+Two `Instant::now()` reads — about 20 ns each here — **per clipped command that
+rasterises a tile under a residue chain**, and only when `Options::instrument_encode` is
+on. Nothing for a page with no curve clip, and nothing at all when the switch is off,
+where `EncodeClock::start` is a branch on a `bool` that returns `None`. On the artwork
+archetype, whose 600 clipped commands are the most residue-heavy page in the tree, that is
+1 200 clock reads, ~24 µs on an encode of ~53 ms: **0.05 %**, against a seam that was
+mislabelling 13.7 % of that page's `recording`.
+
+### What moved, measured
+
+Instructions, not milliseconds (`doc/HANDOVER.md`'s "An encode, exactly"), on the re-cut
+artwork archetype at 1191 × 1684, one cold-atlas encode, counters checked against
+`tests/archetypes.rs` before anything was read:
+
+| | Ir | of encode |
+|---|---:|---:|
+| the whole encode | 757 574 442 | 100 % |
+| `residue_product` — what this amendment moves | **4 683 942** | **0.62 %** |
+| `recording` after the fix | ~29.4 M | ~3.9 % |
+| `recording` before it | ~34.1 M | ~4.5 % |
+
+So the product is **13.7 % of what `recording` was** on the most clipped page this tree
+has, and 600 calls over 3 542 360 tile pixels put it at 7 806 instructions a tile and
+about 1.3 a pixel. The wall-clock reading of the same change is in
+`doc/notes-clipped-instrument.md` §2, and it is the weaker instrument on purpose.
+
+### The published number this corrects
+
+`doc/notes-recording-shares.md` §2.2 and `doc/answer-nonblocking-render.md` both say
+**56 % of artwork's `recording` is the residue multiply**. That number is wrong twice over
+and both halves are corrected in place, dated, in those files:
+
+1. It was measured on the artwork archetype *before* its clips were cut around its marks,
+   where 592 of 600 clipped commands rasterised a tile and multiplied it by a residue of
+   **zero** (`doc/notes-tiling-bound.md` §3).
+2. The 56 % row was `coverage_tile`'s **and** `push_coverage_styled`'s own bodies together,
+   and by the line stated above only the product part of that is geometry. Measured
+   directly, the product is a third of the smaller of the two.
+
+The finding the number was carrying — *the geometry clock mislabels the residue multiply
+on a clipped page* — was right, and is what this amendment fixes.
+
+### Does this trip "revisit when"?
+
+**No.** That clause is about `recording` growing until a remainder can no longer attribute,
+and this was a span in the wrong place rather than a phase too coarse: the subdivision
+attributed exactly as well before and after, it just attributed one loop to the wrong
+phase. What *does* trip it is still open and is not this round's:
+`doc/notes-recording-shares.md` §5 recommends an optional detail level
+(`encode: bounds`, `encode: atlas`, `encode: instances`, `encode: commit`) with
+`encode: recording` kept as the remainder, and the caller asked for it in as many words.

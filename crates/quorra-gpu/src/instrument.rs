@@ -21,16 +21,34 @@
 //!
 //! # The parts
 //!
-//! - **geometry** — flattening outlines to polylines, expanding strokes, and running
-//!   the scanline rasteriser: making coverage out of shapes.
+//! - **geometry** — flattening outlines to polylines, expanding strokes, running the
+//!   scanline rasteriser, and multiplying a clip chain's residue into a mark's tile:
+//!   making coverage out of shapes.
 //! - **staging** — packing that coverage into the frame's scratch sheet and the glyph
 //!   atlas: the memory traffic that carries it, as distinct from the arithmetic that
 //!   produced it.
 //! - **recording** — the remainder, computed rather than measured: clip resolution,
-//!   culling, instance building, plan assembly.
+//!   culling, bounding a shape to decide where its tile goes, instance building, plan
+//!   assembly.
 //!
 //! Three parts because the caller asked for "two or three", and because a seam that
 //! cannot be named is a seam nobody can act on.
+//!
+//! # Where the line between geometry and recording is drawn
+//!
+//! **Geometry is the work that *makes* coverage; recording is the work that decides what
+//! to do with it.** A per-point or per-pixel loop is not geometry by being per-pixel: the
+//! largest single cost of a path-heavy page's `recording` is `HullMemo::bounds` — 3 983
+//! instructions a mark over 157 control points — and it stays in `recording` because a
+//! bounding box is a decision's input rather than a mark's coverage. By the same line the
+//! residue product is geometry, and the amendment to ADR 0023 dated 2026-08-17 is that
+//! sentence: it is the clip meeting the mark, which is the last step of making the mark's
+//! coverage.
+//!
+//! `raster::polyline_bounds` and the flattened triangle count in
+//! `Encoder::push_coverage_styled` sit on the recording side of that line for the same
+//! reason `HullMemo::bounds` does — they measure geometry in order to choose a lane and
+//! size a tile.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};

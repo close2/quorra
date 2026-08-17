@@ -4,6 +4,18 @@ Round notes for §9 of the caller's `pdf-viewer/doc/QUORRA_NONBLOCKING_RENDER.md
 2026-08-16 against this worktree. Nothing here changed a line of the library: this round
 ships a measurement and a draft answer. No instrumentation was left in the tree.
 
+> **Correction, 2026-08-17.** Every number below that was taken on the **artwork**
+> archetype is a number about a page whose clips clipped almost nothing: 592 of its 600
+> clipped commands rasterised a coverage tile and multiplied it by a residue of **zero**
+> (`doc/notes-tiling-bound.md` §3, found by ADR 0057 the day after this file was written).
+> The artwork column of §2.1 and §2.2 is therefore not a measurement of the residue lane,
+> and §2.2's headline — *"on artwork: 56 % of recording is per-pixel work the clock calls
+> recording"* — is wrong in both of its parts. It is corrected in place below, under its
+> own dated note, and the fix it argued for is built: ADR 0023's amendment of 2026-08-17.
+> **The two pages this file is actually about — `drawing` at 58 009 marks and dense text —
+> state no residue clip and no clipped tile, so every number about them stands unchanged,
+> including §3's divisibility answer and §4's floor.**
+
 **The short version.** On the caller's own page shape — 58 009 marks, no clip anywhere —
 `recording` is **not** dominated by any of the four things their §9 quotes back at us, and
 not by the fifth our own prose adds. It is dominated by a sixth we never named: **computing
@@ -182,6 +194,27 @@ ADR 0023's own definition — and they are outside every `clock.geometry` span, 
 instrument reports them as recording. **That is a defect in the instrument, not in the
 code**, and it is the strongest argument in this note for §5's recommendation: a caller
 acting on "artwork's recording is 56 % one thing" would be acting on a mislabelled span.
+
+> **Correction, 2026-08-17 — the finding was right and the number was wrong twice.**
+>
+> 1. **The page was not what this paragraph thought it was.** Those 600 tiles were
+>    rasterised over marks their clips did not reach: 592 of them were multiplied by a
+>    residue of zero, and the 19 657 instructions a tile were being spent to produce
+>    nothing. ADR 0057 removed them the next day and the row went to **8 tiles**; on the
+>    tree as it stood on 2026-08-17 the residue product on this page is **16 490 Ir,
+>    0.06 % of its `recording`** — so the 56 % is not merely stale, it is not
+>    reproducible.
+> 2. **The row was two things and only one of them is geometry.** ADR 0023's amendment
+>    draws the line at *making* coverage rather than at *per-pixel*: the residue product is
+>    geometry, and `polyline_bounds` and the triangle-count sum are recording — for the
+>    same reason `HullMemo::bounds` is recording in §2.2's own table, where it is 56 % of
+>    `drawing`'s recording and nobody proposed to move it.
+>
+> Re-measured on the **re-cut** artwork page (`doc/notes-clipped-instrument.md`), where all
+> 600 clipped commands do meet their clips: the product alone is **4 683 942 Ir, 0.62 % of
+> the encode and 13.7 % of what `recording` was** before the seam moved. That is the honest
+> replacement for "56 % of recording", and it is a different page from this table's, so it
+> does not belong in the table.
 
 ---
 
@@ -369,6 +402,11 @@ neither is anything else in `encode`.**
   definition. Not fixed here because moving a span changes what every recorded number in
   `PLAN.md` means, and that is a decision with a corpus-free but documentation-heavy blast
   radius.
+
+  **Taken, 2026-08-17 (ADR 0023's amendment).** The residue multiply is inside a geometry
+  span; the polyline scan is not, and the amendment says why — the line is *making*
+  coverage, not *per-pixel*. The blast radius was as predicted: no pixel moves, no corpus
+  run is owed, and the documentation half is `doc/notes-clipped-instrument.md`.
 - **A recommendation, for the round that takes it: `Options::instrument_encode` should be
   able to subdivide further, and the caller asked for it in as many words** — *"we cannot
   subdivide it from outside"*. The shape is additive and free when off: `EncodeClock` grows

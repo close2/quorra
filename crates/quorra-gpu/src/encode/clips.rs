@@ -223,7 +223,14 @@ impl Encoder<'_> {
             let tile_bytes = area(width, height);
             if self.residue.admit(key, region_bytes, tile_bytes) {
                 let mask = region.map(|(l, t, w, h)| self.intersect_links(&links, l, t, w, h));
+                // The crop is inside the span at the *other* call site above and was
+                // outside it here, which is the same seam ADR 0023's 2026-08-17
+                // amendment moved for the residue product: cutting a tile out of a
+                // region is coverage being made. Once per chain rather than once per
+                // mark, so this is two clock reads on the rarer path.
+                let span = self.clock.start();
                 let tile = window(mask.as_ref(), left, top, width, height);
+                self.clock.geometry(span);
                 self.residue.insert(key, mask);
                 return Ok(Some(tile));
             }

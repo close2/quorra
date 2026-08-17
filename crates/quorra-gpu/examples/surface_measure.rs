@@ -167,8 +167,8 @@ fn emit(
     index: u32,
 ) {
     let outline = outlines[(index as usize) % outlines.len()];
-    let clip =
-        (index < shape.clipped && !clips.is_empty()).then(|| clips[(index as usize) % clips.len()]);
+    let clip = (index < shape.clipped && !clips.is_empty())
+        .then(|| clips[clip_of(shape, index).min(clips.len() - 1)]);
     let ink = Color::new(0.12, 0.13, 0.16, 1.0);
     if index < shape.strokes {
         builder
@@ -203,14 +203,63 @@ fn emit(
     }
 }
 
+/// The side of the `i`th outline — the one statement of it, because the clip cutter
+/// below sizes a clip from the marks it will clip and a second copy is how the two come
+/// apart.
+fn outline_side(shape: &Shape, i: u32) -> f32 {
+    shape.side * (1.0 + (i % 5) as f32 * 0.05)
+}
+
+/// Which clip the `index`th command draws under: a run of consecutive marks in reading
+/// order, so a clip and its marks are in the same part of the page.
+///
+/// **The same mapping as `tests/archetypes.rs`**, and the reason this file was re-cut on
+/// 2026-08-17: the page it measured before placed its clips on a grid of `side × 6` and
+/// its marks on a grid of `side`, so 8 of the 600 clipped commands had a mark that met
+/// the clip clipping it, and the other 592 rasterised a tile only to multiply it by zero
+/// (`doc/notes-tiling-bound.md` §3). **No number taken on this shape before that date is
+/// comparable with one taken after it.**
+fn clip_of(shape: &Shape, index: u32) -> usize {
+    if shape.clipped == 0 {
+        return 0;
+    }
+    ((u64::from(index) * u64::from(shape.clips)) / u64::from(shape.clipped)) as usize
+}
+
+/// The device box the marks under clip `j` occupy, from this file's own arithmetic.
+fn marks_box(shape: &Shape, j: usize) -> (f32, f32, f32, f32) {
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for index in 0..shape.clipped {
+        if clip_of(shape, index) != j {
+            continue;
+        }
+        let at = position(index, shape.side);
+        let side = outline_side(shape, index % shape.distinct.max(1));
+        let (hx, hy) = (side * 0.5, side * 0.65);
+        x0 = x0.min(at.e - hx);
+        y0 = y0.min(at.f - hy);
+        x1 = x1.max(at.e + hx);
+        y1 = y1.max(at.f + hy);
+    }
+    (x0, y0, x1, y1)
+}
+
+/// The transform that puts clip `j`'s ellipse over the marks it clips: three or four
+/// marks across, a fraction of the page, and cutting every one of them.
+fn curve_clip(shape: &Shape, j: u32) -> Affine {
+    let (x0, y0, x1, y1) = marks_box(shape, j as usize);
+    let side = outline_side(shape, j % shape.distinct.max(1));
+    Affine::scale((x1 - x0) / side, (y1 - y0) / (side * 1.3))
+        .then(Affine::translate((x0 + x1) * 0.5, (y0 + y1) * 0.5))
+}
+
 /// Build the shape's scene on this device — the archetype generator, minus the image
 /// and rect-clip branches these two shapes do not use.
 fn build(device: &mut Device, shape: &Shape) -> Scene {
     let outlines: Vec<OutlineId> = (0..shape.distinct.max(1))
         .map(|i| {
-            let side = shape.side * (1.0 + (i % 5) as f32 * 0.05);
             device
-                .upload_outline(&outline_of(shape.segments, side))
+                .upload_outline(&outline_of(shape.segments, outline_side(shape, i)))
                 .unwrap()
         })
         .collect();
@@ -219,12 +268,7 @@ fn build(device: &mut Device, shape: &Shape) -> Scene {
         .map(|i| {
             let outline = outlines[(i as usize) % outlines.len()];
             builder
-                .clip(
-                    outline,
-                    position(i, shape.side * 6.0),
-                    FillRule::NonZero,
-                    None,
-                )
+                .clip(outline, curve_clip(shape, i), FillRule::NonZero, None)
                 .unwrap()
         })
         .collect();

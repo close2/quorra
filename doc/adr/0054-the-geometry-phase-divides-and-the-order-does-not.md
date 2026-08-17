@@ -92,7 +92,15 @@ question that needs its own flattening), and the rare lanes.
 | | 3.1× | **6.6×** | 1.2× | 2.7× | 1.0× |
 
 artwork is 1.2× and the reason is stated rather than averaged away: 600 of its 684 marks
-are residue-clipped and stay serial. **An earlier round at load 25–33 read 24 threads as
+are residue-clipped and stay serial.
+> **The artwork column of both tables above was measured on a page whose clips clipped
+> almost nothing** (2026-08-17: `doc/notes-tiling-bound.md` §3, re-cut in
+> `doc/notes-clipped-instrument.md`). **The conclusion is unchanged and the re-cut
+> strengthens it** — "600 of its 684 marks are residue-clipped and stay serial" is now
+> true of marks that do the serial work, where before 592 of them were rasterising a tile
+> and multiplying it by zero. The milliseconds are not comparable with anything measured
+> after that date.
+ **An earlier round at load 25–33 read 24 threads as
 worse than 8**, so no crossover is published as a constant — `HANDOVER.md`'s oldest rule.
 
 **The small-page floor.** `PARALLEL_FLOOR_SEGMENTS = 4 096` queued outline segments; below

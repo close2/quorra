@@ -111,8 +111,6 @@ impl Encoder<'_> {
 
     /// Rasterise the visible coverage of these polylines — shape ∩ clip ∩ target,
     /// residue clips multiplied in — or `None` when nothing is visible.
-    #[allow(clippy::cast_possible_truncation)] // the residue product, below
-    #[allow(clippy::arithmetic_side_effects)] // the residue product, below
     pub(super) fn coverage_tile(
         &mut self,
         polylines: &[Polyline],
@@ -144,9 +142,15 @@ impl Encoder<'_> {
         // moving this site to `min` as well moves no page of the caller's corpus, in
         // either direction, and no page's printed numbers.
         if let Some(clip) = self.residue_intersection(resolved, left, top, width, height)? {
-            for (m, l) in tile.coverage.iter_mut().zip(&clip.coverage) {
-                *m = ((u16::from(*m) * u16::from(*l) + 127) / 255) as u8;
-            }
+            // **Its own span, which is ADR 0023's amendment of 2026-08-17.** One multiply
+            // and one divide per pixel of the tile, and what it computes is the mark's
+            // coverage: geometry by the phase's own definition. Until that date it sat
+            // outside every span, so a page with a curve clip on it reported per-pixel
+            // arithmetic as `recording` — the remainder — and the subdivision said
+            // something untrue about the only page shape that has a residue at all.
+            let span = self.clock.start();
+            residue_product(&mut tile, &clip);
+            self.clock.geometry(span);
         }
         Ok(Some(tile))
     }
@@ -347,5 +351,23 @@ impl Encoder<'_> {
             style,
             mask,
         )
+    }
+}
+
+/// The mark's coverage, held to the chain's: `tile ← tile × clip`, per pixel, rounded.
+///
+/// A function of its own because it is the whole of what one seam of the encode clock
+/// measures ([`crate::instrument`]) and because it is the site the comment above its call
+/// argues about: ISO 32000-2 §8.5.4 asks for the intersection of the object's shape with
+/// the clipping path, and this product is an estimate of it that the links' own `min` is
+/// not (ADR 0030). `(a·b + 127) / 255` is the unorm product rounded to nearest, so a
+/// clip of 255 leaves the mark exactly where it was.
+#[allow(clippy::cast_possible_truncation)]
+// the quotient of a u16 product by 255 is a
+// byte: both operands are bytes, so the numerator is at most 255·255 + 127
+#[allow(clippy::arithmetic_side_effects)] // and for the same reason it cannot overflow
+fn residue_product(tile: &mut raster::CoverageMask, clip: &raster::CoverageMask) {
+    for (m, l) in tile.coverage.iter_mut().zip(&clip.coverage) {
+        *m = ((u16::from(*m) * u16::from(*l) + 127) / 255) as u8;
     }
 }

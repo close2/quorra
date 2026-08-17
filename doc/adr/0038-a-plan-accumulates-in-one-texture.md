@@ -95,7 +95,13 @@ last digit of every mean, worst tile and SSIM: 919 agree / 37 differ / 1 refused
 **Time does not regress and probably improves.** The artwork archetype — eight groups at
 1191 × 1684, llvmpipe, cold frame, ten runs alternating between the two builds on a quiet
 machine — reads minima of **138.5 ms before and 108.9 ms after**, with spreads that
-overlap. A composite scissored to a group plus a copy of that group's rectangle is less
+overlap.
+> **Dated note, 2026-08-17.** The artwork archetype's clips were re-cut around the marks
+> they clip (`doc/notes-clipped-instrument.md`). **`layer_textures` is 3 before and after**
+> — this ADR's subject is untouched, since the groups did not change — while the 138.5 →
+> 108.9 ms cold frame belongs to the older page and is not comparable with a frame timed
+> after that date.
+ A composite scissored to a group plus a copy of that group's rectangle is less
 work than one target-sized composite, and on a software rasteriser that shows. Through RADV
 on the 957-page corpus it does not surface at all, because most pages have no group; the
 totals move less than the run-to-run spread, so no number is claimed there.
