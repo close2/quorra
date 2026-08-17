@@ -245,6 +245,18 @@ something else. It does not affect this question's answer: under either reading 
 transparent* mask is a no-op, because either the shape or the opacity is zero and both
 routes leave the backdrop.
 
+> **Resolved 2026-08-18, ADR 0066, and the last sentence above was wrong.** The mask is
+> **opacity**: Table 57 gives the alpha source flag an initial value of `false` and governs
+> the soft mask *and the alpha constant* in one sentence, so "this tree carries no `AIS`"
+> is an answer rather than a question — and the tree, with the mask in the shape and the
+> constant out of it, was in a state no value of the flag produces. It did not need the
+> caller. What the last sentence above misses is the case its own §"no opacity" paragraph
+> states: a transparent mask is opacity 0 over shape 1, and **inside a knockout group that
+> erases** rather than leaving the backdrop. `tests/no_ink.rs` now files
+> `TransparentSoftMask` under *no opacity* for that reason. `doc/notes-mask-shape-or-opacity.md`
+> is the round; it also corrects the `§11.4.7.2` citation quoted above, which names a
+> subclause ISO 32000-2 does not have (§11.3.7.2 is meant).
+
 ---
 
 ## 3. A stencil mask whose grid is not the image's (their §4, hayro #1315 / #1319 / #2)

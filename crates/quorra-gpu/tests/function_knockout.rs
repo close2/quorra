@@ -46,7 +46,7 @@
 //!    its whole quad — the obvious way to write `fs_shape`, and the one the shading lane's
 //!    ramp would have got away with — knocks a hole in the page instead.
 //! 3. **A `Background` whose alpha is below one has shape 1 at that opacity**, which is
-//!    §11.4.7.2's distinction between the two, and a knockout group is the construction
+//!    §11.3.7.2's distinction between the two, and a knockout group is the construction
 //!    that can see it: it replaces the group's alpha rather than compositing over it.
 
 // Test-file lint policy as in m1.rs; the reference math mirrors clause arithmetic.
@@ -411,7 +411,7 @@ fn a_point_the_domain_leaves_unpainted_knocks_nothing_out() {
     }
 }
 
-/// **A `Background` of alpha ½ has shape 1 at opacity ½** — §11.4.7.2's distinction, on the
+/// **A `Background` of alpha ½ has shape 1 at opacity ½** — §11.3.7.2's distinction, on the
 /// one construction that can observe it.
 ///
 /// > The existence of the knockout feature is the main reason for maintaining a separate

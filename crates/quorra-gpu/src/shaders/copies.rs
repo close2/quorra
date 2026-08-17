@@ -6,8 +6,8 @@
 //! and the divergence would show up as one lane masking differently from the others
 //! on some page nobody has yet. This module is the enforcement: it walks
 //! [`super::ALL`] — the same sources `pipeline.rs` compiles — cuts each promised
-//! function out of every shader that defines it, and requires the texts to be equal
-//! byte for byte.
+//! function out of every shader that defines it (with [`super::wgsl`]'s extractor,
+//! shared with the shape-input gate), and requires the texts to be equal byte for byte.
 //!
 //! Two failure modes, both deliberate:
 //!
@@ -41,6 +41,7 @@
 //! the second.
 
 use super::ALL;
+use super::wgsl::function_text;
 
 /// The functions that promise to be copies, and how many copies must exist.
 ///
@@ -53,76 +54,6 @@ const PROMISED_COPIES: &[(&str, usize)] = &[("soft_mask_value", 6)];
 
 /// The sentence a copied helper's comment carries.
 const PROMISE: &str = "the copies are kept textually the same";
-
-/// The text of the module-scope function `name` in `source`, from its `fn` keyword
-/// through the closing brace of its body.
-///
-/// Returns `None` when the shader does not define it. Panics if it is defined twice,
-/// which would make "the copies agree" ambiguous about which copy was compared.
-fn function_text<'a>(shader: &str, source: &'a str, name: &str) -> Option<&'a str> {
-    let opening = format!("fn {name}(");
-    let starts: Vec<usize> = source
-        .match_indices(&opening)
-        .map(|(at, _)| at)
-        // Module scope only: a call `soft_mask_value(...)` inside another function is
-        // not a definition, and neither is a substring of a longer name.
-        .filter(|at| *at == 0 || source.get(..*at).is_some_and(|head| head.ends_with('\n')))
-        .collect();
-    assert!(
-        starts.len() <= 1,
-        "{shader} defines `{name}` {} times",
-        starts.len()
-    );
-    let start = *starts.first()?;
-    let end = body_end(source, start).unwrap_or_else(|| {
-        panic!("{shader}: `{name}` has no balanced body — unclosed brace?");
-    });
-    source.get(start..end)
-}
-
-/// The byte just past the closing brace of the first `{`-delimited block at or after
-/// `start`, counting nested braces and ignoring those inside comments.
-///
-/// The helpers guarded here contain neither comments nor string literals with braces
-/// in them, and WGSL has no string literal at all in the sense C does; the comment
-/// skipping is here so that the extractor stays correct if one of them grows a comment
-/// rather than quietly cutting the function short.
-fn body_end(source: &str, start: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let mut depth = 0usize;
-    let mut i = start;
-    while i < bytes.len() {
-        match (bytes[i], bytes.get(i.saturating_add(1))) {
-            (b'/', Some(b'/')) => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i = i.saturating_add(1);
-                }
-            }
-            (b'/', Some(b'*')) => {
-                i = i.saturating_add(2);
-                while i.saturating_add(1) < bytes.len()
-                    && !(bytes[i] == b'*' && bytes[i.saturating_add(1)] == b'/')
-                {
-                    i = i.saturating_add(1);
-                }
-                i = i.saturating_add(2);
-            }
-            (b'{', _) => {
-                depth = depth.saturating_add(1);
-                i = i.saturating_add(1);
-            }
-            (b'}', _) => {
-                depth = depth.checked_sub(1)?;
-                i = i.saturating_add(1);
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => i = i.saturating_add(1),
-        }
-    }
-    None
-}
 
 /// A shader's text with its comment fences and line breaks taken out, so that a
 /// sentence spanning three comment lines is one sentence to search for.

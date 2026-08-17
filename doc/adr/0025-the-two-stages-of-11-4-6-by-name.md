@@ -77,3 +77,26 @@ line in their expansion of a clause they are already expanding.
 A caller wants `Plus` for something that is not §11.4.6's second stage — an additive
 paint mode, say. Then the saturation stops being a footnote and the shape-channel design
 becomes the better one.
+
+## Amendment, 2026-08-18 — the prose above was right and the shaders did not agree with it
+
+The decision stands, and so does every sentence of its reasoning. **What was not true
+when this was written is that the tree did what the Context says.** "§11.6.4.3's soft mask
+and §11.6.4.4's constant alpha are *opacity*" is the clause's reading, and it is now the
+tree's; until ADR 0066 all five lanes' `fs_shape` multiplied the mark's soft mask into the
+shape they returned, so a masked element inside a knockout group was erased by
+`coverage × mask`. The constant alpha was excluded and the mask was not, which is not
+§11.6.4.3 under either value of the flag that governs them — Table 57 names both in one
+sentence. Found by reading rather than by a failure (`doc/notes-hayro-questions.md` §2),
+settled by **ADR 0066**, and measured at **138 of 255** on a wedge under a banded mask.
+
+**Two citations in this ADR are wrong and are corrected there rather than here.** "the
+comment above it already cited §11.4.7.2 for that" is accurate about the comment and the
+comment was wrong: ISO 32000-2 has no §11.4.7.2 — §11.4.7 is "Page group" and has no
+subclauses. The clause that keeps shape and opacity apart is **§11.3.7.2**, "Source shape
+and opacity"; the clause that puts the clipping path into the shape is **§8.5.4**.
+`doc/notes-mask-shape-or-opacity.md` §7 lists every site that carried the bad number.
+
+The rest of this ADR is untouched by that: `DestOut` weighting by shape rather than by the
+paint's alpha was already the clause, and it now weights by shape rather than by the mask
+as well — one operator, one quantity, and the same sentence of Table 57 behind both.

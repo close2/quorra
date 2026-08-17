@@ -159,9 +159,11 @@ fn sweep_t(p_shading: vec2f) -> f32 {
     return s;
 }
 
-// Coverage × clip × soft mask at the fragment's cell — the geometric part of the
-// weight, shared by both entry points.
-fn base_weight(p: vec2f) -> f32 {
+// Coverage × clip at the fragment's cell — the element's *shape* (§11.6.4.2 met with
+// §8.5.4's clip), shared by both entry points. The soft mask is not in it (ADR 0066):
+// Table 57's alpha source flag reads §11.6.4.3's mask as opacity by default, so
+// `fs_main` multiplies it in and `fs_shape` does not.
+fn shape_at(p: vec2f) -> f32 {
     // Coverage: a scratch tile's byte, or the analytic rectangle's cell overlap.
     var cov: f32;
     if params.coverage.z > 0.5 {
@@ -176,7 +178,7 @@ fn base_weight(p: vec2f) -> f32 {
     let overlap_min = max(params.clip.xy, p);
     let overlap_max = min(params.clip.zw, p + vec2f(1.0, 1.0));
     let extent = max(overlap_max - overlap_min, vec2f(0.0, 0.0));
-    return cov * extent.x * extent.y * soft_mask_at(p);
+    return cov * extent.x * extent.y;
 }
 
 // The straight-alpha paint at the fragment, or a negative alpha sentinel where the
@@ -217,13 +219,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     if straight.a < 0.0 {
         return vec4f(0.0);
     }
-    return vec4f(straight.rgb * straight.a, straight.a) * base_weight(p);
+    return vec4f(straight.rgb * straight.a, straight.a) * (shape_at(p) * soft_mask_at(p));
 }
 
 // The knockout erase pass wants the shape alone (§11.4.6, ADR 0010). Where an
 // unextended shading paints nothing, no mark is made and nothing knocks out —
 // shape 0, not shape-with-zero-opacity (ADR 0011 records the reading of
-// §11.4.7.2). A mesh raster's own alpha is antialiased triangle coverage and so
+// §11.3.7.2). A mesh raster's own alpha is antialiased triangle coverage and so
 // counts as shape.
 @fragment
 fn fs_shape(in: VsOut) -> @location(0) vec4f {
@@ -232,7 +234,7 @@ fn fs_shape(in: VsOut) -> @location(0) vec4f {
     if straight.a < 0.0 {
         return vec4f(0.0);
     }
-    var shape = base_weight(p);
+    var shape = shape_at(p);
     if params.inv1.z > 1.5 {
         shape = shape * straight.a;
     }

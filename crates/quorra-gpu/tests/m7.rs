@@ -116,7 +116,7 @@ fn nearest_magnification_is_exact_blocks() {
     }
 }
 
-/// §11.6.4.3's constant alpha and the image's own alpha are both opacity: an opaque
+/// §11.6.4.4's constant alpha and the image's own alpha are both opacity: an opaque
 /// white 1×1 image at CA 0.5 reads back as white at α ≈ 128, and an image texel at
 /// α 128 under CA 1 reads the same.
 #[test]

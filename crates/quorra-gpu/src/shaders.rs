@@ -16,15 +16,20 @@
 //!
 //! [`ALL`] is that one list made enumerable, and the test below holds it to the
 //! directory: a `.wgsl` file this crate does not name fails the build rather than going
-//! unread by every gate. Both gates that read shader text — `layout` and `copies` —
-//! are `#[cfg(test)]` modules *here* rather than integration tests, because an
-//! integration test cannot reach a private module and a second `include_str!` list is
-//! exactly the drift this file exists to prevent (ADR 0059).
+//! unread by every gate. The three gates that read shader text — `layout`, `copies` and
+//! `shape_inputs`, the last two over the extractor in `wgsl` — are `#[cfg(test)]`
+//! modules *here* rather than integration tests, because an integration test cannot
+//! reach a private module and a second `include_str!` list is exactly the drift this
+//! file exists to prevent (ADR 0059).
 
 #[cfg(test)]
 pub(crate) mod copies;
 #[cfg(test)]
 pub(crate) mod layout;
+#[cfg(test)]
+pub(crate) mod shape_inputs;
+#[cfg(test)]
+mod wgsl;
 
 /// The analytic rectangle lane (§0 of the brief's second fast path).
 pub(crate) const RECT: &str = include_str!("shaders/rect.wgsl");

@@ -24,7 +24,7 @@
 struct Params {
     // Inverse of the device transform of the unit square, §8.3.3 layout.
     inv0: vec4f, // a, b, c, d
-    inv1: vec4f, // e, f, constant alpha (§11.6.4.3's CA), filter (1 = linear)
+    inv1: vec4f, // e, f, constant alpha (§11.6.4.4's ca), filter (1 = linear)
     // The image's device rectangle (exact for the axis-preserving case).
     image_rect: vec4f,
     // Quad destination rectangle, device space.
@@ -105,9 +105,10 @@ fn to_unit(p: vec2f) -> vec2f {
     );
 }
 
-// Geometric coverage × clip × residue × soft mask — the element's *shape*
-// (§11.4.7.2): the image's own alpha and the constant alpha are opacity, not shape,
-// and stay out of this product on purpose (ADR 0011).
+// Geometric coverage × clip × residue — the element's *shape* (§11.6.4.2: "For images
+// … the shape shall be 1.0 inside the image rectangle and 0.0 outside it", met with
+// §8.5.4's clip). The image's own alpha, the constant alpha and the soft mask are all
+// opacity, not shape, and stay out of this product on purpose (ADR 0011, ADR 0066).
 fn shape_at(p: vec2f, uv: vec2f) -> f32 {
     var cov: f32;
     if params.coverage.w > 0.5 {
@@ -127,7 +128,7 @@ fn shape_at(p: vec2f, uv: vec2f) -> f32 {
     let overlap_min = max(params.clip.xy, p);
     let overlap_max = min(params.clip.zw, p + vec2f(1.0, 1.0));
     let extent = max(overlap_max - overlap_min, vec2f(0.0, 0.0));
-    return cov * extent.x * extent.y * soft_mask_at(p);
+    return cov * extent.x * extent.y;
 }
 
 @fragment
@@ -147,8 +148,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
         sample = textureLoad(image_tex, texel, 0);
     }
     // Straight-alpha samples premultiply here (§3: premultiplied internally); the
-    // constant alpha (§11.6.4.3) and the image's own alpha are opacity.
-    return vec4f(sample.rgb * sample.a, sample.a) * (shape * params.inv1.z);
+    // constant alpha (§11.6.4.4), the soft mask (§11.6.4.3) and the image's own alpha
+    // are opacity, so all three multiply into the source alpha and none into `shape`.
+    return vec4f(sample.rgb * sample.a, sample.a) * (shape * params.inv1.z * soft_mask_at(p));
 }
 
 // The knockout erase pass wants the shape alone (§11.4.6 with ADR 0010's algebra).
