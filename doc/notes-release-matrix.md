@@ -337,3 +337,177 @@ matrix that pays it.
 > **`a4380e2 → 1cd74c9` and `1cd74c9 → a4f10f5` together cover everything a push delivers.**
 > `doc/notes-release-matrix.md` holds both, with method, raw-output layout and the per-page
 > evidence.
+
+---
+
+# The release matrix for `f378fa2 → 1adf479` (ADR 0066)
+
+Date: **2026-08-18**. Base `f378fa2` — the first parent of ADR 0066's merge, and the commit
+the matrix above stops one short of — against `main` at `1adf479`. **Two commits**, one of
+them non-merge, and unlike the two ranges above **this one is known to move pixels**: ADR
+0066 makes a soft mask a knockout element's *opacity* rather than its *shape*, so all five
+`fs_shape` lanes now return §11.6.4.2's geometry met with §8.5.4's clip and nothing else. On
+the round's own fixture the worst premultiplied change is **138 of 255**, inside a knockout
+group and nowhere else. Neither matrix above covers it.
+
+The corpus is the caller's, read-only at `/home/cl/projects/pdf-viewer`, revision
+**`14a81f0d`** ("Two of three go home, and the fork keeps the remainder", 2026-08-18
+00:23:01 +0200), its `doc/pdf.js` submodule at **`2ea8820d9`**, copied once at 00:31 and not
+re-copied between columns. Adapter: **AMD Radeon 890M Graphics (RADV STRIX1)**, Vulkan, 24
+encode threads, release build, glyph quantum off. All eight runs in **one copy of their
+tree, in one sitting, 2026-08-18 00:35 to 01:02**, flipping only the `[patch]` path.
+
+## 1. The four rows
+
+| lane, scale | base `f378fa2` | `main` `1adf479` |
+|---|---|---|
+| CPU, scale 1 | 931 agree / 23 differ / 2 refused / 18 not comparable | **931 / 23 / 2 / 18** |
+| GPU, scale 1 | 929 / 25 / 2 / 18 | **929 / 25 / 2 / 18** |
+| CPU, scale 4 | 937 / 11 / 3 / 23 | **937 / 11 / 3 / 23** |
+| GPU, scale 4 | 938 / 10 / 3 / 23 | **938 / 10 / 3 / 23** |
+
+3 814 page verdicts compared — 956 at scale 1 and 951 at scale 4, twice each. A line is
+printed only for a page that differs or is refused: **79 lines across the four rows** (25 at
+CPU 1, 27 at GPU 1, 14 at CPU 4, 13 at GPU 4), naming **37 distinct documents**.
+
+## 2. Every page line that moved, with its cause
+
+**None.** Not one of the 79 lines differs between the columns, in any field — page name,
+verdict, mean, worst tile and its coordinates, differing fraction, SSIM, and the full text of
+every refusal. The four output files of the change column are **identical to the base
+column's** once the wall-clock and process-identity lines are removed; the only residue in
+the whole comparison is the position of cargo's "has been running for over 60 seconds"
+progress line inside the CPU scale-4 row and the thread id in its panic header.
+
+## 3. Why a null here is a *result* and not an absence of one
+
+A null from a range that touches eleven shipped files, six of them shaders, is exactly the
+claim this project has been burned believing. So the run was not left to speak for itself:
+the reachability of the changed construction was measured directly, over the same 974
+documents, by walking each page-one display list and counting `Command::Shaped` and
+`Command::Group { knockout: true }`.
+
+> 974 documents: 5 pages emit a `Shaped` command (6 in total, 1 carrying a soft mask),
+> 16 pages emit a knockout group (29 in total), 142 groups overall.
+
+So the corpus **does** reach the path ADR 0066 changes — this is not a null obtained by the
+population being empty. The sixteen pages are `22060_A1_01_Plans.pdf`, `alphatrans.pdf`,
+`bug852992_reduced.pdf`, `issue12810.pdf`, `issue13447.pdf`, `issue17069.pdf`,
+`issue18032.pdf`, `issue1905.pdf`, `issue20062.pdf`, `knockout_groups_test.pdf`,
+`knockout_inner_backdrop.pdf`, `knockout_isolated_overlap.pdf`, `knockout_nested.pdf`,
+`knockout_nested_group_alpha.pdf`, `knockout_nonisolated_sparse.pdf` and
+`knockout_smask.pdf`.
+
+**And the mechanism is confirmed rather than assumed.** Of the six `Shaped` commands the
+corpus produces, the `shape` half carries a soft mask in **none** of them. The one page whose
+element is masked at all, `knockout_smask.pdf`, carries the mask on `object` and not on
+`shape` — which is precisely the caller's `stated_shape` construction (their ADRs 0234 and
+0327, `pdf-model/src/content/ext_gstate.rs`): they build a knockout element's shape by
+*removing* the mask and the constant before it reaches us, and they refuse a knockout group
+outright where an element may have been painted under `/AIS true`. ADR 0066's change is
+therefore a no-op for every knockout element this translator can emit, **by construction and
+not by luck**, and the corpus is the check on that sentence rather than the source of it.
+
+Run on the sixteen knockout-bearing pages alone, both columns print the same three lines:
+
+```
+  differs: 22060_A1_01_Plans.pdf: mean 0.7927 worst tile 5.69 at (576, 768) differing 0.0641 ssim 0.98619
+  refused: issue18032.pdf: this backend cannot draw a non-isolated knockout group: …
+16 pages compared in 2.6s: 14 agree, 1 differ, 1 refused, 0 not comparable
+```
+
+**0 not comparable** is the load-bearing figure there: every one of the sixteen was actually
+rendered by both backends and compared, so their agreement is a measurement and not a skip.
+
+## 4. Their `REFUSED_AT_FOUR` ratchet fails, identically, in **both** columns
+
+The CPU scale-4 row exits 101 in the base column *and* in the change column, with the same
+assertion and the same two lists:
+
+```
+assertion `left == right` failed: the pages quorra refuses at 4× have changed
+  left: ["bug1721218_reduced.pdf", "issue18032.pdf", "issue1905.pdf"]
+ right: ["bug1703683_page2_reduced.pdf", "bug1721218_reduced.pdf", "issue18032.pdf", "issue1905.pdf"]
+```
+
+Identical, character for character. **That identity is the point**: both columns contain ADR
+0057, which moved `bug1703683_page2_reduced.pdf` off the 4× refusal list, and the caller has
+not re-baselined. It is the same outstanding debt the two matrices above record, carried
+forward unchanged, and not something this range introduces. The other six runs exit 0,
+including both CPU scale-1 rows — which check `REFUSED` *and* the differing list, the
+strictest pair the gate has.
+
+**The caller must still drop `bug1703683_page2_reduced.pdf` from `REFUSED_AT_FOUR`** when
+they take the bump. Three matrices now say so; none of them changes the instruction.
+
+## 5. What was patched in the copy, and why
+
+**Nothing but the `[patch]` block, in either column**, and both columns built their
+`render-quorra` unmodified. Cargo warns that the `quorra` patch entry is unused — their
+workspace depends on `quorra-gpu` and `quorra-scene` only — which is expected and is not an
+error.
+
+The two columns are two distinct binaries and the record says which: all four base rows ran
+`target/release/deps/corpus-13106c3911e0f0c0`, all four change rows ran
+`corpus-0ae549c974002a4a`. Cargo's metadata hash moves with the patched source, which is what
+makes that a check rather than a coincidence — and it is the check that matters most for a
+range predicted to change nothing, because the failure mode of such a range is a `[patch]`
+that silently did not take.
+
+The reachability count in §3 came from one added file in the *copy*,
+`crates/render-quorra/tests/knockout_reach.rs`, which walks display lists and renders
+nothing. It is deleted with the copy; it is recorded here because the number it produced is
+load-bearing and someone may want to re-take it.
+
+## 6. Method, so the numbers can be re-taken rather than argued about
+
+- `rsync -a` of their tree with `HANDOVER.md`'s seven excludes to `/home/AI/mask-matrix/viewer`,
+  once, 540 MB. **Never built in or written to `/home/cl/projects/pdf-viewer`.**
+- Base column: `git worktree add /home/AI/mask-matrix/quorra-base f378fa2`. Change column: a
+  worktree at `1adf479`. Only the `[patch]` path differs between the two runs of each row.
+- A private `CARGO_TARGET_DIR=/home/AI/mask-matrix/target`.
+- `cargo test --release -p render-quorra --test corpus -- --ignored --nocapture`, with
+  `PDFVIEWER_QUORRA_COVERAGE=cpu|gpu` and `PDFVIEWER_QUORRA_SCALE=1|4`; then the same with
+  `PDFVIEWER_QUORRA_ONLY` set to the sixteen knockout pages, in both columns.
+- `--release` and not the caller's `gates` profile, so that these rows are comparable with the
+  sixteen above.
+
+**No timing is published from this run.** The load average was 11.3 when the base column
+started, and this desktop was doing other work throughout. `HANDOVER.md`'s rule stands: which
+pages refuse is arithmetic and machine-independent, which lane is faster is not.
+
+## 7. Recommended replacement for `PLAN.md`'s matrix
+
+`doc/PLAN.md` is not edited from here. The block below is the recommended text. It goes
+**immediately before** the `1cd74c9 → a4f10f5` matrix — that section lists matrices
+newest-first — and **replaces neither of the two**: the three cover different ranges and
+together they cover `a4380e2 → 1adf479`, which is what a push now delivers.
+
+> **The release matrix for `f378fa2 → 1adf479`** — ADR 0066, the only range so far that was
+> *expected* to move pixels: a soft mask is a knockout element's opacity, not its shape, and
+> all five `fs_shape` lanes now return §11.6.4.2's geometry met with §8.5.4's clip alone,
+> worth 138 of 255 on the round's own fixture. One copy of their tree at `14a81f0d`, RADV,
+> both lanes, both scales, taken 2026-08-18 00:35 – 01:02:
+>
+> | lane, scale | base `f378fa2` | `main` `1adf479` |
+> |---|---|---|
+> | CPU, scale 1 | 931 / 23 / 2 / 18 | **931 / 23 / 2 / 18** |
+> | GPU, scale 1 | 929 / 25 / 2 / 18 | **929 / 25 / 2 / 18** |
+> | CPU, scale 4 | 937 / 11 / 3 / 23 | **937 / 11 / 3 / 23** |
+> | GPU, scale 4 | 938 / 10 / 3 / 23 | **938 / 10 / 3 / 23** |
+>
+> **Nothing moved**, and this time the null needed defending rather than merely reporting.
+> All 79 printed lines across the four rows — 37 distinct documents, 3 814 page verdicts —
+> are identical between the columns in every field. The corpus **does** reach the changed
+> construction: 16 of the 974 documents emit a knockout group and 5 emit a `Shaped` command,
+> and all 16 were compared with **0 not comparable**. The reason none moved is the caller's,
+> and it was measured rather than taken on trust — in all six `Shaped` commands the corpus
+> produces, the `shape` half carries no soft mask, because their `stated_shape` removes it
+> and their ADR 0327 refuses a knockout group painted under `/AIS true`. ADR 0066 is a no-op
+> for that translator by construction. **Their `REFUSED_AT_FOUR` ratchet fails in both
+> columns with character-identical lists** — ADR 0057's `bug1703683_page2_reduced.pdf`, in
+> both — so it remains their outstanding re-baseline; the other six runs exit 0.
+>
+> **`a4380e2 → 1cd74c9`, `1cd74c9 → a4f10f5` and `f378fa2 → 1adf479` together cover
+> everything a push delivers.** `doc/notes-release-matrix.md` holds all three, with method,
+> raw-output layout and the per-page evidence.
