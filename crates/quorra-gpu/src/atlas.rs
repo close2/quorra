@@ -32,7 +32,20 @@
 //! `Counters` reports `atlas_distinct_keys` — the count of distinct keys a frame asked
 //! for, deliberately not a hit rate (§6.3's lesson: a hit rate describes the lookups you
 //! made, never the ones you should have made) — `atlas_working_set_bytes` for what
-//! holding all of them would cost, and `atlas_repacked` for the event that moves them.
+//! holding all of them would cost, `atlas_overflow_tiles` for the marks that wanted an
+//! entry and were drawn uncached instead, and `atlas_repacked` for the event that moves
+//! them. The first two answer *how large is this page*; the third answers *what did this
+//! frame pay*, and it took ADR 0063's corpus measurement to notice that no counter did
+//! (`Limits::atlas_bytes` is the fourth, and says what the budget actually bought).
+//!
+//! # What the corpus says this holds and this loses (ADR 0063)
+//!
+//! Page one of 974 documents at 4×, one device throughout, `Coverage::Cpu`: **no page's
+//! working set exceeds 4.10 MiB** against the 8 MiB default, and 74 820 marks on 19 of
+//! 948 pages were still drawn uncached — every one of them because the sheet was full of
+//! **earlier pages'** tiles, and none because a page was too large for it. `admits`
+//! refused 40 marks in the whole corpus. So the cache's cost here is *accumulation*, the
+//! repack after the frame is what clears it, and the budget is not what ran out.
 
 use crate::keyhash::FastMap;
 use crate::raster::{CoverageMask, DeviceTransform, Rule};
@@ -267,6 +280,17 @@ pub(crate) struct AtlasStore {
 impl AtlasStore {
     /// An atlas sized from the byte budget: near-square (an R8 texel is one byte),
     /// width capped at 2048 and both sides clamped to the device's texture limit.
+    ///
+    /// **The budget is a request and this is where it stops being one.** Two caps sit
+    /// between them and neither is a function of the number the caller passed: the width
+    /// never exceeds 2048, and neither side exceeds `max_dimension`, so no atlas can be
+    /// larger than `2048 × max_dimension` however large the budget — 32 MiB on an adapter
+    /// allowing 16 384 texels a side. A caller asking for more gets part of it and gets no
+    /// error, which is legitimate (an atlas is a cache; a smaller one draws the same
+    /// pixels) but was invisible until ADR 0063: [`byte_size`](AtlasStore::byte_size) is
+    /// reported as `Limits::atlas_bytes` so the caller can compare
+    /// `Counters::atlas_working_set_bytes` against what exists rather than against what
+    /// was asked for.
     pub(crate) fn new(budget_bytes: u64, max_dimension: u32) -> Self {
         #[allow(clippy::cast_possible_truncation)] // isqrt of a u64 budget fits u32 here
         let side = (budget_bytes.isqrt().max(1) as u32)
@@ -289,6 +313,12 @@ impl AtlasStore {
 
     pub(crate) fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// The texture's area in bytes — an R8 texel is one — which is what the budget bought
+    /// rather than what it asked for ([`AtlasStore::new`]).
+    pub(crate) fn byte_size(&self) -> u64 {
+        u64::from(self.width).saturating_mul(u64::from(self.height))
     }
 
     /// What this atlas would do for one placement of a tile this size (ADR 0029).

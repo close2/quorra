@@ -86,11 +86,25 @@ pub const DEFAULT_MAX_RESOURCE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The default glyph-atlas budget, in bytes (an R8 texel is one byte).
 ///
-/// 8 MiB holds roughly two thousand 64×64 tiles — far beyond the 107 distinct
-/// outlines of the brief's dense page at several phases each — while staying an
-/// afterthought next to a single 1191×1684 target. §6.3: the atlas is sized from a
-/// budget the caller sets, never from a constant of ours alone; this is only the
-/// default.
+/// §6.3: the atlas is sized from a budget the caller sets, never from a constant of ours
+/// alone; this is only the default. It stays an afterthought next to a single 1191×1684
+/// target.
+///
+/// **The justification was an argument about the brief's dense page at 1×** — 8 MiB holds
+/// roughly two thousand 64×64 tiles, far beyond 107 outlines at several phases each — and
+/// a scale-1 argument says nothing about the magnifications §6 cares about. ADR 0063
+/// replaced it with the measurement: over page one of 974 corpus documents at **4×**, the
+/// largest single page's [`Counters::atlas_working_set_bytes`] is **4 298 422 bytes**, the
+/// p99 is 1.4 MiB and the median is 11 KiB. So the default is right by a factor of two at
+/// the worst page in the corpus, and the marks that page shapes still lose to the packer
+/// are lost to an atlas holding **other pages'** tiles, which no budget reaches.
+///
+/// Raising it is a real lever on how *often* a shared atlas is exhausted and not on
+/// whether it is, and it stops working above `2048 × Limits::max_target_size` — see
+/// [`Options::atlas_budget`] and [`Limits::atlas_bytes`].
+///
+/// [`Counters::atlas_working_set_bytes`]: crate::frame::Counters::atlas_working_set_bytes
+/// [`Limits::atlas_bytes`]: crate::device::Limits::atlas_bytes
 pub const DEFAULT_ATLAS_BUDGET: u64 = 8 * 1024 * 1024;
 
 /// The default sub-pixel quantum of the glyph cache: 1/16 of a pixel.
@@ -178,7 +192,14 @@ pub struct Options {
     /// Exceeding it is a [`DeviceError::ResourceBudgetExceeded`] naming all three
     /// numbers, before anything is stored.
     pub max_resource_bytes: u64,
-    /// The glyph atlas budget, in bytes ([`DEFAULT_ATLAS_BUDGET`]).
+    /// The glyph atlas budget, in bytes ([`DEFAULT_ATLAS_BUDGET`]) — a **request**.
+    ///
+    /// The atlas is one near-square R8 texture whose width is capped at 2048 and whose
+    /// sides are clamped to the adapter's texture limit, so anything above
+    /// `2048 × Limits::max_target_size` is not granted and nothing fails: read
+    /// [`Limits::atlas_bytes`] for what this became (ADR 0063).
+    ///
+    /// [`Limits::atlas_bytes`]: crate::device::Limits::atlas_bytes
     pub atlas_budget: u64,
     /// The sub-pixel quantum of the glyph cache, as a denominator: `Some(16)` keys
     /// glyph tiles at 1/16-pixel phases; `None` switches quantisation **off** (exact

@@ -94,6 +94,23 @@ pub struct Limits {
     pub max_frame_bytes: u64,
     /// The resident-resource budget, as configured.
     pub max_resource_bytes: u64,
+    /// The glyph atlas this device actually made, in bytes — **not**
+    /// [`Options::atlas_budget`], which is a request (ADR 0063).
+    ///
+    /// The atlas is one R8 texture sized near-square from the budget, with its width
+    /// capped at 2048 and both sides clamped to
+    /// [`max_target_size`](Limits::max_target_size). So a budget above
+    /// `2048 × max_target_size` is granted in part and the rest is silently unavailable —
+    /// 32 MiB is the ceiling on an adapter allowing 16 384 texels a side, whatever the
+    /// caller asked for. Reported because a caller comparing
+    /// [`Counters::atlas_working_set_bytes`] against its own request would be comparing
+    /// against the wrong number exactly when the cap bites, and because §5's rule is that
+    /// a limit which must exist is discoverable before the frame rather than inferred
+    /// from a page that ran slowly.
+    ///
+    /// [`Options::atlas_budget`]: crate::startup::Options::atlas_budget
+    /// [`Counters::atlas_working_set_bytes`]: crate::frame::Counters::atlas_working_set_bytes
+    pub atlas_bytes: u64,
 }
 
 /// Hands out device numbers. Monotonic for the process, which is all a

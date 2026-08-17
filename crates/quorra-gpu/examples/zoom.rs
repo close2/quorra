@@ -12,8 +12,14 @@
 //! The scene is `floor.rs`'s dense page — 5 933 glyph-lane fills over 107 distinct
 //! outlines — because it is the shape the brief's §0 says a document renderer must be
 //! fast at, and because zoom is exactly where its premise (a few outlines repeated
-//! many times) stops holding: past `MAX_GLYPH_DIM` every visible glyph leaves the
-//! atlas for the coverage path and is rasterised again on every frame.
+//! many times) stops holding: a magnified letterform eventually takes more of the atlas
+//! than `MAX_TILE_SHARE` allows, leaves it for the coverage path, and is rasterised
+//! again on every frame.
+//!
+//! This comment named `MAX_GLYPH_DIM` until 2026-08-17, fourteen ADRs after ADR 0024
+//! deleted that constant and replaced the dimension with a share of *this* atlas. And on
+//! real pages that mechanism is a rounding error next to the other one — an atlas with no
+//! **room**, because it is full of earlier pages' tiles (ADR 0063).
 //!
 //! Run: `cargo run --release -p quorra-gpu --example zoom`
 

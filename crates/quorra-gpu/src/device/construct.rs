@@ -265,10 +265,15 @@ impl Device {
         let pass_query_at_startup = timestamps.map(|_| PassQuery::new(&gpu));
 
         let max_dimension = gpu.limits().max_texture_dimension_2d;
+        // Built here rather than sized a second way for `Limits`: the atlas's own
+        // constructor is the one place that knows what the budget became, and two
+        // arithmetics for one number is how they come to disagree (ADR 0063).
+        let atlas = AtlasStore::new(options.atlas_budget, max_dimension);
         let limits = Limits {
             max_target_size: max_dimension,
             max_frame_bytes: options.max_frame_bytes,
             max_resource_bytes: options.max_resource_bytes,
+            atlas_bytes: atlas.byte_size(),
         };
 
         Ok(Self {
@@ -280,7 +285,7 @@ impl Device {
             pipelines,
             warm_up,
             resources: ResourceStore::new(options.max_resource_bytes),
-            atlas: AtlasStore::new(options.atlas_budget, max_dimension),
+            atlas,
             atlas_texture: None,
             image_textures: HashMap::new(),
             ramp_textures: HashMap::new(),
