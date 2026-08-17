@@ -26,6 +26,12 @@
 //! dev-dependency on it does not close a cycle (ADR 0060 §3). The price is five lines
 //! at each call site, which are plumbing rather than page content:
 //!
+//! The block below is `ignore`d and is therefore **not compiled by anything** — it needs a
+//! `device`, and this crate cannot see one without the dependency edge whose absence is the
+//! point of it. So it is prose in code's clothing, and it decays like prose: if a call site
+//! stops looking like this, the six that do are in `tests/archetypes.rs` and the examples,
+//! and they are what CI checks.
+//!
 //! ```ignore
 //! let outlines: Vec<OutlineId> = quorra_pages::outlines(&quorra_pages::ARTWORK)
 //!     .iter()
