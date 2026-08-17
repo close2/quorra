@@ -17,6 +17,7 @@ use crate::atlas::{AtlasEntry, CacheProspect, GlyphKey, GlyphPlacement};
 use crate::error::RenderError;
 use crate::startup::Coverage;
 
+use super::super::instance::CoverageSource;
 use super::super::{Encoder, ResolvedClip};
 use super::{Draw, Job, Place, Rasterised, fan_out, rasterise, rasterise_all};
 
@@ -237,7 +238,7 @@ impl<'a> Encoder<'a> {
             entry.height as f32,
             entry.x as f32,
             entry.y as f32,
-            0.0, // source: atlas
+            CoverageSource::Atlas,
             draw.color,
             draw.clip,
             draw.style,

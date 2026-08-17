@@ -313,6 +313,7 @@ impl Device {
     fn counters(&self, encoded: &Encoded, upload_bytes: u64, layer_textures: u32) -> Counters {
         Counters {
             commands: encoded.commands,
+            lanes: encoded.lanes,
             clip_distinct_regions: encoded.clip_distinct_regions,
             clip_residue_regions: encoded.clip_residue_regions,
             clip_residue_tiles: encoded.clip_residue_tiles,
