@@ -511,3 +511,136 @@ together they cover `a4380e2 → 1adf479`, which is what a push now delivers.
 > **`a4380e2 → 1cd74c9`, `1cd74c9 → a4f10f5` and `f378fa2 → 1adf479` together cover
 > everything a push delivers.** `doc/notes-release-matrix.md` holds all three, with method,
 > raw-output layout and the per-page evidence.
+
+# A refusal that did not move: `issue18032.pdf`, ADR 0069 against ADR 0070
+
+Date: **2026-08-18**. Not a range matrix — a **settlement**. Two rounds this week disagreed
+about whether ADR 0069's `SceneError::KnockoutElementGroupUnsupported` turned a drawn corpus
+page into a refused one, and a page moving from drawn to refused is the one thing the three
+matrices above exist to catch.
+
+**ADR 0069's round was right.** No corpus page moved from drawn to refused, at ADR 0069 or
+anywhere in the week. ADR 0070's round reported in passing that its scale-4 exit 101 was
+explained by `issue18032.pdf`, "which ADR 0069 began refusing two commits before mine"; that
+sentence is wrong in **both** halves, and because the round reported it rather than writing it
+down, nothing on disk contradicted it. It is retracted here and at the site in ADR 0070 where
+the round's corpus section should have carried it.
+
+## 1. The fact, measured at both revisions in one copy, the same sitting
+
+One copy of the caller's tree at **`829d7faa`** (clean; only an untracked `.claude/`), RADV,
+`Coverage::Cpu`, scale 4, release, `[patch]` flipped between two extractions of this tree.
+Base **`3f6df72`** — the mainline commit *before* ADR 0069's merge `b5a09d7` — against
+**`c443bc2`**, today's `main`, which carries ADR 0069 and ADR 0070 both.
+
+`PDFVIEWER_QUORRA_ONLY=issue18032.pdf`, which the harness says itself skips the ratchets:
+
+| | base `3f6df72` | `main` `c443bc2` |
+|---|---|---|
+| verdict | `0 agree, 0 differ, 1 refused, 0 not comparable` | **identical** |
+| cargo exit | 0 | 0 |
+
+The refusal line is **byte-identical** between the columns:
+
+```
+  refused: issue18032.pdf: this backend cannot draw a non-isolated knockout group: each
+  element composites with the group's own initial backdrop, which a scene cannot retain
+  beside the accumulation (ISO 32000-2 §11.4.6)
+```
+
+That text is **the caller's own**, `crates/render-quorra/src/scene.rs:154`, raised before a
+`quorra_scene::Scene` is built. Quorra's variant reads "a group used as an element of a
+knockout group needs the separate shape value §11.4.6 requires of it …", and that string
+appears **zero** times in either column's output. The page is refused one crate upstream of
+anything ADR 0069 can reach.
+
+And the whole lane, same copy, same sitting, ratchets checked:
+
+| | base `3f6df72` | `main` `c443bc2` |
+|---|---|---|
+| CPU, scale 4, whole corpus | 938 / 11 / 3 / 22 | **938 / 11 / 3 / 22** |
+| page lines printed | 14 | 14, **all identical**, `diff` empty |
+| refusals | `bug1721218_reduced`, `issue18032`, `issue1905` | the same three |
+| cargo exit | 101 | 101 |
+
+**Three refusals before and three after**, which is exactly what ADR 0069's own matrix
+recorded.
+
+## 2. What `REFUSED_AT_FOUR` actually lists, read rather than inferred
+
+`crates/render-quorra/tests/corpus.rs:330` at the caller's `829d7faa` — and, checked by
+`git show`, character-identical at `736e01f3` (ADR 0069's copy) and `14a81f0d` (ADR 0066's):
+
+```rust
+const REFUSED_AT_FOUR: [&str; 4] = [
+    "bug1703683_page2_reduced.pdf",
+    "bug1721218_reduced.pdf",
+    "issue18032.pdf",
+    "issue1905.pdf",
+];
+```
+
+`issue18032.pdf` **is** in it, and has been since their five-hundred-and-twelfth session — it
+is in their scale-1 `REFUSED` too (`[&str; 2]`, line 269). Their own doc comment names the
+reason and dates it: it "joined this list in the five-hundred-and-twelfth session, but the hole
+is the four-hundred-and-ninety-second's", their ADR 0327, `git log` 2026-08-08. That is eight
+days before ADR 0069 existed.
+
+## 3. The mechanism of the disagreement
+
+The scale-4 exit 101 is real, pre-existing, and about a **different page in the opposite
+direction**:
+
+```
+assertion `left == right` failed: the pages quorra refuses at 4× have changed
+  left: ["bug1721218_reduced.pdf", "issue18032.pdf", "issue1905.pdf"]
+ right: ["bug1703683_page2_reduced.pdf", "bug1721218_reduced.pdf", "issue18032.pdf", "issue1905.pdf"]
+```
+
+`issue18032.pdf` is on **both** sides. The single element of the difference is
+`bug1703683_page2_reduced.pdf`, which our ADR 0057 moved from **refused to drawn** — an
+improvement the caller has not re-baselined, recorded already by all three matrices above and
+by `PLAN.md` §s at lines 122 and 158. ADR 0070's round read the assertion's *failure* as
+naming `issue18032.pdf` and attributed it to the newest thing in the tree. The page it should
+have named went the other way.
+
+Their tree did also move under us, as `HANDOVER.md`'s trap says it does, but not here: ADR
+0069's copy at `736e01f3` read `937 / 11 / 3 / 23` on this row and today's at `829d7faa` reads
+`938 / 11 / 3 / 22` — **one document migrated from *not comparable* to *agree* on their side**,
+974 documents and 3 refusals unchanged in both.
+
+## 4. Method note, because the first attempt at the base column was unsound
+
+`git archive` stamps every extracted file with the **commit's** timestamp, not the extraction
+time. The base commit is older than `main`, so its sources landed with mtimes *behind* the
+artefacts the `main` column had just produced, and cargo rebuilt `quorra-gpu` but declared
+`quorra-scene` — the crate that holds the refusal — fresh. The first base run therefore
+measured `main`'s scene builder wearing the base's name, and it is discarded. Every column
+above was taken after `find <patch dir> -type f -exec touch {} +`, and the check that the swap
+took is `Compiling quorra-scene` appearing in the log rather than a metadata hash: holding the
+`[patch]` path stable across columns is what makes the *test binary* hash identical, so this
+round could not use ADR 0069's two-hashes proof and used the compile lines instead.
+
+## 5. The correction, and three defects found beside it
+
+ADR 0070's aside was never written into any file — there is no `doc/notes-thin-mark-condition.md`,
+and neither `doc/adr/0070-…md` nor `doc/notes-thin-mark-options.md` contains the claim. **The
+reason is that ADR 0070's corpus section was never transcribed at all**: line 136 of that ADR
+is the literal string `<<MATRIX>>` and line 206 is `<<DEFECTS>>`, two unreplaced placeholders
+sitting on `main`. That is principle 1's "no placeholder left in merged code" in a document,
+and it is also the direct cause of this disagreement — a claim that lives only in a round's
+report is a claim no later round can check. A dated retraction is placed at the `<<MATRIX>>`
+site; the matrix itself is **not** filled in from here, because this round measured one lane
+and one scale and inventing the other three rows is the failure these notes exist to prevent.
+
+**Two CI gates were red on `main` when this round started, both from the same commit
+(`787b830`) and neither pre-existing before it.** `cargo fmt --all --check` failed on two
+`assert!` chains in `crates/quorra-gpu/src/encode/thin.rs`, and
+`RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets` failed with four
+`clippy::similar_names` errors in `crates/quorra-gpu/tests/thin_marks.rs` — `wide_cpu` beside
+`wide_gpu`, `thin_cpu` beside `thin_gpu`, twice. Both are fixed here, mechanically:
+`cargo fmt --all`'s own output, and a rename to the lane names that ADR 0070's prose already
+uses (`…_on_processor` / `…_on_device`), which reads better than the abbreviations it replaces.
+No assertion, bound or fixture changed. The pattern worth naming is that all three of this
+round's findings — two red gates and two unreplaced placeholders — are a round that ran its
+verification and reported the result without the result having been produced.
