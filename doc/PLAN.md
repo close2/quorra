@@ -235,6 +235,18 @@ renders on a second thread while the main thread presents — **three to five pr
 a single render, where the old arrangement allows none** — the finished raster lands under
 `scale(2) ∘ translate(64, 32)` with chrome at identity, six window points are read back with
 `xwd`, and the gate was verified able to fail in three of the ways it exists to catch.
+
+**And every one of those window points is now read at a moment that was proven rather than
+waited for** (ADR 0068, 2026-08-18, `doc/notes-present-settle.md`). The proof used to present for
+a fixed 300 ms and then capture, which failed once in five real-display runs by reading one
+present behind. **There is no synchronisation to replace the clock with** — wgpu 30 exposes no
+present-completion signal and no `VK_KHR_present_wait`, and the X Present extension's
+`PresentCompleteNotify` goes to the connection `wgpu` opened inside itself — so the instrument is
+a convergence criterion: **two consecutive captures must agree on something other than what the
+window was last proven to show**, bounded by 64 capture rounds. Over 29 completed real-display
+runs at loads 7.75 to 55.77, **37 of 145 settles took a first capture that was not the settled
+window**, which is the old instrument's failure seen from the inside; no settle needed more than
+4 of its 64.
 **It holds 119.96 Hz, measured on the owner's display on 2026-08-17** (ADR 0056's amendment,
 `doc/notes-present-rate.md`): **149 of 149 presents landed on the next refresh** while a second
 thread held the device rendering, at 1.02 presents per refresh of the span, over four runs at
@@ -305,6 +317,16 @@ who could remove it.
   omission is an **oversight rather than a design constraint**: the device lane's output is
   already the R8 sheet tile a rare paint is drawn through, verified by making the change and
   reverting it.
+- **`examples/present_thread`'s `presents >= 2` is a count decided by a wall clock.** It means
+  "a present completed while the render was still running", which is a real property — but the
+  number of presents that fit a span is `span / refresh`, and the span is a wall clock on a
+  shared machine. It refuses **3 of 18 runs at load 36.9 to 55.8** and none of the 14 below 19:
+  once the presenting thread got one present into 25.4 ms, once the render itself was **6.4 ms,
+  shorter than one refresh**, so 1 is the correct answer and the assertion is wrong about its own
+  subject. Either the fixture's render is made unambiguously longer than a present by
+  construction, or the assertion is restated as something a schedule cannot decide. One round, no
+  corpus (`doc/notes-present-settle.md` §5). Pre-existing since ADR 0056; found by the load
+  ADR 0068's runs applied.
 - **The two coverage lanes disagree about whether a thin mark is *there*.** `Coverage::Gpu`
   samples a 4 × 4 ordered grid, so its columns sit a quarter of a pixel apart; a
   0.1-device-pixel bar swept across ten sub-pixel positions **vanishes entirely at six of

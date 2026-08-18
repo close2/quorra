@@ -740,6 +740,23 @@ rounded" still "does not specify a rounding mode". So any proposal beginning "we
 bit-exact by setting …" is answered by ADR 0067 §1 before it is costed — it reasons about
 IEEE 754 and raw Vulkan, and we ship WGSL through `wgpu`. A named cost of ADR 0002.
 
+**A criterion that waits for the window to hold still must also say what it must stop holding.**
+`doc/notes-present-rate.md` §4 named the fix for its own flake as *"capture until two consecutive
+captures agree"* — and that criterion **converges on the stale window**, because while the new
+picture is in flight every capture reads the old one and every pair of them agrees. It would have
+turned a 1-in-5 flake into a gate green for ever, which is the same failure as the "retry until it
+passes" the paragraph was rejecting. ADR 0068 adds the missing half — the agreed capture must
+differ from what the window was last *proven* to show — which makes the settles a chain and needs
+a first link the library names rather than a previous capture (an erase to the presenter's own
+clear). **When a gate waits for stability, ask what is stable when it is wrong.**
+
+**`git checkout -- <path>` in a scripted forced-defect loop deletes the change under test.** A
+script that forced four defects into `examples/present_thread/` and restored with
+`git checkout -- crates/quorra-gpu/examples/present_thread/` reverted the round's own *uncommitted*
+work: the new untracked file survived and every edit to a tracked one did not, which reads exactly
+like a build that mysteriously lost its feature. **Commit before forcing a defect, and restore
+from a copy the script took itself, never from the index.**
+
 **A stale worktree argues that your brief is wrong.** A round given the four files past the
 size smell reported three "corrections" — that the highest ADR is 0056, that the suite is 445
 passing, and that `raster.rs` is 1 400 lines and untouched. All three are true of the session's
