@@ -105,6 +105,11 @@ are the corpus's largest such population and exactly **one** of them takes the d
 and after the change no page outside the processor lane's own differing set remains
 (`doc/notes-thin-mark-options.md` §2.4, and the matrix below).
 
+**The second half of that sentence is wrong**, and the matrix below is where it is corrected:
+the re-measurement of 2026-08-18 finds the two lanes' scale-1 differing *counts* converging on
+23 while their *sets* still differ by two pages each way. The first half — the population — is
+unaffected, and the correction does not disturb the decision this ADR records.
+
 ## The inversion this records, and its price
 
 ADR 0026's title is that the lane is chosen by what each lane would **cost**. This condition
@@ -133,15 +138,70 @@ short-circuits ahead of it, as it did before.
 One copy of their tree taken 2026-08-18, base and change run in the same sitting against it,
 per-page lines compared rather than only the totals (`doc/HANDOVER.md`'s corpus trap).
 
-<<MATRIX>>
+> **Re-measured 2026-08-18, not transcribed.** This section is a fresh run of all four rows,
+> taken after the round that wrote this ADR left `<<MATRIX>>` here unreplaced. Nothing below
+> comes from that round's report; the logs, the scripts and the raw per-page diffs are
+> `doc/notes-thin-mark-condition.md`. One claim of this ADR did not survive the re-run, and
+> it is corrected at the end of this section rather than quietly dropped.
 
-> **Corrected 2026-08-18.** Two things about this section, both found by a later round and
-> left in place rather than rewritten.
+Base is `b5a09d7`, the mainline commit immediately before this ADR's merge `c443bc2`; change
+is `ada5e3f`. One copy of the caller's tree at `829d7faa`, both columns in the same sitting,
+the `[patch]` path flipped between them and nothing else touched.
+
+| lane, scale | base `b5a09d7` | change `ada5e3f` |
+|---|---|---|
+| `Coverage::Gpu`, scale 1 | 930 / 25 / 2 / 17 | **932 / 23 / 2 / 17** |
+| `Coverage::Cpu`, scale 1 | 932 / 23 / 2 / 17 | 932 / 23 / 2 / 17, all 25 page lines identical |
+| `Coverage::Gpu`, scale 4 | 939 / 10 / 3 / 22 | 939 / 10 / 3 / 22, one page line closer |
+| `Coverage::Cpu`, scale 4 | 938 / 11 / 3 / 22 | 938 / 11 / 3 / 22, all 14 page lines identical |
+
+*agree / differ / refused / not comparable*, over 974 documents at page one — 957 pages
+compared at scale 1 and 952 at 4×. The scale-1 device row is the whole of what this condition
+buys; the other three are the controls that say it bought it without costing anything
+elsewhere.
+
+**Every per-page line that moved, with its cause.** Three, and no others: the four rows'
+`differs`/`refused` lines are otherwise identical to the character between the columns.
+
+- **`bug1883609.pdf`, scale 1, device lane — differs → agree.** Base
+  `mean 0.4926 worst tile 2.99 at (160, 672) differing 0.0311 ssim 0.98615`; no line at all
+  in the change column.
+- **`vertical.pdf`, scale 1, device lane — differs → agree.** Base
+  `mean 0.1526 worst tile 9.38 at (0, 320) differing 0.0092 ssim 0.98572`; no line after.
+- **`issue12295.pdf`, scale 4, device lane — differs → differs, closer to the oracle.**
+  `mean 0.9517 → 0.9201`, `differing 0.0490 → 0.0473`, `ssim 0.95585 → 0.95881`, with
+  `worst tile 16.31 at (1792, 2208)` unchanged. It does not reach agreement, so the 4× totals
+  do not move — which is why a matrix of totals alone would have reported this row as null.
+
+The cause is the same one in all three and is a deduction from the diff rather than a guess:
+the only behavioural difference between the columns is the fifth condition, so a page that
+moved moved because a mark on it whose thin axis is below `1/√16 = 0.25` device pixels stopped
+taking the device lane. Re-run in isolation, the four scale-1 device-lane pages under
+discussion read **0 agree / 4 differ** at the base and **2 agree / 2 differ** at the change.
+
+**No refusal moved, in any row.** All three 4× refusals and both scale-1 refusals are
+byte-identical strings in both columns, which is the machine-independent half of this
+comparison: the diff between the two revisions is confined to `quorra-gpu`'s lane chooser and
+`quorra-scene` is untouched, so no refusal *could* move. The caller's `REFUSED_AT_FOUR` gate
+fails at 4× in **both** columns alike, on `bug1703683_page2_reduced.pdf` — which ADR 0057
+moved from refused to **drawn**, their outstanding re-baseline, and not a change of ours.
+
+> **The claim of §4 that did not survive this run.** "[A]fter the change no page outside the
+> processor lane's own differing set remains", repeated above from
+> `doc/notes-thin-mark-options.md` §2.4, is **false as stated**, and the totals are what hide
+> it: at scale 1 after the change both lanes name **23** pages, and they are not the same 23.
 >
-> **The matrix was never transcribed.** `<<MATRIX>>` above and `<<DEFECTS>>` below are the
-> round's own placeholders, merged unreplaced. They are not filled in from here: the
-> settlement round measured one lane at one scale, and writing the other rows from anything
-> but a run is the failure `doc/notes-release-matrix.md` exists to prevent.
+> - on the device lane and not the processor lane: `bug1863910.pdf`, `issue16500.pdf`
+> - on the processor lane and not the device lane: `bug1743245.pdf`, `issue21068.pdf`
+>
+> Neither of the first two is touched by this ADR — their lines are byte-identical in both
+> columns — so they are a residual of the device lane that the thin-mark condition does not
+> reach, rather than a regression it caused. The honest sentence is that **the count converges
+> and the set does not**, and the four names above are where a later round should start if it
+> wants the set to converge too.
+
+> **Corrected 2026-08-18.** One further thing about this section, found by the round that
+> settled the refusal and left in place rather than rewritten.
 >
 > **This round's report explained its scale-4 exit 101 by saying the caller's `REFUSED_AT_FOUR`
 > "does not list `issue18032.pdf`, which ADR 0069 began refusing two commits before mine".
@@ -224,7 +284,57 @@ for one scene and one viewport `Coverage::Gpu` reports **exactly** the `Coverage
 when no mark took the device lane, and strictly more when one did — an equality and a strict
 inequality, rather than a threshold read off a run.
 
-<<DEFECTS>>
+### The defects those gates were forced to catch
+
+> **Re-forced 2026-08-18, not described.** The round that wrote this ADR left `<<DEFECTS>>`
+> here unreplaced. Each defect below was put back into the tree one at a time on `ada5e3f`,
+> `cargo test --workspace --release --no-fail-fast` was run with it in place, and the column
+> on the right is **what actually went red** rather than what should have. The defect was
+> reverted before the next; the tree is clean. Logs: `doc/notes-thin-mark-condition.md` §3.
+>
+> `--no-fail-fast` is not decoration. Without it cargo stops after the first failing test
+> binary, and the first attempt at defect 1 reported one red test where three are.
+
+| # | the defect, forced | what went red |
+|---|---|---|
+| 1 | `ThinAxis::can_fall_between_sample_columns` compares `<=` instead of `<`, so a mark **at** the spacing is declined too | `encode::thin::tests::a_mark_at_exactly_the_spacing_is_not_declined`, `the_lane_is_declined_exactly_below_the_sample_spacing`, `a_turned_hairline_stroke_is_declined_by_its_own_width` |
+| 2 | the fifth condition deleted from `take_gpu_lane` — the behaviour of the base revision | `a_mark_below_the_sample_spacing_is_drawn_at_every_position_on_both_lanes`, `the_lane_is_declined_exactly_below_the_sample_spacing`, `a_turned_hairline_stroke_is_declined_by_its_own_width` |
+| 3 | `ThinAxis::of` reads the device box only, dropping the stroke width | `encode::thin::tests::a_strokes_width_is_read_where_it_is_thinner_than_the_box`, `a_turned_hairline_stroke_is_declined_by_its_own_width` |
+| 4 | `sample_column_spacing` returns a written-down `0.25` instead of `1/√n` | `encode::thin::tests::the_spacing_is_one_over_the_grids_side_at_every_admitted_sample_count`, **and nothing else** |
+| 5 | the non-finite answer inverted, `!(self.0 >= spacing)` — a `NaN` thin axis now **declines** the lane | **nothing. the whole workspace stayed green** |
+| 6 | `encode_stroke` passes `None` for the width, leaving `ThinAxis` correct and the wiring wrong | `a_turned_hairline_stroke_is_declined_by_its_own_width`, **and nothing else** |
+
+Defect 2 is the one worth reading the message of, because it is the clause failing in the
+words of the clause:
+
+```
+Gpu at 20, width 0.125: the mark disappeared. §10.7.4: painting any pixel the shape
+intersects "ensures that no shape ever disappears as a result of unfavourable placement
+relative to the device pixel grid"
+```
+
+**Three things the table says that a list of gates does not.**
+
+- **The arithmetic and the wiring are held by different tests, and each is held by only
+  one kind.** Defect 2 (wiring removed) turns no unit test red; defect 6 (wiring wrong at one
+  call site) turns *only* an on-device fixture red. `doc/HANDOVER.md`'s "plumbing at zero"
+  trap is about exactly this seam, and the fixtures are what stand on it.
+- **Defect 4 has a single witness, and it is on paper.** Nothing in this tree renders with
+  `Options::coverage_samples` away from sixteen, so the claim that the threshold *follows the
+  option* rests on `encode::thin::tests` alone. That is this ADR's "Revisit when" second
+  bullet, restated as a measurement: it is not that a non-default sample count is untested,
+  it is that it is untested **on a device**.
+- **Defect 5 did not fail, and the gate it should have failed is defective.**
+  `a_non_finite_thin_axis_declines_nothing` passes for a reason that is not the one its name
+  gives. Its fixture is `ThinAxis::of((0.0, 0.0, f32::NAN, 10.0), None)`, and `f32::min` is
+  IEEE 754's `minNum`: it *discards* a `NaN` operand, so `(NaN).min(10.0)` is `10.0` and the
+  thin axis is a finite ten pixels — forty times the spacing. The test therefore asserts that
+  a mark ten pixels across is not thin, which every implementation of this condition satisfies.
+  The property it means to assert **is** true of the shipped code, since `self.0 < spacing` is
+  false for a `NaN`; what is missing is a fixture that can produce one, which needs *both*
+  extents non-finite — `(0.0, 0.0, f32::NAN, f32::NAN)`, whose `across` is a genuine `NaN`
+  and which separates `<` from `!(>=)`. Recorded here rather than fixed, because the round
+  that found it was a documentation round; it is the next round's one-line change.
 
 ## Revisit when
 
@@ -233,7 +343,7 @@ inequality, rather than a threshold read off a run.
   comparison and is unaffected by its outcome, but the *order* of the five should be re-read
   when the four change.
 - **A caller sets `coverage_samples` away from sixteen in earnest.** The threshold follows the
-  option by construction, but the corpus matrix below was taken at sixteen and the population
+  option by construction, but the corpus matrix above was taken at sixteen and the population
   it measures is a function of the threshold.
 - **The 45° filled hairline stops being a residual.** The instrument is
   `doc/notes-thin-mark-options.md` §2.1's probe with the thin axis taken from the mark's own
