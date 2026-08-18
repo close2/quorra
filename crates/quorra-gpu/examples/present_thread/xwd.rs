@@ -11,9 +11,17 @@
 //! map, then the pixels — `bytes_per_line` apart, `bits_per_pixel` wide, with a mask per
 //! channel. Everything below is that layout and nothing else.
 
+use std::fmt;
 use std::process::Command;
 
 /// One window's pixels, as RGB triples.
+///
+/// **Equality is exact, and that is deliberate.** The tolerance [`crate::same`] applies is
+/// about the store conversion between the colour a scene stated and the one the window
+/// shows (ADR 0006); it is not a difference two dumps of one unchanged window can have,
+/// because they are the same bytes read twice. So [`crate::settle`] compares whole shots
+/// with `==` and means it.
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Shot {
     width: usize,
     height: usize,
@@ -79,6 +87,122 @@ impl Shot {
     /// The window's size, so a caller can assert it is the one it asked for.
     pub(crate) fn size(&self) -> (usize, usize) {
         (self.width, self.height)
+    }
+
+    /// A shot of one colour, of a stated size.
+    ///
+    /// It exists for [`crate::settle`]'s own gate, which states what the criterion
+    /// concludes from three captures and has to run where there is no window — under
+    /// `--check` on a machine with no display, and for
+    /// [`crate::arrangement::the_shapes_are_the_ones_adr_0058_counted`]'s reason.
+    pub(crate) fn uniform((width, height): (usize, usize), color: [u8; 3]) -> Self {
+        Self {
+            width,
+            height,
+            pixels: vec![color; width * height],
+        }
+    }
+
+    /// Whether every pixel is within `tolerance` of `color`.
+    ///
+    /// The one predicate a settle can apply to a capture **without knowing what the
+    /// picture should look like**: the presenter clears the window before it draws
+    /// anything (ADR 0056), so "all of it is the clear" is a state the library names
+    /// rather than a state a previous capture named.
+    pub(crate) fn is_uniform(&self, color: [u8; 3], tolerance: u8) -> bool {
+        self.pixels.iter().all(|pixel| {
+            pixel
+                .iter()
+                .zip(color)
+                .all(|(a, b)| a.abs_diff(b) <= tolerance)
+        })
+    }
+
+    /// How this shot differs from another, as a failed settle reports it.
+    pub(crate) fn difference(&self, other: &Self) -> Difference {
+        if self.size() != other.size() {
+            return Difference::Size(self.size(), other.size());
+        }
+        let mut differing = 0_usize;
+        let mut first: Option<FirstDifferent> = None;
+        for (index, (got, want)) in self.pixels.iter().zip(&other.pixels).enumerate() {
+            if got != want {
+                differing += 1;
+                if first.is_none() {
+                    first = Some(FirstDifferent {
+                        at: (index % self.width, index / self.width),
+                        got: *got,
+                        want: *want,
+                    });
+                }
+            }
+        }
+        Difference::Pixels {
+            differing,
+            total: self.pixels.len(),
+            first,
+        }
+    }
+}
+
+/// How two shots differ — the diagnostic a settle that never converged carries.
+///
+/// A count and a coordinate rather than a verdict: the reader of a failed settle needs to
+/// tell "the window never changed" from "the window changed under the capture", and those
+/// are two different shapes in this one line.
+pub(crate) enum Difference {
+    /// Two shots of different sizes, which nothing else about them can be compared past.
+    Size((usize, usize), (usize, usize)),
+    /// Same size: how many pixels differ of how many, and the first one that does.
+    Pixels {
+        /// Pixels whose triples are not identical.
+        differing: usize,
+        /// Pixels in the shot.
+        total: usize,
+        /// The first differing pixel in row-major order. `None` exactly when `differing`
+        /// is zero.
+        first: Option<FirstDifferent>,
+    },
+}
+
+/// The first pixel two shots disagree about: where it is, and both of its colours.
+pub(crate) struct FirstDifferent {
+    /// Its position, with the origin at the top-left.
+    at: (usize, usize),
+    /// What the shot the comparison was made *from* holds there.
+    got: [u8; 3],
+    /// What the other shot holds there.
+    want: [u8; 3],
+}
+
+impl fmt::Display for Difference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Size((aw, ah), (bw, bh)) => {
+                write!(f, "a {aw}x{ah} shot against a {bw}x{bh} one")
+            }
+            Self::Pixels {
+                differing: 0,
+                total,
+                ..
+            } => write!(f, "all {total} pixels identical"),
+            Self::Pixels {
+                differing,
+                total,
+                first,
+            } => {
+                write!(f, "{differing} of {total} pixels differ")?;
+                if let Some(FirstDifferent {
+                    at: (x, y),
+                    got,
+                    want,
+                }) = first
+                {
+                    write!(f, ", first at ({x}, {y}): {got:?} against {want:?}")?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 

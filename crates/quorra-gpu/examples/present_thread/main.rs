@@ -60,6 +60,16 @@
 //!     how many copies of that arrangement one present can carry before it stops (`rate`).
 //!     Steps 10 and 11 come last because 11 resizes the window, and every pixel assertion
 //!     above is stated in the size the window was opened at.
+//!
+//! # When each of those pixels is read
+//!
+//! Every capture above goes through [`settle`], which presents until **two consecutive
+//! captures agree on something other than what the window was last proven to show**, and
+//! refuses by name when they never do. It replaces a 300 ms wall clock that stood in for a
+//! synchronisation which, at this seam, does not exist — `settle`'s module comment says
+//! what was looked for and why none of it is reachable. The wall clock failed once in five
+//! real-display runs by reading step 6 one present behind
+//! (`doc/notes-present-rate.md` §4, `doc/notes-present-settle.md`).
 
 // An example's arithmetic is window coordinates, byte offsets inside a file it just
 // read, and small counts — all bounded and all exact in the types they use, where the
@@ -80,6 +90,7 @@
 mod arrangement;
 mod fixture;
 mod rate;
+mod settle;
 mod xwd;
 
 use std::sync::Arc;
@@ -109,11 +120,6 @@ const OFFSET: (f32, f32) = (64.0, 32.0);
 /// between what the scene stated and what the window shows.
 const TOLERANCE: u8 = 2;
 
-/// How long to keep presenting the same picture before reading the window back. The X
-/// server is on the other side of a socket; this is the one place a wall clock appears
-/// in this example, and it is a wait rather than a measurement.
-const SETTLE: Duration = Duration::from_millis(300);
-
 /// `--check` is accepted and changes nothing: this example is already an assertion
 /// harness that runs its whole set once, and CI has run it since ADR 0056. It is
 /// accepted so that every example takes the same invocation (ADR 0060).
@@ -124,6 +130,9 @@ fn main() {
             "check: the pixel proof is already its own smallest run; the rate phase runs one"
         );
     }
+    // Before anything opens a window, because it needs none and a gate that can run
+    // without a display must not be able to hide behind one.
+    settle::the_criterion_refuses_a_stale_window();
     let mut display = Display::open();
     let options = Options {
         adapter: std::env::var("QUORRA_PRESENT_ADAPTER").ok(),
@@ -174,6 +183,13 @@ fn main() {
 
     let device = render_on_another_thread_while_presenting(device, &page, &chrome, &mut presenter);
 
+    // The chain's first link (`settle`): the window is erased to the presenter's own clear
+    // and that erase is *proven* to have landed, so every capture below has a baseline it
+    // must differ from and a stale read is a read of the clear.
+    let mut settled = settle::Settle::erased(&mut display, || {
+        present_or_retry(&mut presenter, &[]);
+    });
+
     let placement = Affine::scale(SCALE, SCALE).then(Affine::translate(OFFSET.0, OFFSET.1));
     let layers = [
         Layer {
@@ -187,18 +203,28 @@ fn main() {
             filter: ImageFilter::Nearest,
         },
     ];
-    present_until_settled(&mut display, &mut presenter, &layers);
-    check_the_affine_landed();
+    let shot = settled
+        .converge(&mut display, "the page under the chrome", || {
+            present_or_retry(&mut presenter, &layers);
+        })
+        .unwrap_or_else(|why| panic!("{why}"));
+    check_the_affine_landed(shot);
     check_the_cost(&presenter.last().expect("two layers were just presented"));
-    check_the_other_filter_runs(&mut display, &mut presenter, &page, placement);
+    check_the_other_filter_runs(&mut display, &mut settled, &mut presenter, &page, placement);
 
     // Steps 10 and 11, on the window this proof already owns rather than on a second one:
     // what the split is worth at the display's own refresh. Last, because it resizes the
     // window and every pixel assertion above is stated in the size it was opened at.
     let device = rate::measure(&mut display, device, &mut presenter, check);
 
+    // The rate phase resized the window and left an arrangement on it, so the chain starts
+    // again at the new size rather than continuing across it: a baseline captured at
+    // 640 x 480 is one every capture differs from for the wrong reason.
+    let mut settled = settle::Settle::erased(&mut display, || {
+        present_or_retry(&mut presenter, &[]);
+    });
     let mut device = give_it_back(device, presenter, &options);
-    draw_through_the_surface_again(&mut display, &mut device);
+    draw_through_the_surface_again(&mut display, &mut settled, &mut device);
 
     println!("present_thread: the window is where the affine says, on both paths");
 }
@@ -267,8 +293,11 @@ fn render_on_another_thread_while_presenting(
 }
 
 /// Step 5's pixels: every sampled point, and why it is that colour.
-fn check_the_affine_landed() {
-    let shot = xwd::capture(TITLE);
+///
+/// The capture is handed in rather than taken here, because *when* it was taken is the
+/// whole question: [`settle`] proves it is the window as it is and not as it was, which is
+/// what the 300 ms wall clock this replaces could not (`doc/notes-present-rate.md` §4).
+fn check_the_affine_landed(shot: &xwd::Shot) {
     assert_eq!(
         shot.size(),
         (fixture::WINDOW.0 as usize, fixture::WINDOW.1 as usize),
@@ -310,7 +339,7 @@ fn check_the_affine_landed() {
     );
     // The chrome, over the page, at the identity.
     same(shot.at(620, 460), rgb(fixture::CHROME), "the chrome's mark");
-    check_the_pages_own_edges(&shot);
+    check_the_pages_own_edges(shot);
 }
 
 /// **ADR 0058's seam**: the page's first covered pixel and the one beside it.
@@ -348,6 +377,7 @@ fn check_the_pages_own_edges(shot: &xwd::Shot) {
 /// field there instead would mean the sampler was pointed somewhere else entirely.
 fn check_the_other_filter_runs(
     display: &mut Display,
+    settled: &mut settle::Settle,
     presenter: &mut Presenter,
     page: &wgpu::Texture,
     placement: Affine,
@@ -357,8 +387,15 @@ fn check_the_other_filter_runs(
         placement,
         filter: ImageFilter::Linear,
     }];
-    present_until_settled(display, presenter, &smoothed);
-    let shot = xwd::capture(TITLE);
+    // **The capture that failed once in five real-display runs.** It read the previous
+    // present, which still carried the chrome — and that picture is exactly what `settled`
+    // now holds as this window's proven contents, so a capture of it is refused rather
+    // than asserted against.
+    let shot = settled
+        .converge(display, "the page under a linear filter, alone", || {
+            present_or_retry(presenter, &smoothed);
+        })
+        .unwrap_or_else(|why| panic!("{why}"));
     same(shot.at(324, 212), rgb(fixture::MARK), "the mark, sampled");
     same(shot.at(200, 200), rgb(fixture::FIELD), "the field, sampled");
     // And the chrome is gone, because this present did not carry it: a slice is what is
@@ -407,20 +444,32 @@ fn give_it_back(device: Device, presenter: Presenter, options: &Options) -> Devi
 /// The window's size is asked for rather than assumed: the rate phase resizes it, and a
 /// viewport smaller than its target would leave the rest of the window transparent
 /// (ADR 0039) — a picture that looks like a defect and is not one.
-fn draw_through_the_surface_again(display: &mut Display, device: &mut Device) {
+///
+/// The same criterion as every other capture here, driven by a `Device::render` instead of
+/// a `Presenter::present` — which is the reason [`settle`] takes a closure and knows about
+/// neither.
+fn draw_through_the_surface_again(
+    display: &mut Display,
+    settled: &mut settle::Settle,
+    device: &mut Device,
+) {
     let (width, height) = display.size();
     let viewport = Viewport::full(width, height, Affine::IDENTITY);
     let scene = fixture::through_the_surface((width, height));
-    let until = Instant::now() + SETTLE;
-    while Instant::now() < until {
-        display.pump();
-        device
-            .render(&scene, &viewport, Target::Surface)
-            .expect("Target::Surface works again once the presenter is back");
-    }
-    let shot = xwd::capture(TITLE);
-    // A full-window field the presenter never had a layer for: the last present left the
-    // top-left corner black, so this pixel is the one that says who drew last.
+    let shot = settled
+        .converge(
+            display,
+            "a frame drawn through Target::Surface",
+            || match device.render(&scene, &viewport, Target::Surface) {
+                Ok(_) | Err(RenderError::SurfaceUnavailable { .. }) => {}
+                Err(other) => {
+                    panic!("Target::Surface must work once the presenter is back: {other:?}")
+                }
+            },
+        )
+        .unwrap_or_else(|why| panic!("{why}"));
+    // A full-window field the presenter never had a layer for, over a window the erase
+    // above *proved* was blank: this pixel is the one that says who drew last.
     same(
         shot.at(8, 8),
         rgb(fixture::MARK),
@@ -429,14 +478,17 @@ fn draw_through_the_surface_again(display: &mut Display, device: &mut Device) {
     same(shot.at(620, 460), rgb(fixture::CHROME), "its corner");
 }
 
-/// Present the same picture until the X server has had time to show it.
-fn present_until_settled(display: &mut Display, presenter: &mut Presenter, layers: &[Layer<'_>]) {
-    let until = Instant::now() + SETTLE;
-    while Instant::now() < until {
-        display.pump();
-        presenter
-            .present(layers)
-            .expect("presenting the finished page");
+/// Present `layers`, tolerating the one error that is a retry rather than a failure.
+///
+/// `RenderError::SurfaceUnavailable` says the swapchain could not hand over an image
+/// *right now* — the window system's answer, which `rate::present_run` treats the same
+/// way. A settle presents once per round, so a retry is simply the next round, and a
+/// surface that never recovers ends as a `NotSettled` naming the bound rather than as a
+/// panic from inside a closure.
+fn present_or_retry(presenter: &mut Presenter, layers: &[Layer<'_>]) {
+    match presenter.present(layers) {
+        Ok(()) | Err(RenderError::SurfaceUnavailable { .. }) => {}
+        Err(other) => panic!("presenting {} layers: {other:?}", layers.len()),
     }
 }
 
