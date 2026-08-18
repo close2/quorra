@@ -190,10 +190,20 @@ mod tests {
 
     /// Principle 3's rule at this seam: a thin axis that is not a number must not become
     /// a lane choice made on a comparison that means nothing.
+    ///
+    /// **Both extents are NaN, and that is the point.** This fixture read
+    /// `(0.0, 0.0, f32::NAN, 10.0)` until 2026-08-18, which never produced a NaN thin axis
+    /// at all: `ThinAxis::of` takes the smaller extent with `f32::min`, which is IEEE
+    /// `minNum` and *discards* a NaN operand, so the axis was a finite `10.0` — forty times
+    /// the spacing — and the test asserted only that a ten-pixel mark is not thin. It
+    /// passed with the comparison written as `self.0 < spacing`, which is the one
+    /// rewriting that flips a NaN's answer, so the gate could not see the property it
+    /// names. Found by a round that forced that exact defect and watched nothing go red.
     #[test]
     fn a_non_finite_thin_axis_declines_nothing() {
         assert!(
-            !ThinAxis::of((0.0, 0.0, f32::NAN, 10.0), None).can_fall_between_sample_columns(0.25),
+            !ThinAxis::of((0.0, 0.0, f32::NAN, f32::NAN), None)
+                .can_fall_between_sample_columns(0.25),
             "a NaN extent answers false, leaving the four cost conditions to choose"
         );
     }

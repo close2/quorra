@@ -787,6 +787,23 @@ work: the new untracked file survived and every edit to a tracked one did not, w
 like a build that mysteriously lost its feature. **Commit before forcing a defect, and restore
 from a copy the script took itself, never from the index.**
 
+**`cargo test` stops at the first failing binary, so a defect's blast radius measured without
+`--no-fail-fast` is a lower bound wearing the clothes of a measurement.** Forcing ADR 0070's
+boundary defect reported **one** red test; the same defect with `--no-fail-fast` reports **three**,
+two of them the on-device fixtures that are the only witnesses for the wiring. When you record
+"forcing X fails Y", record what fails when nothing stops early.
+
+**A fixture can name a hazard it cannot construct.** `a_non_finite_thin_axis_declines_nothing`
+asserted that a NaN thin axis declines nothing — and built its axis from
+`(0.0, 0.0, f32::NAN, 10.0)`, which never produces one: `ThinAxis::of` takes the smaller extent
+with `f32::min`, which is IEEE `minNum` and **discards** a NaN operand, so the axis was a finite
+`10.0` and the test asserted only that a ten-pixel mark is not thin. It passed under the one
+rewriting that flips a NaN's answer (`!(self.0 >= spacing)` for `self.0 < spacing`), so the gate
+was blind to the property in its own name. Found by forcing that defect and watching **nothing**
+go red — which is why "verified able to fail" means naming what went red, not that something did.
+**When a fixture's subject is a special value, assert that the value reached the code**, or build
+it where nothing can absorb it.
+
 **A stale worktree argues that your brief is wrong.** A round given the four files past the
 size smell reported three "corrections" — that the highest ADR is 0056, that the suite is 445
 passing, and that `raster.rs` is 1 400 lines and untouched. All three are true of the session's
