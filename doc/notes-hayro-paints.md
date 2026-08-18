@@ -173,6 +173,12 @@ characterisation with the clause quoted above it, so a fix moves a test rather t
 on its own, and its message says to turn it into the requirement rather than delete it
 silently. A recommended `PLAN.md` bullet is at the end of this file.
 
+> **Closed 2026-08-18 by ADR 0070**, which did exactly that: the gap was costed in
+> `doc/notes-thin-mark-options.md`, the owner took its §5.4, and the test named above is now
+> `a_mark_below_the_sample_spacing_is_drawn_at_every_position_on_both_lanes` — the same sweep
+> asserting ink where it counted disappearances. The tables above are what the device lane
+> did before the lane chooser stopped sending such a mark to it.
+
 ### Their #1023, and the 8-bit floor
 
 - A stroke of a stated device width lays down exactly that much ink — widths 3, 1, 0.75,

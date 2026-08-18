@@ -20,6 +20,7 @@ use quorra_scene::{Affine, BlendMode, ClipId, Compose, FillRule, MaskId, Outline
 use super::clips::ResolvedClip;
 use super::device_space::{apply, compose, tile_side, transform_preserves_axes};
 use super::parallel::{Draw, Job};
+use super::thin::ThinAxis;
 use super::{ChildOp, DrawStyle, Encoder, Op};
 use crate::atlas::GlyphPlacement;
 use crate::error::RenderError;
@@ -250,6 +251,10 @@ impl<'a> Encoder<'a> {
                 cache,
                 tile_width,
                 tile_height,
+                // A fill has no width of its own, so its device box is the whole measure
+                // — and for a curve that box is the control hull's, which over-states a
+                // thin curve's extent. Both limits are stated on [`ThinAxis`] (ADR 0070).
+                ThinAxis::of(fill.bounds, None),
                 stored.quads.triangle_count(),
             )
         {
@@ -318,7 +323,7 @@ impl<'a> Encoder<'a> {
         let polylines = raster::flatten(&stored.segments, fill.to_device);
         self.clock.geometry(span);
         self.push_coverage_styled(
-            &polylines, fill.rule, fill.color, resolved, fill.style, fill.mask,
+            &polylines, fill.rule, fill.color, resolved, fill.style, None, fill.mask,
         )
     }
 

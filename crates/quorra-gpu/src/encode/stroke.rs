@@ -105,7 +105,18 @@ impl Encoder<'_> {
         self.clock.geometry(span);
         match paint {
             Paint::Solid(color) => {
-                self.push_coverage(&stroked, Rule::NonZero, color, &resolved, mask)
+                // The width goes with the expansion, and it is the whole reason a stroke
+                // reaches the lane chooser differently from a fill: a rule at 45° has a
+                // device box far wider than the mark, and its own width is the only bound
+                // on how thin it is (ADR 0070).
+                self.push_coverage(
+                    &stroked,
+                    Rule::NonZero,
+                    color,
+                    &resolved,
+                    Some(stroke.width),
+                    mask,
+                )
             }
             // Every non-solid paint is one quad over the stroke's coverage: which one it
             // is decided by `rare_paint`, and nothing about the difference reaches here.
