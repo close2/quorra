@@ -241,6 +241,21 @@ Nothing this round touched caused it: the pixel proof runs at 640 × 480 *before
 phase resizes anything, and it is a pre-existing wall clock newly exposed by being run
 somewhere it had never run.
 
+> **Taken on 2026-08-18 — ADR 0068, `doc/notes-present-settle.md`.** The wall clock is
+> gone. **One correction to the fix named above**: *"capture until two consecutive captures
+> agree"* is not sufficient on its own — while the new picture is in flight every capture
+> reads the old one and every pair of them agrees, so that criterion settles instantly on
+> exactly the stale window this section records, and is green for ever. The criterion built
+> is *"two consecutive captures agree **on something other than what the window was last
+> proven to show**"*, which makes the settles a chain and needs a first link (an erase to
+> the presenter's own clear). It was measured doing the work rather than merely passing:
+> over 20 completed real-display runs at loads 7.75 to 55.77, **27 of 100 settles took a
+> first capture that was not the settled window** — the capture the old instrument asserted
+> on. And the search for a synchronisation to use instead came back empty and that is a
+> finding: wgpu 30 exposes no present-completion signal and `VK_KHR_present_wait` at all,
+> and the X Present extension's `PresentCompleteNotify` goes to the connection `wgpu` opened
+> inside itself.
+
 ## 5. Two traps this round paid for
 
 **`xwd` cannot see a Wayland window, and the failure does not say "Wayland".** `present_thread`
