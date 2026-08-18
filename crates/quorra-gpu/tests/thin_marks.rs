@@ -388,6 +388,40 @@ fn the_device_lane_meets_the_clause_down_to_its_sample_spacing() {
     );
 }
 
+/// The **upper edge of the recorded gap below**, which is the width every option in
+/// `doc/notes-thin-mark-options.md` is priced against: at exactly one sample-column spacing
+/// the device lane holds §10.7.4 at *every* sub-pixel position, where a tenth of a pixel
+/// holds it at four of ten.
+///
+/// The boundary is arithmetic rather than empirical, and stating it is the point of the
+/// test: `Options::coverage_samples` lays `n` samples on a `√n × √n` grid whose columns sit
+/// at `(k + ½)/√n` of a pixel, so consecutive columns are `1/√n` apart — and so is the wrap
+/// across a pixel boundary, because the grid is symmetric about the centre. An interval of
+/// length `1/√n` therefore contains a column wherever it lands, and a mark that catches a
+/// column has ink.
+///
+/// [`the_device_lane_meets_the_clause_down_to_its_sample_spacing`] asserts widths at or
+/// above the spacing at **one** position; this asserts that the position is not what carries
+/// them, which is what any rule keyed on this width would rely on.
+#[test]
+fn at_the_sample_spacing_the_device_lane_holds_the_clause_at_every_position() {
+    let w = sample_column_spacing();
+    let mut device = device_with(Coverage::Gpu);
+    for step in 0..10 {
+        let left = 20.0 + step as f32 / 10.0;
+        let scene = rasterised_bar_at(&mut device, left, w);
+        let ink = row_ink(&render(&mut device, &scene, TALL), TALL, TALL / 2);
+        assert_the_clause_holds(ink, w, &format!("the device lane at {left}"));
+        // And no further from the shape's area than the grid's own step, which is the
+        // bound the neighbouring test states for this lane.
+        assert!(
+            (ink - w).abs() <= sample_column_spacing(),
+            "the device lane at {left}: {ink} of ink for a mark of {w}, further from the \
+             shape's area than one sample column"
+        );
+    }
+}
+
 /// **A recorded gap, not a claim that this is right.** Below one sample-column spacing the
 /// device lane's mark can fall entirely between two columns of sample points and read zero
 /// — which is the disappearance §10.7.4's rule exists to forbid:
