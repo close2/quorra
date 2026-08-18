@@ -26,6 +26,7 @@ use quorra_scene::{Point, Rect};
 use super::clips::ResolvedClip;
 use super::device_space::tile_side;
 use super::instance::CoverageSource;
+use super::thin::ThinAxis;
 use super::{DrawStyle, Encoder};
 use crate::atlas::CacheProspect;
 use crate::error::RenderError;
@@ -35,6 +36,11 @@ use crate::startup::Coverage;
 impl Encoder<'_> {
     /// The path lane: rasterise coverage for these polylines over the visible
     /// region, multiply residue clips in, pack into scratch, emit the quad.
+    ///
+    /// `stroke_width` is the mark's resolved device width where it is a stroke's
+    /// expansion and `None` where it is a fill's outline — the second half of what
+    /// [`ThinAxis`] is measured from, and the only thing about a stroke that survives the
+    /// expansion into polylines.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
     pub(super) fn push_coverage(
@@ -43,12 +49,14 @@ impl Encoder<'_> {
         rule: Rule,
         color: quorra_scene::Color,
         resolved: &ResolvedClip,
+        stroke_width: Option<f32>,
         mask: Option<u32>,
     ) -> Result<(), RenderError> {
         let style = self.style;
-        self.push_coverage_styled(polylines, rule, color, resolved, style, mask)
+        self.push_coverage_styled(polylines, rule, color, resolved, style, stroke_width, mask)
     }
 
+    /// As [`Encoder::push_coverage`], with the drawing style named rather than inherited.
     #[allow(clippy::too_many_arguments)] // one draw's parameters, threaded once
     #[allow(clippy::cast_precision_loss)]
     pub(super) fn push_coverage_styled(
@@ -58,6 +66,7 @@ impl Encoder<'_> {
         color: quorra_scene::Color,
         resolved: &ResolvedClip,
         style: DrawStyle,
+        stroke_width: Option<f32>,
         mask: Option<u32>,
     ) -> Result<(), RenderError> {
         // Already-flattened geometry — a stroke's expansion, an oblique rectangle — has
@@ -77,6 +86,10 @@ impl Encoder<'_> {
                 CacheProspect::TooLarge,
                 tile_side(bounds.0, bounds.2),
                 tile_side(bounds.1, bounds.3),
+                // The expansion's own device box, which for an axis-aligned rule is the
+                // stroke's width exactly; `stroke_width` is what carries a *turned* rule,
+                // whose box says nothing about how thin it is (ADR 0070).
+                ThinAxis::of(bounds, stroke_width),
                 flattened_triangles,
             )
         {
@@ -192,7 +205,8 @@ impl Encoder<'_> {
 
     /// Whether this command takes the GPU lane.
     ///
-    /// Four conditions, and every one of them is a measurement rather than a taste.
+    /// Five conditions. Four are a measurement rather than a taste, and the fifth is a
+    /// clause — which is the one asymmetry in this list and is stated where it is asked.
     ///
     /// **The caller asked for it.** [`Coverage::Gpu`] is a request; the rest decides
     /// where honouring it is a win.
@@ -217,6 +231,25 @@ impl Encoder<'_> {
     /// scene places a single time is rasterised, uploaded and read once — the cache's
     /// whole cost and none of its benefit. In both of those the device wins at every
     /// size measured.
+    ///
+    /// **And the sample grid can still find the mark** (ADR 0070). This one is not a cost
+    /// comparison, and it is deliberately allowed to overrule one: a mark whose thin axis
+    /// is below the grid's own column spacing can fall between two columns and read zero,
+    /// which is the disappearance ISO 32000-2 §10.7.4 forbids by name —
+    ///
+    /// > This ensures that no shape ever disappears as a result of unfavourable placement
+    /// > relative to the device pixel grid, as might happen with other possible scan
+    /// > conversion rules.
+    ///
+    /// — so such a mark keeps the processor lane, whose coverage is the shape's exact
+    /// area, whatever the four costs above would have said. [`ThinAxis`] is what "thin"
+    /// means here and what that measure misses;
+    /// [`sample_column_spacing`](super::thin::sample_column_spacing) is where the
+    /// threshold comes from and why it is not a constant. The price is that those marks
+    /// are rasterised on the CPU: **35 marks on 7 pages of the caller's 954-page corpus at
+    /// scale 1, 26 on 2 pages at 4× and 16 on 1 page at 8×**, each of them under a quarter
+    /// pixel across and so among the smallest tiles the sheet ever holds
+    /// (`doc/notes-thin-mark-options.md` §2.2).
     ///
     /// Measured on RADV at sixteen samples by `tests/lane_crossover.rs`, with the lane
     /// forced either way — a page of star outlines at 3 600 × 3 600, drawn to a texture
@@ -248,9 +281,18 @@ impl Encoder<'_> {
         cache: CacheProspect,
         width: u32,
         height: u32,
+        thin: ThinAxis,
         triangles: usize,
     ) -> bool {
-        if self.coverage != Coverage::Gpu || resolved.residues.is_some() || cache.worth_caching() {
+        // Ordered by what each costs to ask, not by which matters most: the setting is one
+        // comparison and answers `false` for the caller's default configuration on sight,
+        // and the thin-axis test is one float compare against a spacing the frame computed
+        // once (`Encoder::sample_spacing`).
+        if self.coverage != Coverage::Gpu
+            || resolved.residues.is_some()
+            || cache.worth_caching()
+            || thin.can_fall_between_sample_columns(self.sample_spacing)
+        {
             return false;
         }
         let area = u64::from(width).saturating_mul(u64::from(height));

@@ -70,6 +70,8 @@
 //!   than once per mark (ADR 0049).
 //! - `coverage` — where a mark's coverage comes from, and the conditions that choose
 //!   between the two ways of making one.
+//! - `thin` — how thin a mark is, and the width below which the device lane can no
+//!   longer promise ISO 32000-2 §10.7.4 (ADR 0070).
 //! - `scratch` — the frame's coverage sheet, and the shelf packing that fills it
 //!   (ADR 0021, ADR 0034).
 //! - `hull` — the memo that bounds a placement by translating its neighbour's box
@@ -101,6 +103,7 @@ mod rect;
 mod residue;
 mod scratch;
 mod stroke;
+mod thin;
 
 #[cfg(test)]
 mod tests;
@@ -146,6 +149,14 @@ struct Encoder<'a> {
     visible: Rect,
     /// Which lane makes coverage bytes (ADR 0016).
     coverage: Coverage,
+    /// The device lane's sample-column spacing in device pixels, from the frame's own
+    /// sample count — the width ADR 0070's fifth lane condition compares a mark's thin
+    /// axis against.
+    ///
+    /// Computed once here rather than per mark: it is a square root, and the condition it
+    /// feeds is asked at both of [`Encoder::take_gpu_lane`]'s call sites for every solid
+    /// fill and every stroke on a page.
+    sample_spacing: f32,
     /// The GPU lane's triangles and tiles, empty under [`Coverage::Cpu`].
     winding: crate::winding::Sheet,
     /// How often the scene places each shape, taken before the walk (ADR 0029).
@@ -250,6 +261,9 @@ pub(crate) fn encode(
     atlas: &mut AtlasStore,
     quantum: Option<u16>,
     coverage: Coverage,
+    // The device's *effective* sample count — already rounded to a square and clamped by
+    // construction, so this is what the grid really is rather than what was asked for.
+    coverage_samples: u32,
     instrument: bool,
     threads: usize,
 ) -> Result<Encoded, RenderError> {
@@ -271,6 +285,7 @@ pub(crate) fn encode(
         viewport,
         visible: target_rect(viewport),
         coverage,
+        sample_spacing: thin::sample_column_spacing(coverage_samples),
         winding: crate::winding::Sheet::default(),
         // One pass over the commands before the walk: the lane a fill takes depends on
         // how many *other* fills share its tile, which is not knowable from the fill

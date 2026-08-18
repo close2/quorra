@@ -167,6 +167,7 @@ impl Device {
             &mut self.atlas,
             self.glyph_quantum,
             self.coverage,
+            self.coverage_samples,
             self.instrument_encode,
             self.encode_threads,
         )

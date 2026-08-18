@@ -60,6 +60,7 @@ fn encodes_one_instance_with_premultiplied_color() {
         &mut empty_atlas(),
         Some(16),
         Coverage::Cpu,
+        crate::startup::DEFAULT_COVERAGE_SAMPLES,
         false,
         1,
     )
@@ -119,6 +120,7 @@ fn oblique_rect_takes_the_path_lane() {
         &mut empty_atlas(),
         Some(16),
         Coverage::Cpu,
+        crate::startup::DEFAULT_COVERAGE_SAMPLES,
         false,
         1,
     )
@@ -190,6 +192,7 @@ fn a_solid_fill_of_a_rectangle_takes_the_rectangle_lane() {
         &mut empty_atlas(),
         Some(16),
         Coverage::Cpu,
+        crate::startup::DEFAULT_COVERAGE_SAMPLES,
         false,
         1,
     )
@@ -231,6 +234,7 @@ fn a_solid_fill_of_a_rectangle_takes_the_rectangle_lane() {
         &mut empty_atlas(),
         Some(16),
         Coverage::Cpu,
+        crate::startup::DEFAULT_COVERAGE_SAMPLES,
         false,
         1,
     )
@@ -249,6 +253,7 @@ fn a_solid_fill_of_a_rectangle_takes_the_rectangle_lane() {
         &mut empty_atlas(),
         Some(16),
         Coverage::Cpu,
+        crate::startup::DEFAULT_COVERAGE_SAMPLES,
         false,
         1,
     )
@@ -278,6 +283,7 @@ fn an_oblique_fill_of_a_rectangle_keeps_the_path_lane() {
         &mut empty_atlas(),
         Some(16),
         Coverage::Cpu,
+        crate::startup::DEFAULT_COVERAGE_SAMPLES,
         false,
         1,
     )
@@ -300,6 +306,7 @@ fn budget_is_checked_before_allocation() {
         &mut empty_atlas(),
         Some(16),
         Coverage::Cpu,
+        crate::startup::DEFAULT_COVERAGE_SAMPLES,
         false,
         1,
     ) {
@@ -325,6 +332,7 @@ fn blank_scene_encodes_to_nothing() {
         &mut empty_atlas(),
         Some(16),
         Coverage::Cpu,
+        crate::startup::DEFAULT_COVERAGE_SAMPLES,
         false,
         1,
     )

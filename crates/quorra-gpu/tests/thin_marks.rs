@@ -57,16 +57,38 @@
 //! 3. proportionality is **ours** (ADR 0005's exact-area coverage), not the clause's, and
 //!    it is asserted as our choice rather than as a normative requirement.
 //!
-//! # The two lanes do not agree, and the difference is recorded here
+//! # The two lanes do not agree, and one shape class is settled by the clause
 //!
 //! `Coverage::Cpu` computes the exact area a shape covers of each pixel; `Coverage::Gpu`
 //! counts samples on an ordered grid (`Options::coverage_samples`, sixteen on a 4 × 4 grid
 //! by default). A mark narrower than the grid's spacing falls **between** the sample
-//! columns, and on the device lane it then reads zero — which is the disappearance
-//! §10.7.4's rule exists to forbid. The numbers are in
-//! [`the_device_lane_lets_a_mark_between_two_sample_columns_vanish`], and
-//! `doc/notes-hayro-paints.md` §2 carries them to the owner. No sample count removes the
-//! effect; only an area rule does.
+//! columns, and the device lane then reads zero — which is the disappearance §10.7.4's
+//! rule exists to forbid, reached by the route the clause names. No sample count removes
+//! the effect: halving the spacing halves the width at which it starts.
+//!
+//! **ADR 0070 closes it in the lane chooser rather than in the sample grid.** A mark whose
+//! thin axis is below `1/√coverage_samples` of a device pixel keeps the processor lane, so
+//! a `Coverage::Gpu` frame draws such a mark with the exact area the processor lane
+//! computes. Two things are therefore asserted here and they are different assertions:
+//!
+//! - **the clause, on both lanes** —
+//!   [`a_mark_below_the_sample_spacing_is_drawn_at_every_position_on_both_lanes`] sweeps
+//!   ten sub-pixel positions at every sub-pixel width and requires ink at all of them;
+//! - **that the condition is what did it, and only below the spacing** —
+//!   [`the_lane_is_declined_exactly_below_the_sample_spacing`] and
+//!   [`a_turned_hairline_stroke_is_declined_by_its_own_width`], which read the lane
+//!   from the frame's own counters rather than from its pixels. A fixture whose subject
+//!   is a lane choice has to assert the lane (`doc/HANDOVER.md`'s `m45.rs` trap), and a
+//!   fixture whose subject is a *difference* has to show the difference is reachable —
+//!   so each of those two measures the width above the spacing as well and requires the
+//!   device lane to be taken there.
+//!
+//! The residual ADR 0070 states and does not close: a hairline at 45° given as a **fill**
+//! has a device box far wider than the mark and no width of its own to be read instead, so
+//! it keeps the device lane and *dots* — uneven coverage along its length, not a
+//! disappearance. A 45° **stroke** is caught, because §8.4.3's resolved width bounds it at
+//! every angle, and that is what
+//! [`a_turned_hairline_stroke_is_declined_by_its_own_width`] holds.
 //!
 //! # What is not here
 //!
@@ -170,6 +192,27 @@ fn row_ink(pixels: &[u8], side: u32, y: u32) -> f32 {
 /// invites a comparison against zero.
 fn inked_pixels(pixels: &[u8], side: u32, y: u32) -> u32 {
     (0..side).filter(|x| alpha(pixels, side, *x, y) > 0).count() as u32
+}
+
+/// The bytes one frame scheduled for CPU→GPU transfer — the instrument that says which
+/// coverage producer ran, without a threshold anybody has to pick.
+///
+/// The processor lane *uploads* its rasterised tile into the sheet; the device lane draws
+/// its own and uploads a winding target instead (`Sheet::device_bytes`, charged in
+/// `upload_scratch`). So for one scene and one viewport, `Coverage::Gpu` reports **exactly**
+/// the `Coverage::Cpu` figure when no mark took the device lane — the same tiles, the same
+/// shelves, the same sheet — and strictly more when one did. An equality and a strict
+/// inequality, rather than a constant read off a run.
+fn uploaded(device: &mut Device, scene: &Scene, side: u32) -> u64 {
+    device
+        .render(
+            scene,
+            &Viewport::full(side, side, Affine::IDENTITY),
+            Target::Readback,
+        )
+        .expect("the frame is inside every budget")
+        .counters()
+        .bytes_uploaded
 }
 
 fn black() -> Paint {
@@ -306,8 +349,12 @@ fn a_rasterised_mark_thinner_than_a_pixel_keeps_ink_proportional_to_its_width() 
     }
 }
 
-/// The control for the two tests below, and the reason [`TALL`] is as large as it is: under
+/// The control for the tests below, and the reason [`TALL`] is as large as it is: under
 /// `Coverage::Gpu` this fixture really is drawn by the device lane.
+///
+/// Its bar is **half a device pixel**, which is above the sample-column spacing at every
+/// sample count `Options::coverage_samples` admits — so ADR 0070's fifth condition does not
+/// fire here, and this stays a statement about the four cost conditions alone.
 ///
 /// The proof is the one `tests/coverage_lanes.rs` uses — only the device lane allocates the
 /// `rgba16float` winding texture, so only the device lane is charged for it. A budget the
@@ -422,54 +469,171 @@ fn at_the_sample_spacing_the_device_lane_holds_the_clause_at_every_position() {
     }
 }
 
-/// **A recorded gap, not a claim that this is right.** Below one sample-column spacing the
-/// device lane's mark can fall entirely between two columns of sample points and read zero
-/// — which is the disappearance §10.7.4's rule exists to forbid:
+/// **The requirement, on both lanes** (ADR 0070), where this file recorded a gap until
+/// 2026-08-18. Below one sample-column spacing the device lane's own grid can miss a mark
+/// entirely — it fell between two columns and read zero at six of the ten positions swept
+/// below — which is the disappearance §10.7.4's rule exists to forbid:
 ///
 /// > This ensures that no shape ever disappears as a result of unfavourable placement
 /// > relative to the device pixel grid, as might happen with other possible scan conversion
 /// > rules.
 ///
-/// The processor lane, on the same widths and the same positions, reads the shape's exact
-/// area. This test exists so the gap is visible and so a fix moves a gate rather than
-/// nothing; `doc/notes-hayro-paints.md` §2 carries the numbers, and no sample count removes
-/// the effect — halving the spacing halves the width at which it starts.
+/// A mark that thin now keeps the processor lane whatever `Options::coverage` says, so
+/// **both settings draw it, at every position, with the shape's exact area**. The second
+/// half of that is the stronger claim and is asserted as such: it is what distinguishes
+/// "the device lane got better" from "the mark is drawn by the producer that can draw it".
+///
+/// Ten sub-pixel positions across one pixel, because "unfavourable placement" is a property
+/// of where the mark lands and a single position would say nothing about how often; every
+/// sub-pixel width in [`SUB_PIXEL_WIDTHS`], because the widths above the spacing are the
+/// control that the sweep is not asserting one lane against itself.
 #[test]
-fn the_device_lane_lets_a_mark_between_two_sample_columns_vanish() {
-    let thin = 0.1_f32;
-    assert!(
-        thin < sample_column_spacing(),
-        "this test is about a mark narrower than the sample grid's step"
-    );
-
-    let mut processor = device_with(Coverage::Cpu);
-    let mut sampled = device_with(Coverage::Gpu);
-    // Ten sub-pixel positions across one pixel: the "unfavourable placement" is a property
-    // of where the mark lands, so a single position would say nothing about how often.
-    let mut vanished = 0_u32;
-    for step in 0..10 {
-        let left = 20.0 + step as f32 / 10.0;
-        let scene = rasterised_bar_at(&mut processor, left, thin);
-        let cpu_ink = row_ink(&render(&mut processor, &scene, TALL), TALL, TALL / 2);
-        assert!(
-            (cpu_ink - thin).abs() <= 1.0 / 255.0,
-            "the processor lane holds the clause at every position: {cpu_ink} at {left}"
-        );
-
-        let scene = rasterised_bar_at(&mut sampled, left, thin);
-        if inked_pixels(&render(&mut sampled, &scene, TALL), TALL, TALL / 2) == 0 {
-            vanished += 1;
+fn a_mark_below_the_sample_spacing_is_drawn_at_every_position_on_both_lanes() {
+    let mut below = 0_u32;
+    for coverage in [Coverage::Cpu, Coverage::Gpu] {
+        let mut device = device_with(coverage);
+        let lane = format!("{coverage:?}");
+        for w in SUB_PIXEL_WIDTHS {
+            if w < sample_column_spacing() && coverage == Coverage::Cpu {
+                below += 1;
+            }
+            for step in 0..10 {
+                let left = 20.0 + step as f32 / 10.0;
+                let scene = rasterised_bar_at(&mut device, left, w);
+                let ink = row_ink(&render(&mut device, &scene, TALL), TALL, TALL / 2);
+                assert_the_clause_holds(ink, w, &format!("{lane} at {left}"));
+                // Below the spacing the mark is on the processor lane under **either**
+                // setting, so ADR 0005's exact area is the answer both must give; at or
+                // above it the device lane may still draw it, and then the grid's own step
+                // is the bound (the neighbouring tests state that one).
+                let bound = if w < sample_column_spacing() {
+                    1.0 / 255.0
+                } else {
+                    sample_column_spacing()
+                };
+                assert!(
+                    (ink - w).abs() <= bound,
+                    "{lane} at {left}: {ink} of ink for a mark of {w}, further than {bound} \
+                     from the shape's own area"
+                );
+            }
         }
     }
     assert!(
-        vanished > 0,
-        "the gap this test records has closed on its own — read it, then delete it or \
-         turn it into the requirement"
+        below >= 3,
+        "the sweep no longer contains widths below the sample spacing, so the property \
+         this test exists for was not exercised"
     );
+}
+
+/// **The lane, read from the frame rather than from its pixels** — and the control that
+/// ADR 0070's condition fires *only* below the sample spacing.
+///
+/// The subject here is a lane choice, so the lane is asserted (`doc/HANDOVER.md`'s
+/// `m45.rs` trap), and the subject is a *difference*, so the width above the spacing is
+/// measured too and required to miss: a condition that declined every thin mark, or none,
+/// fails one of these two halves. [`uploaded`] is the instrument and says why it needs no
+/// constant.
+#[test]
+fn the_lane_is_declined_exactly_below_the_sample_spacing() {
+    let spacing = sample_column_spacing();
+    let mut processor = device_with(Coverage::Cpu);
+    let mut sampled = device_with(Coverage::Gpu);
+
+    // At exactly one column spacing the grid catches the mark wherever it lands, so the
+    // condition must not fire and the four cost conditions choose — and for this fixture
+    // they choose the device.
+    let scene = rasterised_bar(&mut processor, spacing);
+    let at_spacing_cpu = uploaded(&mut processor, &scene, TALL);
+    let scene = rasterised_bar(&mut sampled, spacing);
+    let at_spacing_gpu = uploaded(&mut sampled, &scene, TALL);
     assert!(
-        vanished < 10,
-        "the mark vanished at every one of ten positions, which is a different and worse \
-         defect than the one recorded here"
+        at_spacing_gpu > at_spacing_cpu,
+        "a mark of exactly {spacing} device pixels must still reach the device lane, or \
+         the halves below compare one lane with itself: {at_spacing_gpu} bytes against \
+         the processor lane's {at_spacing_cpu}"
+    );
+
+    // Just below it, the same bar on the same fixture must be on the processor lane, and
+    // "the same" is exact: no winding target, so the identical upload.
+    let thin = spacing * 0.9;
+    let scene = rasterised_bar(&mut processor, thin);
+    let thin_cpu = uploaded(&mut processor, &scene, TALL);
+    let scene = rasterised_bar(&mut sampled, thin);
+    let thin_gpu = uploaded(&mut sampled, &scene, TALL);
+    assert_eq!(
+        thin_gpu, thin_cpu,
+        "a mark of {thin} device pixels is narrower than the grid's column spacing of \
+         {spacing}, so §10.7.4 requires the producer that cannot lose it: the frame \
+         uploaded {thin_gpu} bytes where the processor lane uploads {thin_cpu}"
+    );
+}
+
+/// The half of `ThinAxis`'s definition that a bounding box cannot reach: a **stroke** is
+/// measured by §8.4.3's resolved device width, so a hairline at 45° — whose box is as wide
+/// as the target — is declined too.
+///
+/// The rejected reading is a condition keyed on the device box alone, and it is measured
+/// here and required to miss: the *same fixture at the same angle*, a stroke wide enough
+/// that the grid can find it, must take the device lane. A condition keyed on the box would
+/// leave both halves on the device; one that declined every stroke would leave neither.
+#[test]
+fn a_turned_hairline_stroke_is_declined_by_its_own_width() {
+    fn diagonal(device: &mut Device, width: f32) -> Scene {
+        let outline = device
+            .upload_outline(&[
+                Segment::MoveTo(Point::new(2.3, 2.3)),
+                Segment::LineTo(Point::new(SIZE as f32 - 2.3, SIZE as f32 - 2.3)),
+            ])
+            .expect("upload");
+        let mut builder = SceneBuilder::new();
+        builder
+            .stroke(
+                outline,
+                Affine::IDENTITY,
+                Stroke {
+                    width,
+                    cap: LineCap::Butt,
+                    join: LineJoin::Miter,
+                    miter_limit: 10.0,
+                },
+                black(),
+                None,
+                BlendMode::Normal,
+                None,
+            )
+            .expect("a valid stroke");
+        builder.finish()
+    }
+
+    let spacing = sample_column_spacing();
+    let mut processor = device_with(Coverage::Cpu);
+    let mut sampled = device_with(Coverage::Gpu);
+
+    // Wide enough for the grid: the device lane, which is what says this diagonal fixture
+    // reaches the lane at all.
+    let scene = diagonal(&mut processor, spacing);
+    let wide_cpu = uploaded(&mut processor, &scene, SIZE);
+    let scene = diagonal(&mut sampled, spacing);
+    let wide_gpu = uploaded(&mut sampled, &scene, SIZE);
+    assert!(
+        wide_gpu > wide_cpu,
+        "a turned stroke of {spacing} device pixels must reach the device lane, or the \
+         half below compares one lane with itself: {wide_gpu} against {wide_cpu}"
+    );
+
+    // Thinner than the grid's step. Its device box is unchanged and still 60 pixels
+    // across, so only the stroke's own width can decline it.
+    let thin = spacing * 0.4;
+    let scene = diagonal(&mut processor, thin);
+    let thin_cpu = uploaded(&mut processor, &scene, SIZE);
+    let scene = diagonal(&mut sampled, thin);
+    let thin_gpu = uploaded(&mut sampled, &scene, SIZE);
+    assert_eq!(
+        thin_gpu, thin_cpu,
+        "a stroke {thin} device pixels wide is below the grid's column spacing at every \
+         angle, and its box says nothing about that: {thin_gpu} bytes against the \
+         processor lane's {thin_cpu}"
     );
 }
 
