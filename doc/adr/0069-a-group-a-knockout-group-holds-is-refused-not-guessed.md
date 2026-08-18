@@ -193,6 +193,14 @@ not move were rendered and compared, not skipped**: run alone, both columns prin
 non-isolated-knockout refusal unchanged. `0 not comparable` is the load-bearing figure
 there.
 
+> **Confirmed 2026-08-18** against a later round's contrary aside, which is retracted in ADR
+> 0070. Re-measured at `3f6df72` (the mainline commit before this one's merge) and at `main`
+> `c443bc2`, in one copy of the caller's tree at `829d7faa`: the CPU scale-4 lane reads
+> `938 / 11 / 3 / 22` in both columns with all 14 page lines identical, and
+> `issue18032.pdf`'s refusal line is byte-identical — it is `render-quorra`'s own §11.4.6
+> check, raised before a scene is built, and `KnockoutElementGroupUnsupported`'s message
+> appears in neither column. `doc/notes-release-matrix.md`, "A refusal that did not move".
+
 `doc/notes-nested-knockout.md` §9 has the matrix, the method and the one ratchet — the
 caller's `REFUSED_AT_FOUR`, failing in both columns with character-identical lists because
 both are patched past ADR 0057 while their lock is not. Their re-baseline, three matrices

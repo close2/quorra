@@ -135,6 +135,27 @@ per-page lines compared rather than only the totals (`doc/HANDOVER.md`'s corpus 
 
 <<MATRIX>>
 
+> **Corrected 2026-08-18.** Two things about this section, both found by a later round and
+> left in place rather than rewritten.
+>
+> **The matrix was never transcribed.** `<<MATRIX>>` above and `<<DEFECTS>>` below are the
+> round's own placeholders, merged unreplaced. They are not filled in from here: the
+> settlement round measured one lane at one scale, and writing the other rows from anything
+> but a run is the failure `doc/notes-release-matrix.md` exists to prevent.
+>
+> **This round's report explained its scale-4 exit 101 by saying the caller's `REFUSED_AT_FOUR`
+> "does not list `issue18032.pdf`, which ADR 0069 began refusing two commits before mine".
+> Both halves are wrong.** That ratchet does list `issue18032.pdf`, and has since the caller's
+> five-hundred-and-twelfth session (their ADR 0327, 2026-08-08, eight days before ADR 0069);
+> the page is refused by `render-quorra`'s own §11.4.6 check *before* a `quorra_scene::Scene`
+> is built, so `SceneError::KnockoutElementGroupUnsupported` cannot reach it, and its message
+> appears nowhere in either column. The one element of the failing assertion's difference is
+> `bug1703683_page2_reduced.pdf`, which ADR 0057 moved from **refused to drawn** — the
+> opposite direction, and the caller's outstanding re-baseline that the three matrices before
+> this one already record. **No corpus page moved from drawn to refused.** Evidence, both
+> revisions in one copy of their tree at `829d7faa`:
+> `doc/notes-release-matrix.md`, "A refusal that did not move".
+
 ## Why the area rule was declined
 
 `doc/notes-thin-mark-options.md` §3 sketched an exact-area rule on the device lane, and §4

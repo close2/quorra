@@ -544,28 +544,29 @@ fn the_lane_is_declined_exactly_below_the_sample_spacing() {
     // condition must not fire and the four cost conditions choose — and for this fixture
     // they choose the device.
     let scene = rasterised_bar(&mut processor, spacing);
-    let at_spacing_cpu = uploaded(&mut processor, &scene, TALL);
+    let at_spacing_on_processor = uploaded(&mut processor, &scene, TALL);
     let scene = rasterised_bar(&mut sampled, spacing);
-    let at_spacing_gpu = uploaded(&mut sampled, &scene, TALL);
+    let at_spacing_on_device = uploaded(&mut sampled, &scene, TALL);
     assert!(
-        at_spacing_gpu > at_spacing_cpu,
+        at_spacing_on_device > at_spacing_on_processor,
         "a mark of exactly {spacing} device pixels must still reach the device lane, or \
-         the halves below compare one lane with itself: {at_spacing_gpu} bytes against \
-         the processor lane's {at_spacing_cpu}"
+         the halves below compare one lane with itself: {at_spacing_on_device} bytes \
+         against the processor lane's {at_spacing_on_processor}"
     );
 
     // Just below it, the same bar on the same fixture must be on the processor lane, and
     // "the same" is exact: no winding target, so the identical upload.
     let thin = spacing * 0.9;
     let scene = rasterised_bar(&mut processor, thin);
-    let thin_cpu = uploaded(&mut processor, &scene, TALL);
+    let thin_on_processor = uploaded(&mut processor, &scene, TALL);
     let scene = rasterised_bar(&mut sampled, thin);
-    let thin_gpu = uploaded(&mut sampled, &scene, TALL);
+    let thin_on_device = uploaded(&mut sampled, &scene, TALL);
     assert_eq!(
-        thin_gpu, thin_cpu,
+        thin_on_device, thin_on_processor,
         "a mark of {thin} device pixels is narrower than the grid's column spacing of \
          {spacing}, so §10.7.4 requires the producer that cannot lose it: the frame \
-         uploaded {thin_gpu} bytes where the processor lane uploads {thin_cpu}"
+         uploaded {thin_on_device} bytes where the processor lane uploads \
+         {thin_on_processor}"
     );
 }
 
@@ -613,27 +614,28 @@ fn a_turned_hairline_stroke_is_declined_by_its_own_width() {
     // Wide enough for the grid: the device lane, which is what says this diagonal fixture
     // reaches the lane at all.
     let scene = diagonal(&mut processor, spacing);
-    let wide_cpu = uploaded(&mut processor, &scene, SIZE);
+    let wide_on_processor = uploaded(&mut processor, &scene, SIZE);
     let scene = diagonal(&mut sampled, spacing);
-    let wide_gpu = uploaded(&mut sampled, &scene, SIZE);
+    let wide_on_device = uploaded(&mut sampled, &scene, SIZE);
     assert!(
-        wide_gpu > wide_cpu,
+        wide_on_device > wide_on_processor,
         "a turned stroke of {spacing} device pixels must reach the device lane, or the \
-         half below compares one lane with itself: {wide_gpu} against {wide_cpu}"
+         half below compares one lane with itself: {wide_on_device} against \
+         {wide_on_processor}"
     );
 
     // Thinner than the grid's step. Its device box is unchanged and still 60 pixels
     // across, so only the stroke's own width can decline it.
     let thin = spacing * 0.4;
     let scene = diagonal(&mut processor, thin);
-    let thin_cpu = uploaded(&mut processor, &scene, SIZE);
+    let thin_on_processor = uploaded(&mut processor, &scene, SIZE);
     let scene = diagonal(&mut sampled, thin);
-    let thin_gpu = uploaded(&mut sampled, &scene, SIZE);
+    let thin_on_device = uploaded(&mut sampled, &scene, SIZE);
     assert_eq!(
-        thin_gpu, thin_cpu,
+        thin_on_device, thin_on_processor,
         "a stroke {thin} device pixels wide is below the grid's column spacing at every \
-         angle, and its box says nothing about that: {thin_gpu} bytes against the \
-         processor lane's {thin_cpu}"
+         angle, and its box says nothing about that: {thin_on_device} bytes against the \
+         processor lane's {thin_on_processor}"
     );
 }
 

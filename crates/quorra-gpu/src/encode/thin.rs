@@ -178,8 +178,7 @@ mod tests {
     fn a_mark_at_exactly_the_spacing_is_not_declined() {
         let spacing = sample_column_spacing(16);
         assert!(
-            !ThinAxis::of((0.0, 0.0, spacing, 10.0), None)
-                .can_fall_between_sample_columns(spacing),
+            !ThinAxis::of((0.0, 0.0, spacing, 10.0), None).can_fall_between_sample_columns(spacing),
             "at exactly one column spacing the grid cannot miss the mark"
         );
         assert!(
@@ -194,8 +193,7 @@ mod tests {
     #[test]
     fn a_non_finite_thin_axis_declines_nothing() {
         assert!(
-            !ThinAxis::of((0.0, 0.0, f32::NAN, 10.0), None)
-                .can_fall_between_sample_columns(0.25),
+            !ThinAxis::of((0.0, 0.0, f32::NAN, 10.0), None).can_fall_between_sample_columns(0.25),
             "a NaN extent answers false, leaving the four cost conditions to choose"
         );
     }
