@@ -10,33 +10,62 @@
 //!   content.
 //! - **The stack is the depth bound.** §1.1 of the brief bounds the caller's display
 //!   list at [`MAX_GROUP_DEPTH`], and the count that refuses is this one.
-//! - **The stack carries the knockout question.** Whether a command lands inside a
-//!   knockout group is a property of the frames above it, not of the command, and
-//!   §11.6.5 makes a mask body start a fresh stack rather than inherit one.
+//! - **The stack carries the knockout question, and it is two questions.** Whether a
+//!   command lands inside a knockout group is a property of the frames above it, not of
+//!   the command, and §11.6.5 makes a mask body start a fresh stack rather than inherit
+//!   one. [`Knockout`] says why one boolean is not enough.
 
 use super::{Command, MAX_GROUP_DEPTH, SceneBuilder};
 use crate::error::SceneError;
 
+/// What §11.4.6 makes of the commands landing in one frame.
+///
+/// **Two questions, and they have different answers**, which is why this is a pair rather
+/// than a flag. §11.4.6 governs the *elements* of a knockout group — the commands one
+/// level down — and a group two levels down is an element of its own parent, which
+/// composites it by §11.3.6 like any other. So a rule about "an element of a knockout
+/// group" reads [`Knockout::element`] and a rule about "anywhere below one" reads
+/// [`Knockout::inside`], and reading the wrong one is a refusal in the wrong place: the
+/// caller's expansion of §11.4.6 writes each half as a group whose own elements may be
+/// groups (ADR 0069), and that construction is correct at every depth.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Knockout {
+    /// The group *immediately* enclosing these commands is a knockout group, so §11.4.6
+    /// weights each of them by its own source shape.
+    pub element: bool,
+    /// Some group enclosing these commands, at any depth, is a knockout group — the
+    /// question
+    /// [`NonIsolatedReason::InsideKnockoutGroup`](crate::error::NonIsolatedReason::InsideKnockoutGroup)
+    /// asks.
+    pub inside: bool,
+}
+
+impl Knockout {
+    /// The page's own context, and a soft mask's: §11.6.5 renders the mask group on its
+    /// own, so a knockout group outside a `mask()` call is not above the mask's content.
+    pub(super) const NONE: Self = Self {
+        element: false,
+        inside: false,
+    };
+}
+
 #[derive(Debug)]
 pub(super) struct OpenFrame {
     commands: Vec<Command>,
-    /// Whether the commands landing here sit inside a knockout group — the question
-    /// [`NonIsolatedReason::InsideKnockoutGroup`](crate::error::NonIsolatedReason::InsideKnockoutGroup)
-    /// asks. A soft mask's body starts a fresh stack: §11.6.5 renders the mask group on
-    /// its own, so a knockout group outside it is not above the mask's content.
-    inside_knockout: bool,
+    /// What the commands landing here are nested in (§11.4.6).
+    knockout: Knockout,
 }
 
 impl SceneBuilder {
     /// Run a nested body against its own command frame, popping it on both paths so
     /// an errored body is discarded whole and the builder stays consistent.
     ///
-    /// `inside_knockout` is what the *body's* commands are nested in, which is why the
+    /// `knockout` describes what the *body's* commands are nested in, which is why the
     /// group's own knockout flag is folded in by the caller and a mask body passes
-    /// `false`.
+    /// [`Knockout::NONE`].
     pub(super) fn nested_body(
         &mut self,
-        inside_knockout: bool,
+        knockout: Knockout,
         body: impl FnOnce(&mut Self) -> Result<(), SceneError>,
     ) -> Result<Vec<Command>, SceneError> {
         if self.open_frames.len() >= MAX_GROUP_DEPTH {
@@ -46,22 +75,31 @@ impl SceneBuilder {
         }
         self.open_frames.push(OpenFrame {
             commands: Vec::new(),
-            inside_knockout,
+            knockout,
         });
         let body_result = body(self);
         let finished = self.open_frames.pop().unwrap_or(OpenFrame {
             commands: Vec::new(),
-            inside_knockout,
+            knockout,
         });
         body_result?;
         Ok(finished.commands)
     }
 
-    /// Whether commands appended right now land inside a knockout group.
+    /// Whether commands appended right now land inside a knockout group, at any depth.
     pub(super) fn inside_knockout(&self) -> bool {
         self.open_frames
             .last()
-            .is_some_and(|frame| frame.inside_knockout)
+            .is_some_and(|frame| frame.knockout.inside)
+    }
+
+    /// Whether commands appended right now are *elements* of a knockout group — the
+    /// group immediately enclosing them is one, so §11.4.6 weights each by its own
+    /// source shape.
+    pub(super) fn element_of_knockout(&self) -> bool {
+        self.open_frames
+            .last()
+            .is_some_and(|frame| frame.knockout.element)
     }
 
     pub(super) fn push(&mut self, command: Command) {
@@ -80,6 +118,63 @@ mod tests {
     use crate::paint::Color;
     use crate::scene::fixtures::{black, plain_group, unit_rect};
     use crate::scene::{Command, GroupSpec, MAX_GROUP_DEPTH, SceneBuilder};
+
+    /// The stack's two knockout answers diverge, and this is the module that owes that
+    /// property: [`SceneBuilder::inside_knockout`] accumulates down the stack while
+    /// [`SceneBuilder::element_of_knockout`] asks only about the frame's own group.
+    ///
+    /// Asked here rather than through a refusal so that the divergence is stated once, at
+    /// the stack, instead of being inferred from which error a scene got.
+    #[test]
+    fn the_two_knockout_questions_are_asked_of_different_frames() {
+        let mut builder = SceneBuilder::new();
+        // The page: neither.
+        assert!(!builder.inside_knockout());
+        assert!(!builder.element_of_knockout());
+
+        let knockout = GroupSpec {
+            knockout: true,
+            ..plain_group()
+        };
+        builder
+            .group(knockout, |body| {
+                // A direct element of the knockout group: both.
+                assert!(body.inside_knockout());
+                assert!(body.element_of_knockout());
+                // §11.4.6's stages are the way a group sits here (ADR 0069); inside one,
+                // the commands are elements of an *ordinary* group and only `inside`
+                // survives.
+                body.group(
+                    GroupSpec {
+                        compose: Compose::DestOut,
+                        ..plain_group()
+                    },
+                    |half| {
+                        assert!(half.inside_knockout());
+                        assert!(!half.element_of_knockout());
+                        // And one level deeper still, so the answer does not oscillate.
+                        half.group(plain_group(), |deeper| {
+                            assert!(deeper.inside_knockout());
+                            assert!(!deeper.element_of_knockout());
+                            Ok(())
+                        })
+                    },
+                )?;
+                // A soft mask's body starts a fresh stack: §11.6.5 renders the mask group
+                // on its own, so neither answer reaches into it.
+                body.mask(crate::mask::MaskKind::Alpha, None, |mask_body| {
+                    assert!(!mask_body.inside_knockout());
+                    assert!(!mask_body.element_of_knockout());
+                    Ok(())
+                })
+                .map(|_| ())
+            })
+            .expect("every group in this scene is one the builder accepts");
+
+        // And the stack unwound: the page's answers are back.
+        assert!(!builder.inside_knockout());
+        assert!(!builder.element_of_knockout());
+    }
 
     /// Nesting to the bound succeeds; one deeper is refused with the bound named, and
     /// the builder stays usable afterwards.

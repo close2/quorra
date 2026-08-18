@@ -131,6 +131,18 @@ impl Encoder<'_> {
     /// A match arm until this round, and its own method now for the reason the rest of
     /// this file is one: every field of the `ChildOp` it ends with is a clause read at
     /// the group, and the two other groups that build one are its neighbours here.
+    ///
+    /// **`self.style` is deliberately not consulted, and the builder is why** (ADR 0069).
+    /// §11.4.6 weights each element of a knockout group by its own source shape, and a
+    /// group's shape is §11.3.7.2's union of its elements' — a quantity this raster does
+    /// not carry, since a layer's alpha is the union of shape *times opacity*. So a group
+    /// composited ordinarily while `self.style` is `Knockout` would be §11.3.6's
+    /// composite standing in for the clause's weighted average, which is a
+    /// plausible-looking wrong page. `SceneBuilder::check_knockout_element_group` refuses
+    /// that scene before it reaches here, and what is left in this position is
+    /// [`Compose::DestOut`] and [`Compose::Plus`] — §11.4.6's two stages, which the
+    /// caller states and the compositor already draws (ADR 0033). A branch here would be
+    /// a second reading of the clause with no shape to read it from.
     pub(super) fn encode_group(
         &mut self,
         spec: &GroupSpec,

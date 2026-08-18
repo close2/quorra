@@ -526,8 +526,9 @@ fn op_group(
         isolated: !generator.rng.one_in(4),
         compose: generator.rng.compose(),
     };
+    let knockout = spec.knockout;
     let _ = builder.group(spec, |inner| {
-        random_ops(generator, device, inner, depth + 1);
+        random_ops(generator, device, inner, depth + 1, knockout);
         Ok(())
     });
 }
@@ -554,8 +555,10 @@ fn op_mask(generator: &mut Gen, device: &mut Device, builder: &mut SceneBuilder,
             Some(Transfer(table))
         }
     };
+    // §11.6.5 renders the mask group on its own, so a knockout group outside this call is
+    // not above the mask's content — the same reset `SceneBuilder::mask` makes.
     let defined = builder.mask(kind, transfer, |inner| {
-        random_ops(generator, device, inner, depth + 1);
+        random_ops(generator, device, inner, depth + 1, false);
         Ok(())
     });
     if let Ok(id) = defined {
@@ -579,12 +582,18 @@ fn op_release(generator: &mut Gen, device: &mut Device) {
     generator.pool.dead.push(id);
 }
 
-/// Nest plain groups until the builder refuses. Nothing about these groups can be
-/// refused except the depth bound, so the refusal pins both halves of
-/// [`MAX_GROUP_DEPTH`]: it happens at the bound, and it happens *only* at the bound.
+/// Nest plain groups until the builder refuses. **Two** things about these groups can be
+/// refused, and the assertion pins each to its own condition rather than admitting either
+/// anywhere: the depth bound, which must happen at [`MAX_GROUP_DEPTH`] and *only* there,
+/// and §11.4.6's element rule (ADR 0069), which must happen when the chain's first link is
+/// an element of a knockout group and *only* then.
+///
 /// The `depth` this is called with is the fuzzer's own count of open frames, so the
-/// assertion also checks that count against the builder's.
-fn nest_chain(builder: &mut SceneBuilder, depth: usize, remaining: u32) {
+/// assertion also checks that count against the builder's; `element_of_knockout` is the
+/// same question about the frame the first link lands in, and the builder answers it from
+/// its own stack. Only the first link can be one — every link below it is an element of an
+/// ordinary group, whatever encloses the chain.
+fn nest_chain(builder: &mut SceneBuilder, depth: usize, remaining: u32, element_of_knockout: bool) {
     let spec = GroupSpec {
         alpha: 1.0,
         blend: BlendMode::Normal,
@@ -596,15 +605,26 @@ fn nest_chain(builder: &mut SceneBuilder, depth: usize, remaining: u32) {
     };
     let result = builder.group(spec, |inner| {
         if remaining > 0 {
-            nest_chain(inner, depth + 1, remaining - 1);
+            nest_chain(inner, depth + 1, remaining - 1, false);
         }
         Ok(())
     });
     match result {
-        Ok(()) => assert!(depth < MAX_GROUP_DEPTH, "a group opened at depth {depth}"),
+        Ok(()) => assert!(
+            depth < MAX_GROUP_DEPTH && !element_of_knockout,
+            "a group opened at depth {depth}, element of a knockout group: \
+             {element_of_knockout}"
+        ),
+        // Checked before the depth bound is, so it wins wherever both hold.
+        Err(SceneError::KnockoutElementGroupUnsupported) => assert!(
+            element_of_knockout,
+            "at depth {depth} the builder applied §11.4.6's element rule outside a \
+             knockout group"
+        ),
         Err(error) => assert!(
             matches!(error, SceneError::GroupTooDeep { limit } if limit == MAX_GROUP_DEPTH)
-                && depth >= MAX_GROUP_DEPTH,
+                && depth >= MAX_GROUP_DEPTH
+                && !element_of_knockout,
             "at depth {depth} the builder refused with {error}"
         ),
     }
@@ -612,11 +632,17 @@ fn nest_chain(builder: &mut SceneBuilder, depth: usize, remaining: u32) {
 
 /// Draw the whole vocabulary into `builder`, recursing through group and mask bodies
 /// until the scene's operation budget runs out.
+///
+/// `element_of_knockout` is what §11.4.6 makes of the commands landing here — whether the
+/// group *immediately* enclosing them is a knockout group. It is the fuzzer's own copy of
+/// the question `SceneBuilder` answers from its frame stack, which is what lets
+/// [`nest_chain`] hold one answer against the other rather than accepting either.
 pub(crate) fn random_ops(
     generator: &mut Gen,
     device: &mut Device,
     builder: &mut SceneBuilder,
     depth: usize,
+    element_of_knockout: bool,
 ) {
     // A page's worth at the top level, a handful inside each group or mask body; the
     // scene's budget is what actually stops the recursion.
@@ -649,6 +675,7 @@ pub(crate) fn random_ops(
                 builder,
                 depth,
                 4 + u32::try_from(generator.rng.next() % 16).unwrap(),
+                element_of_knockout,
             ),
         }
     }
