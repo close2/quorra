@@ -249,7 +249,7 @@ somewhere it had never run.
 > is *"two consecutive captures agree **on something other than what the window was last
 > proven to show**"*, which makes the settles a chain and needs a first link (an erase to
 > the presenter's own clear). It was measured doing the work rather than merely passing:
-> over 20 completed real-display runs at loads 7.75 to 55.77, **27 of 100 settles took a
+> over 29 completed real-display runs at loads 7.75 to 55.77, **37 of 145 settles took a
 > first capture that was not the settled window** — the capture the old instrument asserted
 > on. And the search for a synchronisation to use instead came back empty and that is a
 > finding: wgpu 30 exposes no present-completion signal and `VK_KHR_present_wait` at all,

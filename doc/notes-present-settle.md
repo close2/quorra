@@ -72,33 +72,42 @@ carries one present, so the bound is also at least 64 refreshes — 533 ms at 11
 that is always paid, which is what makes its exact value cheap. A settle that reaches it
 fails with `NotSettled`, whose two arms name the count and which of the two ways it failed.
 
-## 4. What 22 real-display runs say
+## 4. What 32 real-display runs say
 
 RADV (`AMD Radeon 890M Graphics (RADV STRIX1)`) on the owner's display through XWayland
 (`env -u WAYLAND_DISPLAY`), `--check`, 2026-08-18. `--check` shortens only the rate phase;
-steps 1 to 9, including the two capture sites that flaked, run at full size either way.
+steps 1 to 9, including the two capture sites that flaked, run at full size either way. Load
+above 30 is 48 busy loops on 24 cores, started deliberately: §4's defect appeared at load
+25.22 and at no lower load.
 
-| batch | runs | load average | completed | pixel assertions |
-|---|---:|---:|---:|---|
-| quiet | 10 | 7.75 – 8.27 | 10 | **all green** |
-| loaded — 48 busy loops on 24 cores | 12 | 36.87 – 55.77 | 10 | **all green** |
+| population | batch | runs | load average | completed | pixel assertions |
+|---|---|---:|---:|---:|---|
+| first | quiet | 10 | 7.75 – 8.27 | 10 | **all green** |
+| first | loaded | 12 | 36.87 – 55.77 | 10 | **all green** |
+| confirming | quiet | 4 | 18.56 | 4 | **all green** |
+| confirming | loaded | 6 | 45.26 – 55.24 | 5 | **all green** |
 
-**Twenty runs reached the end and every pixel assertion in every one of them passed.** Two
-of the loaded runs refused earlier, in a different gate, and §5 is about them.
+**Twenty-nine runs reached the end and every pixel assertion in every one of them passed.**
+Three refused earlier, in a different gate, and §5 is about them.
 
-**Twenty green runs is not by itself a strong statement**, and it should not be quoted as
-one: against the recorded rate of 1 in 5, twenty clean runs would happen by chance 1.2 % of
-the time, and the 95 % upper bound on the true rate from 0 of 20 is still 14 %. The evidence
-that actually carries this round is the next table, because it is about the **mechanism**
+**Why two populations.** The first was taken from a binary built before this round's working
+files had to be restored by hand after a scripted `git checkout` reverted them; the second is
+the committed tree, run to make the numbers here numbers about the code in the commit. They
+agree, and they are reported separately rather than pooled into a claim neither one makes.
+
+**Twenty-nine green runs is not by itself a strong statement**, and it should not be quoted
+as one: against the recorded rate of 1 in 5, twenty-nine clean runs would happen by chance
+0.15 % of the time, and the 95 % upper bound on the true rate from 0 of 29 is still 9.8 %.
+The evidence that carries this round is the next table, because it is about the **mechanism**
 rather than about the outcome.
 
-### The criterion was observed to fire, 27 times
+### The criterion was observed to fire, 37 times
 
 Every settle prints how many captures it needed. Two is the minimum — one capture, then one
 that agrees with it — so **any settle above two took a capture that was not the window's
 settled contents**, which is precisely the capture the old instrument took and asserted on.
 
-| what was being settled | 2 captures | 3 | 4 |
+| what was being settled (first population) | 2 captures | 3 | 4 |
 |---|---:|---:|---:|
 | the presenter's own clear (erase, twice a run) | 15 | 13 | 12 |
 | the page under the chrome (step 5) | 19 | — | 1 |
@@ -106,27 +115,32 @@ settled contents**, which is precisely the capture the old instrument took and a
 | a frame drawn through `Target::Surface` (step 8) | 20 | — | — |
 | **all 100 settles** | **73** | **13** | **14** |
 
-**27 of 100 captures taken first were not the settled window.** Under the old instrument
-those are exactly the captures a run would have asserted against, and a 27 % per-capture
-stale rate over the two capture sites that existed is entirely consistent with the 1-in-5
-run failure rate §4 recorded. The criterion did not merely not fail — **it was seen doing
-the work it exists for**, on the same machine, at loads spanning 7.75 to 55.77.
+| | 2 captures | 3 | 4 |
+|---|---:|---:|---:|
+| **all 45 settles of the confirming population** | **35** | **8** | **2** |
 
-**And the bound has 16× headroom.** The largest number of captures any settle needed is
-**4**, against a bound of 64. Nothing in this population came within an order of magnitude
+**37 of 145 first captures were not the settled window.** Under the old instrument those are
+exactly the captures a run would have asserted against, and a 26 % per-capture stale rate
+over the two capture sites that existed is entirely consistent with the 1-in-5 run failure
+rate `doc/notes-present-rate.md` §4 recorded. The criterion did not merely not fail — **it
+was seen doing the work it exists for**, on the same machine, at loads spanning 7.75 to
+55.77.
+
+**And the bound has 16× headroom.** The largest number of captures any settle needed, in
+either population, is **4**, against a bound of 64. Nothing came within an order of magnitude
 of the refusal.
 
-**The erase is where the lag concentrates**, and that is worth reading rather than
-smoothing away: 25 of 40 erases needed a third or fourth capture, against 2 of 60 for the
-three picture settles. The erase is the settle that immediately follows a *burst* of
-presents carrying something else — the render phase's chrome, or the rate phase's whole
+**The erase is where the lag concentrates**, and that is worth reading rather than smoothing
+away: in the first population 25 of 40 erases needed a third or fourth capture, against 2 of
+60 for the three picture settles. The erase is the settle that immediately follows a *burst*
+of presents carrying something else — the render phase's chrome, or the rate phase's whole
 sweep — so it is the one with the deepest queue of stale images in front of it. It is also
 the link that makes the rest of the chain sound.
 
 ## 5. A second flake, pre-existing, found by the load this round applied
 
-Two loaded runs died before any capture, in an assertion this round did not touch
-(`main.rs`, the render phase):
+Three loaded runs — two of the first population, one of the confirming one — died before any
+capture, in an assertion this round did not touch (`main.rs`, the render phase):
 
 ```
 presents while one render of 25.378556ms was in flight: 1
@@ -138,15 +152,16 @@ The gate is `presents >= 2`, and it means "at least one present *completed* whil
 render was still running", which is a real property. But the number of presents that fit a
 span is `span / refresh`, and **the span is a wall clock on a shared machine**: at load
 36.87 the presenting thread managed one present in 25.4 ms — three refreshes — because it
-could not be scheduled. The other failure is the mirror case: the render itself took 6.4 ms,
-*less than one refresh*, so one present is the arithmetically correct answer and the
-assertion is wrong about its own subject.
+could not be scheduled, and at 45.26 the same happened in 23.2 ms. The third failure is the
+mirror case: the render itself took 6.4 ms, *less than one refresh*, so one present is the
+arithmetically correct answer and the assertion is wrong about its own subject.
 
 **This is not the settle criterion and it is not new** — the code is unchanged since
 ADR 0056 — but it is the same family as `HANDOVER.md`'s *"read a gate's threshold against
 the number it names"*: a count whose value is decided by a duration is a duration wearing a
 count's clothes. It did not appear in `doc/notes-present-rate.md`'s five runs because those
-ran at load 8.9 to 25.2; it appears at 36.9 to 47.2. `doc/notes-present-rate.md` §2 already
+ran at load 8.9 to 25.2; it appears **3 times in 18 runs** at load 36.9 to 55.8, and never
+in the 14 runs below 19. `doc/notes-present-rate.md` §2 already
 bounds the split's claims to *"a machine that is not oversubscribed"*, and 48 busy loops on
 24 cores is twice past that boundary — so this is the recorded boundary arriving in a second
 assertion rather than a new finding about the design.

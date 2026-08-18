@@ -77,12 +77,12 @@ regression — and which §4 rejected in advance.
 
 ## Consequences
 
-**It was seen doing its work, not merely not failing.** Over 20 completed real-display runs
-at load averages from 7.75 to 55.77, **27 of 100 settles took a first capture that was not
+**It was seen doing its work, not merely not failing.** Over 29 completed real-display runs
+at load averages from 7.75 to 55.77, **37 of 145 settles took a first capture that was not
 the window's settled contents** — exactly the capture the old instrument asserted on. A
-27 % per-capture stale rate over two capture sites is what a 1-in-5 run failure rate looks
-like from the inside. Twenty green runs on their own would be weak evidence (0 of 20 leaves
-a 95 % upper bound of 14 % on the old rate); the mechanism count is the evidence.
+26 % per-capture stale rate over two capture sites is what a 1-in-5 run failure rate looks
+like from the inside. The green runs on their own would be weak evidence (0 of 29 leaves a
+95 % upper bound of 9.8 % on the old rate); the mechanism count is the evidence.
 
 **It is faster, which is incidental and worth stating anyway.** A healthy settle costs two
 presents and two `xwd` round trips instead of 300 ms of presenting, five times per run.
@@ -99,7 +99,7 @@ assertions report a wrong picture, which is a hole and a sentence rather than a 
 lie. Stated in the module comment rather than left for a reader to discover.
 
 **One thing this round found and did not take.** The render phase's `presents >= 2` is a
-count whose value is decided by a wall clock, and it refuses two of twelve runs at load
-36.9 to 47.2 — a second instance of `HANDOVER.md`'s *"read a gate's threshold against the
-number it names"*, pre-existing and unrelated to this criterion.
+count whose value is decided by a wall clock, and it refuses 3 of 18 runs at load 36.9 to
+55.8 and none of the 14 below 19 — a second instance of `HANDOVER.md`'s *"read a gate's
+threshold against the number it names"*, pre-existing and unrelated to this criterion.
 `doc/notes-present-settle.md` §5 has the mechanism and §7 recommends the round.
