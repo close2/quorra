@@ -214,6 +214,47 @@ impl SceneBuilder {
         }
     }
 
+    /// §11.4.6's separate shape value, for the one element kind that cannot supply it
+    /// (ADR 0069).
+    ///
+    /// The clause states the obligation directly:
+    ///
+    /// > The separate shape value shall be computed in any group that is subsequently
+    /// > used as an element of a knockout group.
+    ///
+    /// and §11.3.7.2 says what that value is for a group: "The shape of a group object
+    /// shall be the union (as defined in 11.3.7.3, "Result shape and opacity") of the
+    /// shapes of the objects it contains". A finished group reaches a compositor as one
+    /// premultiplied raster, whose alpha is the union of each element's shape *times its
+    /// opacity* — so the two quantities §11.4.6 weights apart arrive as one number, and
+    /// the group would be composited by §11.3.6 instead. That is a plausible-looking
+    /// wrong page rather than a hole, which §5 of the brief refuses.
+    ///
+    /// **Two things this deliberately does not refuse**, and both are load-bearing:
+    ///
+    /// - **§11.4.6's own two stages.** [`Compose::DestOut`] then [`Compose::Plus`] on two
+    ///   groups *is* the clause's `P' = (1 − f) × P + S`, with the shape half drawn as
+    ///   content the caller knows to be opaque (ADR 0033). A caller who can state the
+    ///   shape has the construction; one who cannot gets this refusal.
+    /// - **A group deeper than one level.** The predicate is
+    ///   [`element_of_knockout`](SceneBuilder::element_of_knockout) and not
+    ///   [`inside_knockout`](SceneBuilder::inside_knockout), because §11.4.6 governs a
+    ///   knockout group's *elements*: a group inside an ordinary group is composited by
+    ///   §11.3.6 whatever encloses that ordinary group. Reading the transitive predicate
+    ///   here would refuse the shape half's own nested groups — which the caller's
+    ///   expansion of this very clause produces, since a group's stated shape is the
+    ///   group of its elements' stated shapes.
+    ///
+    /// Nothing escapes by nesting, because there is nothing to escape: §11.4.6 reaches
+    /// exactly one level, so a group deeper than that is not the construction this refusal
+    /// is about — its own parent composites it by §11.3.6, correctly.
+    pub(super) fn check_knockout_element_group(&self, spec: &GroupSpec) -> Result<(), SceneError> {
+        if self.element_of_knockout() && matches!(spec.compose, Compose::SrcOver) {
+            return Err(SceneError::KnockoutElementGroupUnsupported);
+        }
+        Ok(())
+    }
+
     /// The three conditions of [`GroupSpec::isolated`], in the order a reader of the
     /// clause meets them. Checked before the body runs, so a refusal costs nothing
     /// that was built inside it.

@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use super::frames::OpenFrame;
+use super::frames::{Knockout, OpenFrame};
 use super::{ClipDef, Command, GroupSpec, MaskDef, Scene, SceneData, cost};
 use crate::blend::{BlendMode, Compose, FillRule};
 use crate::error::SceneError;
@@ -211,7 +211,9 @@ impl SceneBuilder {
     /// ([`SceneError::InvalidGroupAlpha`](crate::error::SceneError::InvalidGroupAlpha)),
     /// an unknown clip, nesting beyond the bound, a
     /// non-isolated group in a position §11.4.4's arithmetic cannot survive
-    /// ([`SceneError::NonIsolatedGroupUnsupported`]), and whatever `body` itself
+    /// ([`SceneError::NonIsolatedGroupUnsupported`]), an ordinary composite of a group
+    /// used as an element of a knockout group, whose §11.4.6 shape no raster carries
+    /// ([`SceneError::KnockoutElementGroupUnsupported`]), and whatever `body` itself
     /// refuses. On any error the group is discarded whole; the builder remains usable
     /// and consistent.
     pub fn group(
@@ -224,7 +226,15 @@ impl SceneBuilder {
         self.check_mask(spec.mask)?;
         Self::check_group_compose(&spec)?;
         self.check_isolation(&spec)?;
-        let commands = self.nested_body(self.inside_knockout() || spec.knockout, body)?;
+        self.check_knockout_element_group(&spec)?;
+        // §11.4.6 governs the *elements* of a knockout group, so `element` is this
+        // group's own flag rather than the enclosing frame's; `inside` accumulates
+        // because §11.4.4's refusal asks about any depth. See `frames::Knockout`.
+        let knockout = Knockout {
+            element: spec.knockout,
+            inside: self.inside_knockout() || spec.knockout,
+        };
+        let commands = self.nested_body(knockout, body)?;
         self.push(Command::Group { spec, commands });
         Ok(())
     }
@@ -286,7 +296,7 @@ impl SceneBuilder {
         Self::check_mask_kind(kind)?;
         // §11.6.5 renders the mask group on its own, so whatever encloses the `mask()`
         // call is not above the mask's content: the knockout stack starts fresh here.
-        let commands = self.nested_body(false, body)?;
+        let commands = self.nested_body(Knockout::NONE, body)?;
         let id = u32::try_from(self.masks.len()).unwrap_or(u32::MAX);
         self.masks.push(MaskDef {
             kind,

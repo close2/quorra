@@ -174,7 +174,9 @@ fn the_boundary_never_panics_and_never_accepts_silently() {
         upload_resources(&mut generator, &mut device);
 
         let mut builder = SceneBuilder::new();
-        random_ops(&mut generator, &mut device, &mut builder, 0);
+        // The page group is not a knockout group, so nothing at the root is an element of
+        // one (§11.4.6, ADR 0069).
+        random_ops(&mut generator, &mut device, &mut builder, 0, false);
         let scene = builder.finish();
         check_cost(&scene, seed);
 

@@ -265,6 +265,31 @@ pub enum SceneError {
         /// Which condition the scene broke.
         reason: NonIsolatedReason,
     },
+    /// A group used as an element of a knockout group and composited ordinarily
+    /// ([`Compose::SrcOver`]) — the one element kind whose §11.4.6 shape a premultiplied
+    /// raster cannot carry (ADR 0069).
+    ///
+    /// ISO 32000-2 §11.4.6 makes this an obligation rather than a nicety:
+    ///
+    /// > The separate shape value shall be computed in any group that is subsequently
+    /// > used as an element of a knockout group.
+    ///
+    /// A group's shape is that separate value — §11.3.7.2: "The shape of a group object
+    /// shall be the union (as defined in 11.3.7.3, "Result shape and opacity") of the
+    /// shapes of the objects it contains" — and a finished group reaches the compositor
+    /// as one premultiplied texture whose alpha is the union of each element's shape
+    /// *times its opacity*. The two quantities §11.4.6 weights apart are one number
+    /// there, so the group would be composited by §11.3.6 instead — byte-identical to the
+    /// same group inside an *ordinary* group. Measured over an opaque cover, a half-opaque
+    /// isolated group drew `[128, 76, 128, 255]` where the clause requires
+    /// `[26, 102, 229, 128]`. §5 of the brief calls a plausible-looking wrong page the
+    /// worst outcome either project has a name for, so it is an error.
+    ///
+    /// **The construction is available, by name**: [`Compose::DestOut`] then
+    /// [`Compose::Plus`] on two groups is §11.4.6's own two stages, and a caller who can
+    /// state the shape half writes it there (ADR 0033). Those two are *not* refused here,
+    /// at any depth — a half's own elements may be groups, and they are.
+    KnockoutElementGroupUnsupported,
     /// A [`MaskId`] that this scene has not (yet) defined. Masks are scene-scoped
     /// and may only be referenced after their `mask()` call returns — which also
     /// makes mask dependencies acyclic by construction.
@@ -399,6 +424,14 @@ impl fmt::Display for SceneError {
                     "a non-isolated group (§11.4.4) cannot be drawn here because {because}"
                 )
             }
+            Self::KnockoutElementGroupUnsupported => write!(
+                f,
+                "a group used as an element of a knockout group needs the separate shape \
+                 value §11.4.6 requires of it, and a finished group reaches the \
+                 compositor as one premultiplied raster whose alpha is shape times \
+                 opacity; state it as Compose::DestOut then Compose::Plus on two groups, \
+                 which is the clause's own two stages"
+            ),
             Self::UnknownMask { mask, defined } => {
                 write!(
                     f,
