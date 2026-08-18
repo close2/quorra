@@ -327,22 +327,41 @@ who could remove it.
   construction, or the assertion is restated as something a schedule cannot decide. One round, no
   corpus (`doc/notes-present-settle.md` §5). Pre-existing since ADR 0056; found by the load
   ADR 0068's runs applied.
-- **The two coverage lanes disagree about whether a thin mark is *there*.** `Coverage::Gpu`
-  samples a 4 × 4 ordered grid, so its columns sit a quarter of a pixel apart; a
-  0.1-device-pixel bar swept across ten sub-pixel positions **vanishes entirely at six of
-  them and draws 2.5× the ink at the other four**, where `Coverage::Cpu`'s analytic area
-  draws 0.10196 at every one. Byte-identical on llvmpipe and RADV, so it is the design and
-  not an adapter, and it is reachable rather than contrived — a long thin rule is exactly the
-  shape `take_gpu_lane` prefers. **No sample count removes it; only an area rule does.**
-  Characterised and gated 2026-08-17 (`tests/thin_marks.rs`, `doc/notes-hayro-paints.md`) and
-  deliberately not fixed: it is a scan-conversion decision with a cost either way, it is the
-  subject of the caller's own `QUORRA_HAIRLINE_MARKS.md`, and it wants an ADR with their view
-  in it. Note that `coverage_lanes.rs`'s eighth-of-a-pixel agreement bound was derived for an
-  edge *crossing* a pixel and says nothing about a shape narrower than the sample grid.
-  It is also now a *lane-policy* constraint and not only a characterisation: **ADR 0064
-  declined to let rare paints take the device lane largely because doing so would move
-  shading-painted text onto this grid at exactly the magnification a caller switches to
-  `Coverage::Gpu`.** An area rule here would remove that objection as well as this bullet.
+- **A mark thinner than the sample grid keeps the processor lane, and §10.7.4's gap is closed
+  (ADR 0070).** `Coverage::Gpu` samples a `√n × √n` ordered grid, so a mark narrower than
+  `1/√coverage_samples` of a device pixel could fall between two sample columns and read zero —
+  the disappearance §10.7.4 names in the very sentence that carries its rule, *"unfavourable
+  placement relative to the device pixel grid"*. Note the boundary the costing round drew:
+  drawing **more** than the shape's area is *not* a violation, because §10.7.4's second
+  requirement is a floor; drawing **nothing** is. A fifth `take_gpu_lane` condition now declines
+  the device lane for such a mark, the threshold derived from where the columns actually sit —
+  **including across the pixel seam**, since the grid is symmetric about the centre and so the
+  columns are one lattice of period `1/√n` across the whole device. Measured on the caller's
+  corpus, one copy, 2026-08-18: **`Coverage::Gpu` at scale 1 goes 930/25/2/17 → 932/23/2/17,
+  which is the processor lane's own row** — `bug1883609.pdf` and `vertical.pdf` join the oracle,
+  every other page line is identical to the character, and at 4× one line moves toward the
+  oracle (`issue12295.pdf`, mean 0.9517 → 0.9201) with no verdict changing. Cost: 35 marks at
+  scale 1, 26 at 4×, 16 at 8× rasterised on the processor instead — and **magnification shrinks
+  the population**, because a stroke's width arrives resolved in device pixels and does not
+  follow the viewport.
+  **What is left open is the residual, not the rule**: a hairline at 45° given as a *fill* has a
+  wide device box and no width of its own to be read instead, so it keeps the device lane and
+  *dots* rather than vanishing — one such mark in the corpus. The area rule that would close it
+  by construction is declined and priced in ADR 0070: it costs ADR 0016 its scale-independence,
+  because exact area requires flattening at a device tolerance, and it would make
+  `Options::coverage_samples` meaningless. And the old bullet's lane-policy corollary survives
+  the fix: **ADR 0064 declined to let rare paints take the device lane largely because that
+  would move shading-painted text onto this grid** — a rare paint never asks `take_gpu_lane`, so
+  ADR 0070 does not reach it, and only an area rule would.
+- **A group cannot be an element of a knockout group, and is refused by name (ADR 0069).**
+  §11.4.6 is normative — *"The separate shape value shall be computed in any group that is
+  subsequently used as an element of a knockout group"* — and a layer's alpha is shape ×
+  opacity, so §11.3.7.2's union of shapes is not recoverable from it. The construction drew
+  **byte-identically to the same group in an ordinary group**, which is principle 6's third
+  state. Refused at the builder as `SceneError::KnockoutElementGroupUnsupported`, on a
+  population of **zero in 974 documents — and zero by the caller's design**, since their
+  `element_shape_is_coverage` excludes a group for the same reason we do. ADR 0033's staged pair
+  remains correct to the byte and is the way to state such an element.
 - **Whether a soft mask is a knockout element's shape or its opacity is unresolved, and
   the tree and ADR 0025 disagree about it.** `fs_shape` in `rect.wgsl`, `coverage.wgsl`
   and `image.wgsl` multiplies the mark's soft mask into the shape it returns; ADR 0025's
@@ -370,7 +389,8 @@ who could remove it.
   folded in, so a citation of `doc/api-change-retained-atlas.md` here was pointing at
   nothing from that commit until 2026-08-17. The bump now also carries `CoverageSheet`
   and `Counters::coverage` with `RenderError::ScratchExhausted`'s three new fields
-  (ADR 0057), `RenderError::ViewportTransformTooLarge`, and one `SceneError` addition,
+  (ADR 0057), `RenderError::ViewportTransformTooLarge`, `SceneError::KnockoutElementGroupUnsupported`
+  (ADR 0069), and one further `SceneError` addition,
   `InvalidImageAlpha`, whose transfer document is `doc/api-change-image-alpha.md`.
 - **A paint the device evaluates — built** (ADR 0053, 2026-08-15). `Paint::Function` is a
   §7.10.5 type 4 program uploaded once, admitted at `Device::upload_function`, generated

@@ -519,6 +519,12 @@ names.
   you do. **`--check` may only *shrink* a sweep** (fewer rounds, adapters, sizes), never
   substitute a page: an example that checks a page it does not measure is ADR 0060's defect
   wearing a different hat.
+- **Which coverage producer drew a mark**: `Counters::bytes_uploaded`, and nothing else can say
+  it. Both lanes seat a tile on one sheet and both count as `lanes.path`, so neither `lanes` nor
+  `coverage` distinguishes them — but the processor lane uploads its tile while the device lane
+  uploads a winding target instead, so `Coverage::Gpu` reports **exactly** the `Coverage::Cpu`
+  figure when no mark took the device lane and strictly more when one did. An equality and a
+  strict inequality, with no threshold to pick between two moving numbers (ADR 0070).
 - **A page of curve-clipped marks**: `examples/residue_clip.rs` — the artwork archetype,
   headless into a texture, `instrument_encode` on, minima of twenty steady frames with the
   first reported apart and the load average printed beside them. It prints **all three
@@ -699,13 +705,37 @@ family as `m45.rs`'s rectangle-as-glyph: **when a fixture's subject is a differe
 difference is reachable.**
 
 **A sampled coverage rule and an area coverage rule disagree about what is *there*, not only
-about how much.** `Coverage::Gpu`'s 4 × 4 ordered grid puts its columns a quarter-pixel apart,
-so a 0.1-pixel bar falls between them at six of ten sub-pixel positions and is drawn as
-**nothing**, while the other four draw 2.5× its ink; `Coverage::Cpu` draws 0.10196 at all ten.
-The tempting reading of `coverage_lanes.rs` — that the lanes agree to an eighth of a pixel — is
-**not** a bound on this: it was derived for an edge *crossing* a pixel, and says nothing about a
-shape narrower than the sample grid. Any claim that the two lanes agree needs to name the shape
-class it was measured on.
+about how much.** `Coverage::Gpu`'s 4 × 4 ordered grid puts its columns a quarter-pixel apart, so
+a 0.1-pixel bar falls between them at six of ten sub-pixel positions and is drawn as **nothing**,
+while the other four draw 2.5× its ink; `Coverage::Cpu` draws 0.10196 at all ten. The tempting
+reading of `coverage_lanes.rs` — that the lanes agree to an eighth of a pixel — is **not** a bound
+on this: it was derived for an edge *crossing* a pixel, and says nothing about a shape narrower
+than the sample grid. Any claim that the two lanes agree needs to name the shape class it was
+measured on. **Closed 2026-08-18 by ADR 0070**, in the lane chooser rather than in the grid: such
+a mark keeps the processor lane, threshold `1/√coverage_samples` derived from where the columns
+actually sit — **including across the pixel seam**, which is the step that is easy to get wrong.
+Two counts survive it and are why it was worth one comparison rather than a milestone: the corpus
+population is **35 marks at scale 1 and 16 at 8×**, and **magnification shrinks it**, because a
+stroke's width arrives resolved in device pixels and does not follow the viewport — so the lane a
+caller switches to at zoom is the lane the defect had almost stopped reaching by then. What
+survives the fix is the **residual**: a 45° hairline given as a *fill* has a wide box and no
+stroke width to be read instead, so it keeps the device lane and *dots*.
+
+**A condition that declines a lane can be gated in one direction by every fixture you have.**
+ADR 0070's fifth `take_gpu_lane` condition passes its clause sweep when it fires for *every* mark,
+because declining the device lane is always safe for §10.7.4 — the sweep cannot tell "thin marks
+are on the processor lane" from "everything is". The half that catches it is the fixture **above**
+the threshold, asserted through a counter rather than through pixels: at exactly one sample-column
+spacing the mark must still reach the device lane. Forcing the condition to `|| true` fails that
+half *and* ADR 0026's own lane control, and leaves the clause sweep untouched. **When a change
+makes a lane rarer, gate the case that must still take it.**
+
+**A rule about what is *inside* a knockout group is three rules with three prices.** ADR 0069 had
+to choose between refusing a group that is a *direct element* of a knockout group, the same
+transitively, and the same transitively without an exemption for the staged compose. The first two
+cost **zero** corpus pages; the third would have turned **three drawn pages into refusals**. The
+round published the three-page figure against the wrong predicate and retracted it after a
+re-walk. State the predicate before costing it, and cost the one you will actually write.
 
 **`xwd` cannot see a Wayland window, and the failure does not say "Wayland".**
 `examples/present_thread` had only ever run under `Xvfb`. On the owner's machine it opened its
@@ -924,6 +954,12 @@ reading it:
   sheet tile a rare paint is drawn through, verified by making the change and reverting it — so
   reopen it by measuring, not by re-deriving. The trigger that changes the arithmetic is a
   residue multiply on the device: 82 % of all rare-painted coverage is under one;
+- an **area** coverage rule on the device lane, which would close the thin-mark residual by
+  construction: it costs ADR 0016 its reason for existing, since exact area needs curves
+  flattened at a *device* tolerance and ADR 0016 exists because nothing in it depends on the
+  device scale; it makes `Options::coverage_samples` meaningless; and its population is 16 marks
+  on one page at the magnification the caller actually uses (0070). Re-ask with the thin-axis
+  probe in `doc/notes-thin-mark-options.md` §2.1 — minutes, not a round;
 - the census cannot see how often a shape is placed, at phase granularity (0029) — and
   **ADR 0065 measured that this looseness is load-bearing rather than a debt**: a phase-aware
   census would keep 226 368 tiles out of the atlas rather than 79 370 and empty it almost
