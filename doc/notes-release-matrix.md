@@ -633,6 +633,12 @@ report is a claim no later round can check. A dated retraction is placed at the 
 site; the matrix itself is **not** filled in from here, because this round measured one lane
 and one scale and inventing the other three rows is the failure these notes exist to prevent.
 
+> **Closed 2026-08-18.** Both placeholders are gone: a later round re-took all four rows and
+> re-forced the defects, and `doc/notes-thin-mark-condition.md` is the round notes this
+> paragraph says did not exist. It confirms this section's CPU scale-4 row unchanged at
+> `938 / 11 / 3 / 22` in both columns, and finds two further things — the scale-1 device row's
+> `930/25/2/17 → 932/23/2/17` holds, and one of ADR 0070's own claims does not.
+
 **Two CI gates were red on `main` when this round started, both from the same commit
 (`787b830`) and neither pre-existing before it.** `cargo fmt --all --check` failed on two
 `assert!` chains in `crates/quorra-gpu/src/encode/thin.rs`, and
