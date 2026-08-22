@@ -37,7 +37,9 @@
 //!    for a window nobody described.
 //! 3. The device — now on another thread — refuses `Target::Surface` with
 //!    `PresenterDetached`, and goes on rendering into a host texture.
-//! 4. Presents happen **while that render is in flight**, on the main thread, counted.
+//! 4. A present **returns while that render is still in flight**, on the main thread —
+//!    an ordering the render thread publishes and the presenting one reads, rather than a
+//!    count of presents whose value a scheduler decides (ADR 0071).
 //! 5. The finished page goes on the window under a 2× placement offset by (64, 32),
 //!    with the chrome over it at the identity, and every sampled pixel is where those
 //!    two affines put it — including the strip the page does not reach, which is the
@@ -94,6 +96,7 @@ mod settle;
 mod xwd;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -119,6 +122,18 @@ const OFFSET: (f32, f32) = (64.0, 32.0);
 /// ADR 0006's store-conversion bound, which is what a colour is allowed to differ by
 /// between what the scene stated and what the window shows.
 const TOLERANCE: u8 = 2;
+
+/// How long the render phase's thread goes on rendering while it waits for the presenting
+/// thread to take its proof.
+///
+/// A **stopping rule rather than a measurement** — `rate::CADENCE_SPAN` is the same shape —
+/// and it exists so that a present which *cannot* proceed while the device is held fails
+/// this phase instead of hanging it. A healthy run never reaches it: the loop stops after
+/// the render it is inside as soon as the proof is taken, so the phase costs one render,
+/// which is what it cost before ADR 0071. The value is an order of magnitude above the
+/// slowest present this machine has been observed to complete under deliberate load —
+/// 25.4 ms at load 36.9 (`doc/notes-present-settle.md` §5).
+const RENDER_HOLD_CEILING: Duration = Duration::from_millis(300);
 
 /// `--check` is accepted and changes nothing: this example is already an assertion
 /// harness that runs its whole set once, and CI has run it since ADR 0056. It is
@@ -229,8 +244,41 @@ fn main() {
     println!("present_thread: the window is where the affine says, on both paths");
 }
 
+/// The one fact the render phase's two threads share, and the two flags it is made of.
+///
+/// Both are written by one thread and read by the other, which is why they are atomics and
+/// not a mutex: neither thread ever waits on the other, and a thread that waits is a thread
+/// this phase is trying to prove it does not have to be.
+struct RenderHold {
+    /// True from just before the first render begins until just after the last one
+    /// returns — "the device is busy on the other thread, right now".
+    holding: AtomicBool,
+    /// Set by the presenting thread once it has its proof, so that a healthy run pays one
+    /// render rather than [`RENDER_HOLD_CEILING`].
+    proven: AtomicBool,
+}
+
 /// Steps 3 and 4: the device goes to another thread, refuses `Target::Surface` by name,
 /// renders the page into a host texture — and the main thread presents while it does.
+///
+/// # What proves the "while", and why it is not a count of presents
+///
+/// This gate read `presents >= 2` until ADR 0071. That means "at least one present
+/// completed while the render was still running", which is the right property measured with
+/// the wrong instrument: **the number of presents that fit a span is `span / refresh`, and
+/// the span is a wall clock on a shared machine.** It refused 3 of 18 real-display runs at
+/// load 36.9 to 55.8 — twice because the presenting thread could not be scheduled (one
+/// present in 25.4 ms, three refreshes), and once because the render itself took 6.4 ms,
+/// *less than one refresh*, so one present was the arithmetically correct answer and the
+/// assertion was wrong about its own subject (`doc/notes-present-settle.md` §5).
+///
+/// What replaces it is an **ordering**. The render thread renders back-to-back and says so
+/// in [`RenderHold::holding`]; the proof is that a present *returned* while that flag was
+/// still up. The regression this phase exists to catch is a present that cannot proceed
+/// while the device is held elsewhere, and such a present could only return after the loop
+/// had put the flag down — so the gate still fails for its own regression, and it fails by
+/// name rather than hanging, because the loop is bounded. No count of refreshes decides it,
+/// and a scheduler that starves either thread now costs latency rather than a verdict.
 fn render_on_another_thread_while_presenting(
     mut device: Device,
     page: &wgpu::Texture,
@@ -238,27 +286,43 @@ fn render_on_another_thread_while_presenting(
     presenter: &mut Presenter,
 ) -> Device {
     let (started, has_started) = mpsc::channel();
-    let (finished, has_finished) = mpsc::channel();
+    let hold = Arc::new(RenderHold {
+        holding: AtomicBool::new(false),
+        proven: AtomicBool::new(false),
+    });
     let page_for_render = page.clone();
+    let hold_for_render = Arc::clone(&hold);
     let render = thread::spawn(move || {
         let viewport = Viewport::full(fixture::PAGE.0, fixture::PAGE.1, Affine::IDENTITY);
-        match device.render(&fixture::page(), &viewport, Target::Surface) {
+        // Built once, and *before* the flag goes up, so that what `holding` covers is the
+        // device's work and not this thread's: `fixture::page()` is 18 000 rectangles, and
+        // a proof that a present overlapped a scene build would be a proof about nothing.
+        let scene = fixture::page();
+        match device.render(&scene, &viewport, Target::Surface) {
             Err(RenderError::PresenterDetached) => {}
             other => panic!("a detached device must refuse Target::Surface by name, got {other:?}"),
         }
         started.send(()).expect("the main thread is waiting");
         let began = Instant::now();
-        device
-            .render(
-                &fixture::page(),
-                &viewport,
-                Target::Texture(&page_for_render),
-            )
-            .expect("the page renders into a host texture while the window is presented");
-        finished
-            .send(began.elapsed())
-            .expect("the main thread is waiting");
-        device
+        let mut renders = 0_u32;
+        let mut first = Duration::ZERO;
+        hold_for_render.holding.store(true, Ordering::Release);
+        loop {
+            device
+                .render(&scene, &viewport, Target::Texture(&page_for_render))
+                .expect("the page renders into a host texture while the window is presented");
+            renders += 1;
+            if renders == 1 {
+                first = began.elapsed();
+            }
+            if hold_for_render.proven.load(Ordering::Acquire)
+                || began.elapsed() >= RENDER_HOLD_CEILING
+            {
+                break;
+            }
+        }
+        hold_for_render.holding.store(false, Ordering::Release);
+        (device, renders, first, began.elapsed())
     });
 
     has_started.recv().expect("the render thread started");
@@ -267,27 +331,28 @@ fn render_on_another_thread_while_presenting(
         placement: Affine::IDENTITY,
         filter: ImageFilter::Nearest,
     }];
-    let mut presents = 0_u32;
-    let render_took = loop {
-        presenter
-            .present(&chrome_only)
-            .expect("presenting while the device renders elsewhere");
-        presents += 1;
-        if let Ok(took) = has_finished.try_recv() {
-            break took;
-        }
-    };
-    let device = render.join().expect("the render thread finished");
-    // The number this example exists for, printed rather than only asserted: how many
-    // pictures the window received during one `Device::render` — against the one the
-    // caller's arrangement can produce today, where the render holds the only
-    // `&mut Device` and nothing may present until it returns. Both figures are wall
-    // clocks on a machine running a test suite, so they are a ratio worth reading and
-    // not a measurement worth quoting.
-    println!("presents while one render of {render_took:?} was in flight: {presents}");
+    presenter
+        .present(&chrome_only)
+        .expect("presenting while the device renders elsewhere");
+    // Read *after* the present returned, which is the whole ordering. A present that had
+    // waited for the device could not be here before the loop below put the flag down.
+    let held_across_a_present = hold.holding.load(Ordering::Acquire);
+    // Either way: the render thread has nothing left to prove and is told to stop, so a
+    // failing run costs one more render rather than the ceiling.
+    hold.proven.store(true, Ordering::Release);
+    let (device, renders, first, spent) = render.join().expect("the render thread finished");
+    // Printed rather than asserted, because all three are wall clocks on a machine running
+    // a test suite: what one render of the fixture costs, and how long the thread went on
+    // holding the device before the proof reached it. `rate::cadence` is where the presents
+    // *per* render are counted, at a display that states its own refresh.
+    println!(
+        "a present returned while the device was held elsewhere: {held_across_a_present} \
+         ({renders} renders in {spent:?}, the first of them {first:?})"
+    );
     assert!(
-        presents >= 2,
-        "the point of the split is presenting during a render; only {presents} got through"
+        held_across_a_present,
+        "the point of the split is presenting during a render: the present returned only \
+         after the render thread had stopped, having completed {renders} renders in {spent:?}"
     );
     device
 }
