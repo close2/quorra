@@ -24,7 +24,12 @@ headings in these documents**: the function lane's three coverage gaps closed on
 and the soft-mask/`AIS` question was settled by ADR 0066 on 2026-08-18, while `PLAN.md` went
 on calling all four open. Every one is corrected at its site.
 
-**The 2026-08-16/17 improvement rounds are merged and unpushed.** Fifteen rounds in parallel
+**The 2026-08-16/17 improvement rounds are merged and — since 2026-08-18 — pushed**, which
+this paragraph went on denying for four days. `.git/logs/refs/remotes/origin/main` is the
+record the `AI` user can read, and it carries six pushes: `619ef3b → a4380e2 → 44d7acf →
+eada81e → a4f10f5 → cad5015`. **`origin/main` is `cad5015`**, so everything through ADR 0070
+and the NaN-fixture round is on the remote; what is unpushed is only what a session has
+merged since. Fifteen rounds in parallel
 worktrees: ADR 0057 (a clipped mark's tile is bounded by its chain's box — one corpus page
 refused → agrees), ADR 0058 (a present layer draws its own rectangle), ADR 0059 (a gate over
 a private list lives inside the crate), ADR 0060 (a page has one definition and every example
