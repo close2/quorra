@@ -12,6 +12,18 @@ happened, here if it changes how you *work*.
 Nine milestones are done; the swap landed on 2026-08-03 and the caller consumes this
 library as a git dependency, pinned by their `Cargo.lock`.
 
+**The 2026-08-22 round closed the two items `PLAN.md` listed as takeable here** — ADR 0071
+(`examples/present_thread` proves its overlap by ordering rather than by counting presents:
+12 of 12 loaded runs at 35.6 to 67.8, against 3 refusals in 18 for the count it replaces) and
+ADR 0072 (the golden is compared against the independent CPU reference at 2× and 4×, not at
+scale 1 alone). The suite is **583 tests**, `clippy --all-targets` and the rustdoc gate are
+clean, and no `src/` file changed, so no corpus run is owed. **It also found a defect in one
+of our own gates**: `m1.rs`'s tolerance was derived from a minimum alpha the fixture does not
+have — see the first trap below, which is the general form. And it found **three stale
+headings in these documents**: the function lane's three coverage gaps closed on 2026-08-16
+and the soft-mask/`AIS` question was settled by ADR 0066 on 2026-08-18, while `PLAN.md` went
+on calling all four open. Every one is corrected at its site.
+
 **The 2026-08-16/17 improvement rounds are merged and unpushed.** Fifteen rounds in parallel
 worktrees: ADR 0057 (a clipped mark's tile is bounded by its chain's box — one corpus page
 refused → agrees), ADR 0058 (a present layer draws its own rectangle), ADR 0059 (a gate over
@@ -216,11 +228,13 @@ where to look if this ever needs to be cheaper, and the cost is mildly superline
 `doc/notes-function-wiring.md` §4.6–§4.8 carry all three.
 
 What is left is `gt`/`ge`/`lt`/`le` comparing a boolean numerically where PLRM3 raises
-`typecheck`, which is ADR 0053 §3.2's open question with the caller and theirs to answer;
-and three gaps §4.5 now names, each found by reading rather than by a failure: **a clip and a
-soft mask over this paint are never anything but 1** anywhere in the tree (the other two
-factors of `base_weight` are unobserved), **no function test runs `Coverage::Gpu`**, and
-ADR 0025's `DestOut`/`Plus` stages are compiled and selected but never drawn.
+`typecheck`, which is ADR 0053 §3.2's open question with the caller and theirs to answer.
+**The three gaps this paragraph used to list beside it closed on 2026-08-16** — ten tests in
+`tests/function_weights.rs`, `tests/function_coverage.rs` and `tests/function_staged.rs`,
+recorded in `doc/notes-function-gaps.md` and struck through in `notes-function-wiring.md`
+§4.5 with their corrections. They were still described as open here and in `PLAN.md` on
+2026-08-22, which is this file's own trap about a heading that can be stale in either
+direction: **read §4.5's strike-throughs, not a remembered sentence.**
 
 Do not build the interpreter shape. It is 133 ms against 0.060, it costs 596 ms–4.5 s of
 cold compile against 6.3 ms, and at 4× it lost the device.
@@ -452,16 +466,18 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
   of four was not complete** — `sample_tail.rs::at_unit` was a fifth copy, found by checking
   a claim before writing it down. Five inline `alpha` indexings remain by choice, named in
   `doc/notes-test-probes.md` §1.
-- **`UNORM_TOLERANCE` stays two constants, for the opposite of the recorded reason.** They
-  were never two derivations: `m3.rs` cited `m1.rs`'s, which is `255/α` on a golden whose
-  minimum alpha is 128, while `m3.rs`'s page produces `{0, 29, 57, 86, 115, 172, 230}` — the
-  same premise gives ≈9 there. **And m3's page agrees with its reference to 0 unorm steps**,
-  so that gate has never spent any slack; tightening it is a round with a real question
-  attached, since that file pins llvmpipe while `m1.rs` is the one that asks every adapter.
-- **Three gaps in the function lane**, named in `doc/notes-function-wiring.md` §4.5 and found
-  by reading rather than by a failure: a clip and a soft mask over a function paint are never
-  anything but 1 anywhere in the tree, no function test runs `Coverage::Gpu`, and ADR 0025's
-  `DestOut`/`Plus` stages are compiled and selected but never drawn.
+- **`m1.rs`'s `UNORM_TOLERANCE` is gone and `m3.rs`'s needs a derivation of its own.** This
+  bullet read "`UNORM_TOLERANCE` stays two constants, for the opposite of the recorded
+  reason" and it was resting on a premise that did not survive being measured: `m3.rs` cited
+  `m1.rs`'s, which is `255/α` on a golden **whose minimum alpha is 24, not 128** (ADR 0072,
+  2026-08-22) — so `m1.rs`'s constant was five times tighter than its own stated derivation
+  and passed because the fixture never exercised the amplification it claimed to allow for.
+  `m1.rs` now derives the bound at each pixel from that pixel's alpha and its own number of
+  stores, so it has no constant to share. **What is left for `m3.rs`** is a derivation that
+  is its page's rather than a citation of a corrected one; its page agrees with its reference
+  to **0** unorm steps, so that gate has never spent any slack, and the round has a real
+  question attached — that file pins llvmpipe while `m1.rs` is the one that asks every
+  adapter.
 
 **Closed by the 2026-08-15 debt round**, listed once so nobody re-proposes them: the rustdoc
 warnings (all eleven in the workspace, and `cargo doc --workspace --no-deps` under
@@ -602,6 +618,24 @@ forbids stream objects inside object streams; a dictionary-only key needs the `/
 inflation. Reach for this **before** a narrowing round, not after.
 
 ## Traps
+
+**Re-derive a gate's constant from its own fixture before you reuse it.** `m1.rs`'s
+`UNORM_TOLERANCE = 2` carried the derivation "`255/α` on this golden, whose minimum alpha is
+128" for the life of the project. **The golden's minimum alpha is 24**, so the sentence gives
+11, and the constant had been enforcing something nobody could re-derive from the words beside
+it — passing every run because the fixture never produced a difference at a sliver pixel.
+A number that is *right about the runs and wrong about its reason* survives every run, and it
+is found only when somebody needs it somewhere else (ADR 0072 needed it at 2× and 4×). The
+same shape appears twice more in this file: a comment naming the wrong sweep, and a doc
+comment that was two openings for one function.
+
+**A gate that asserts concurrency by counting is a duration wearing a count's clothes.**
+`presents >= 2` meant "a present completed while a render was still running" and measured
+`span / refresh` on a shared machine — so a starved thread and a render shorter than one
+refresh both made it red while everything worked (3 of 18 loaded runs). Concurrency between
+two threads we own is provable by **ordering**: raise a flag across the work, read it after
+the other side returns (ADR 0071). Bound the loop that holds the flag, or the regression the
+gate exists for stops being a red assertion and becomes a hang.
 
 **The corpus is part of a change, not a check after it.** Layers sized to their plans passed
 208 unit tests and moved 31 corpus pages off *agree*, then 12 more, before it was right:

@@ -317,16 +317,22 @@ who could remove it.
   omission is an **oversight rather than a design constraint**: the device lane's output is
   already the R8 sheet tile a rare paint is drawn through, verified by making the change and
   reverting it.
-- **`examples/present_thread`'s `presents >= 2` is a count decided by a wall clock.** It means
-  "a present completed while the render was still running", which is a real property — but the
-  number of presents that fit a span is `span / refresh`, and the span is a wall clock on a
-  shared machine. It refuses **3 of 18 runs at load 36.9 to 55.8** and none of the 14 below 19:
-  once the presenting thread got one present into 25.4 ms, once the render itself was **6.4 ms,
-  shorter than one refresh**, so 1 is the correct answer and the assertion is wrong about its own
-  subject. Either the fixture's render is made unambiguously longer than a present by
-  construction, or the assertion is restated as something a schedule cannot decide. One round, no
-  corpus (`doc/notes-present-settle.md` §5). Pre-existing since ADR 0056; found by the load
-  ADR 0068's runs applied.
+- **`examples/present_thread`'s `presents >= 2` was a count decided by a wall clock — closed
+  by ADR 0071** (2026-08-22, `doc/notes-present-overlap.md`). It meant "a present completed
+  while the render was still running", which is a real property, but the number of presents
+  that fit a span is `span / refresh` and the span is a wall clock on a shared machine: it
+  refused **3 of 18 runs at load 36.9 to 55.8** and none of the 14 below 19 — once the
+  presenting thread got one present into 25.4 ms, once the render itself was **6.4 ms,
+  shorter than one refresh**, so 1 was the correct answer and the assertion was wrong about
+  its own subject. What replaces it is an **ordering**: the render thread renders
+  back-to-back and says so, and the proof is that a present *returned* while it was still
+  doing it. The render loop is bounded (300 ms, a stopping rule) so that the regression it
+  gates — a present that cannot proceed while the device is held — fails the phase by name
+  instead of hanging it; forced, that is 30 renders in 304.1 ms and a red assertion. **12 of
+  12 loaded runs at 35.6 to 67.8 pass**, each costing exactly one render, which is what the
+  phase cost before. The third failure case is now structurally unreachable rather than
+  merely rarer. What it cannot do from this user is a run on the owner's display through
+  XWayland, where the failing population was gathered.
 - **A mark thinner than the sample grid keeps the processor lane, and §10.7.4's gap is closed
   (ADR 0070).** `Coverage::Gpu` samples a `√n × √n` ordered grid, so a mark narrower than
   `1/√coverage_samples` of a device pixel could fall between two sample columns and read zero —
@@ -362,23 +368,37 @@ who could remove it.
   population of **zero in 974 documents — and zero by the caller's design**, since their
   `element_shape_is_coverage` excludes a group for the same reason we do. ADR 0033's staged pair
   remains correct to the byte and is the way to state such an element.
-- **Whether a soft mask is a knockout element's shape or its opacity is unresolved, and
-  the tree and ADR 0025 disagree about it.** `fs_shape` in `rect.wgsl`, `coverage.wgsl`
-  and `image.wgsl` multiplies the mark's soft mask into the shape it returns; ADR 0025's
-  text states the opposite ("§11.6.4.3's soft mask and §11.6.4.4's constant alpha are
-  *opacity*"). §11.6.4.3 makes it the `AIS` graphics-state flag's answer — "The mask may
-  serve as a source of either shape ( fm ) or opacity ( qm ) values" — and **nothing in
-  this tree or the caller's display list carries `AIS`**. The two readings differ only for
-  a masked element inside a knockout group. Found by reading on 2026-08-17
-  (`doc/notes-hayro-questions.md` §2); it needs the caller's answer, an ADR and a corpus
-  run. `doc/notes-function-wiring.md` §4.5 flagged the same thing for one lane; it is five.
-- **The suite's scale coverage, half taken.** `tests/scale_invariance.rs` (2026-08-17)
-  renders one fixture at 1×, 2× and 4× and asserts that ink is area, over a fill, a stroke
-  and a residue-clipped fill. What is *not* taken is the reference comparison: the only
-  test that checks this tree's pixels against the independent CPU rasteriser is `m1.rs`'s
-  golden, and it is scale 1 only. Before that round **187 of the suite's 198 viewports
-  were scale 1** and no test walked a range at all — which is the caller's hayro #40
-  pointed at our own instrument rather than at theirs.
+- ~~**Whether a soft mask is a knockout element's shape or its opacity is unresolved.**~~
+  **Settled by ADR 0066** (2026-08-18), from the clause rather than by the caller, and this
+  bullet stood open here for four days after it was. §11.6.4.3's first sentence does not
+  decide it — "The mask may serve as a source of either shape ( fm ) or opacity ( qm )
+  values" — but Table 57 and §11.6.4.4's last sentence do, and both name **two** parameters
+  where the question had been asked about one: the `AIS` flag governs the soft mask and the
+  alpha constant together, and its initial value is `false`. A scene carries no such flag, so
+  both are opacity, `fs_shape` no longer multiplies the mask into the shape it returns, and
+  ADR 0025's text was right where the tree was wrong. It moves pixels, and the ADR carries
+  what moved. `doc/notes-function-wiring.md` §4.5 had flagged the same thing for one lane.
+- **The suite's scale coverage, now taken whole** (ADR 0072, 2026-08-22,
+  `doc/notes-scale-reference.md`). `tests/scale_invariance.rs` (2026-08-17) renders one
+  fixture at 1×, 2× and 4× and asserts that ink is area, over a fill, a stroke and a
+  residue-clipped fill; what was missing was the reference comparison, since the only test
+  checking this tree's pixels against the independent CPU rasteriser was `m1.rs`'s golden at
+  scale 1. It now runs at 2× and 4× as well, and both adapters agree with the reference
+  within **1 unorm step** at both — against 2 at scale 1, because the fixture's minimum alpha
+  *rises* with magnification (24 at 1×, 32 at 2×, 128 at 4×) and scale 1 is therefore the
+  hard row.
+  **The finding that came out of it is a defect in one of our own gates**, and it was found
+  by needing the number at a second scale rather than by a failure: `m1.rs`'s
+  `UNORM_TOLERANCE = 2` was derived in its own comment from "this golden, whose minimum alpha
+  is 128", and **this golden's minimum alpha is 24** — so the constant enforced something its
+  stated derivation does not give (255/24 ≈ 11), which is principle 5's failure exactly. The
+  bound is now read at each pixel from that pixel's alpha and its own number of stores, which
+  is *stronger* than the constant almost everywhere and honest at the four slivers where the
+  amplification is real. Verified able to fail twice, and the second one is the point: a
+  coverage error conditioned on a mark wider than 30 device pixels — the caller's hayro
+  #40/#8/#63 shape, absent at 1× and present above it — leaves the scale-1 gate **green** and
+  reddens the new one alone. `m3.rs`'s constant cites the corrected derivation and is
+  deliberately left for its own round.
 - **The caller's adoption round** — they pin twenty commits back, three sections of their
   `QUORRA_FEEDBACK.md` have drafted answers waiting, and `RetainedScene` is an API they
   must take up rather than merely receive. `HANDOVER.md` item 1. Two `Counters` fields
@@ -404,11 +424,16 @@ who could remove it.
   with an ordinary group as its control, a function op replays byte-identically, and a
   generated shader's compile is **8.25 ms on RADV** for a program of the witness's length —
   above a **2.0–2.7 ms floor a one-instruction program pays too**, which is the fixed
-  `function_lane.wgsl` and not anything generated. What is still open: their answer on the
-  two contract questions ADR 0053 §3.2 names, and three gaps in the lane's coverage — a clip
-  and a soft mask over this paint are never anything but 1 anywhere in the tree, no function
-  test runs `Coverage::Gpu`, and ADR 0025's `DestOut`/`Plus` stages are selected but never
-  drawn.
+  `function_lane.wgsl` and not anything generated. The three gaps this row listed as open
+  **closed on 2026-08-16** (`doc/notes-function-gaps.md`, ten tests in three files), and this
+  sentence went on calling them open for six days: `tests/function_weights.rs` observes each
+  factor of `base_weight` at a value the other two cannot produce (a rectangular clip cutting
+  a pixel, a residue clip, §11.5.2's alpha mask, §11.5.3's luminosity mask, and the two as a
+  product) and found no defect; `tests/function_coverage.rs` establishes something stronger
+  than the bound it was asked for — `take_gpu_lane` is asked only in the solid arm, so the two
+  coverage settings draw a page of function paint **byte for byte the same**; and
+  `tests/function_staged.rs` draws ADR 0025's `DestOut`/`Plus` pair against §11.4.6's line.
+  What is still open is their answer on the two contract questions ADR 0053 §3.2 names.
   **The population is now measured, and it is four documents** (ADR 0067, 2026-08-18). A census
   over **67 464 PDFs** — the whole of the caller's `corpus-cache`, their tracked corpora and
   pdf.js's suite — found **four** carrying a `/ShadingType 1` together with a type 4 function,
