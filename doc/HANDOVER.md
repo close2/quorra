@@ -24,6 +24,13 @@ headings in these documents**: the function lane's three coverage gaps closed on
 and the soft-mask/`AIS` question was settled by ADR 0066 on 2026-08-18, while `PLAN.md` went
 on calling all four open. Every one is corrected at its site.
 
+**One document of ours lives in their tree, by the owner's instruction** (2026-08-22):
+`/home/cl/projects/pdf-viewer/doc/QUORRA_GLYPH_PHASE_CARRY.md`, written there rather than
+drafted here because the owner asked for it in that form. It is **left uncommitted** — their
+tree is theirs to commit, and they work in it concurrently. The standing rule is unchanged
+and this is the exception that proves it needs naming: **we do not edit their tree unless the
+owner says to, and we never commit in it.**
+
 **The 2026-08-22 §31 round found a whole-pixel misplacement and fixed it** (ADR 0073). A
 cached mark whose fractional device offset was within half a quantum of the next pixel was
 drawn a **whole device pixel** low: `.round() as u16 % q` wrapped where it had to carry.
