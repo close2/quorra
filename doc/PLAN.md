@@ -399,9 +399,15 @@ who could remove it.
   #40/#8/#63 shape, absent at 1× and present above it — leaves the scale-1 gate **green** and
   reddens the new one alone. `m3.rs`'s constant cites the corrected derivation and is
   deliberately left for its own round.
-- **The caller's adoption round** — they pin twenty commits back, three sections of their
-  `QUORRA_FEEDBACK.md` have drafted answers waiting, and `RetainedScene` is an API they
-  must take up rather than merely receive. `HANDOVER.md` item 1. Two `Counters` fields
+- ~~**The caller's adoption round**~~ — **done on their side, 2026-08-18**, and this bullet
+  described it as pending for four days after. Their `Cargo.lock` pins `cad50156`, their §28
+  closed the three drafted answers against their own tree (§15 and §19 close, `layer_textures`
+  keeps its name), their §26 answered *both* of ADR 0053 §3.2's contract questions, and their
+  §27 has `Paint::Function` adopted and shipping. **Two asks now run the other way** — their
+  §31 (our two coverage lanes place a one-pixel-wide rule up to an eighth of a device pixel
+  apart, on four corpus pages, and only one lane can be the exact one) and their §33
+  (`upload_outline`'s eager quadratics are 83 % of a launch's first frame on a three-million-
+  segment drawing, for a representation the default lane never reads). `HANDOVER.md` item 0. Two `Counters` fields
   land with ADR 0050 — `atlas_working_set_bytes` and `atlas_repacked` — and one
   `DeviceError` variant, `ResourceIdsExhausted`; all three are additive. What the bump
   owes them for those is `QUORRA_API_2026_08_15.md` §0 in their tree and this file — the
@@ -433,7 +439,10 @@ who could remove it.
   than the bound it was asked for — `take_gpu_lane` is asked only in the solid arm, so the two
   coverage settings draw a page of function paint **byte for byte the same**; and
   `tests/function_staged.rs` draws ADR 0025's `DestOut`/`Plus` pair against §11.4.6's line.
-  What is still open is their answer on the two contract questions ADR 0053 §3.2 names.
+  **Nothing is still open here**: their §26 answers *both* of the contract questions
+  ADR 0053 §3.2 names — `true 1 eq` is fixed on their side too and their operand stack has
+  types — and their §27 has the paint adopted and shipping, with the classification refusing
+  both of the documents the ask was originally written about.
   **The population is now measured, and it is four documents** (ADR 0067, 2026-08-18). A census
   over **67 464 PDFs** — the whole of the caller's `corpus-cache`, their tracked corpora and
   pdf.js's suite — found **four** carrying a `/ShadingType 1` together with a type 4 function,

@@ -177,17 +177,54 @@ artwork's reported `recording` is per-pixel geometry outside the span.
 
 ## What to do next, in this order
 
-Two items, and the ordering reason is one sentence: **the caller conversation is the older
-problem and costs an afternoon, while the tiling seam is the only work left with
-milliseconds in it and wants its own measurement before its own design.** A third item — the
-ramp's subdomain boundary — closed as ADR 0055 and is kept below for one round because of
-how it closed.
+**Read their `QUORRA_FEEDBACK.md` before this list, not after it.** On 2026-08-22 every item
+this section named as waiting on them had been answered, and two items nobody here had heard
+of were waiting on us. Their document is the state of the conversation; this one goes stale
+between sessions.
 
-### 1. The adoption round with the caller — cheap, and overdue
+### 0. The two live asks, both theirs, both measured, neither started
 
-Three sections of their `QUORRA_FEEDBACK.md` wait on this side, and **all three are
-drafted** in `doc/feedback-answers-draft.md` — a draft for the owner to carry across, since
-we never edit their tree:
+**Their §31 — our two coverage lanes disagree about *where* a mark goes**, by up to an eighth
+of a device pixel, on four corpus pages (`bug1743245.pdf`, `issue21068.pdf`, `bug1863910.pdf`,
+`issue16500.pdf`), found at `cad50156` with a new instrument of theirs
+(`render-quorra/examples/lane_diff.rs`, one display list handed to both lanes so the document's
+interpretation is not a variable). **The population is axis-aligned rules about one device pixel
+wide, the amount of ink is right and the placement is not**, and the sentence to take seriously
+is theirs: *only one of the two lanes can be the exact one.* It is not a wrong picture and they
+ask nothing that costs a release — they ask two questions, and both are ours to answer from
+ADR 0005 and ADR 0016 rather than from a run:
+
+- is the **default lane's per-command offset** intended, and if it is a quantisation, what is
+  its stated bound? (`bug1743245.pdf` reproduces it in one command)
+- is the **gpu lane's y coverage quantised**, and to what? (`issue16500.pdf` at page scale,
+  raster column 120, rows 141–142 is their smallest witness)
+
+**Their §33 — `upload_outline` builds the GPU lane's quadratics eagerly and a launch never
+reads them.** Measured on their side, two instruments agreeing: on a 3 011 919-segment drawing,
+the first frame spends **156.0 ms of 187.6 ms inside our `upload_*` calls, 83 % of it**, for a
+representation `encode::fill` reads only when `take_gpu_lane` says yes — which is never under
+`Coverage::Cpu`, their default below 10× magnification. Their ask, in their order of value:
+build `QuadOutline` on first use (a `OnceCell`, contract unchanged); failing that a way to say
+it at upload — which they argue *against* themselves, since an outline uploaded under
+`Coverage::Cpu` may be drawn under `Coverage::Gpu` after a zoom; failing that a batch
+`upload_outlines` divisible the way ADR 0054 divides geometry. They explicitly do **not** ask
+about the segment copy or the validation walk (266 M of 1 743 M Ir, "the price of the boundary
+being a boundary").
+
+This is the first item with milliseconds in it since the tiling seam retired, and unlike that
+one it arrives with the caller's own numbers attached.
+
+### 1. The adoption round with the caller — **closed by their §28 and §26**, and it was closed
+### while this file said "overdue"
+
+They took the bump on **2026-08-18** (`Cargo.lock` pins `cad50156`, their commit `47dbaaef`),
+so "they pin twenty commits back" is history. Their **§28** read the three drafted answers
+against their own tree and closed them — §15 and §19 close, `layer_textures` keeps its name —
+and their **§26** answers ADR 0053 §3.2's *both* contract questions, which this file listed as
+theirs to answer for a week after they had. `doc/feedback-answers-draft.md` is spent; keep it
+as the record of what was carried, and do not re-send it.
+
+What the draft said, kept because §28 cites it by section:
 
 - **§15** asks whether the coverage lane bounds a clipped fill by its clip's extent, and
   offers to close itself if yes. It is yes: every coverage tile is `shape ∩ clip ∩ target`
