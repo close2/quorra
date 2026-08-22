@@ -24,6 +24,15 @@ headings in these documents**: the function lane's three coverage gaps closed on
 and the soft-mask/`AIS` question was settled by ADR 0066 on 2026-08-18, while `PLAN.md` went
 on calling all four open. Every one is corrected at its site.
 
+**The 2026-08-22 §31 round found a whole-pixel misplacement and fixed it** (ADR 0073). A
+cached mark whose fractional device offset was within half a quantum of the next pixel was
+drawn a **whole device pixel** low: `.round() as u16 % q` wrapped where it had to carry.
+At the quantum the caller's product ships, their corpus goes **800/155/2/17 →
+933/22/2/17** — 133 pages onto their oracle, none regressed — and the quantum now costs no
+page its verdict at all. Read `doc/notes-glyph-phase-carry.md` before the next placement
+round; §2 of it is three wrong measurements taken on the way, and one of them is a sweep
+aliased with the thing it was sweeping.
+
 **The 2026-08-16/17 improvement rounds are merged and — since 2026-08-18 — pushed**, which
 this paragraph went on denying for four days. `.git/logs/refs/remotes/origin/main` is the
 record the `AI` user can read, and it carries six pushes: `619ef3b → a4380e2 → 44d7acf →
@@ -198,6 +207,13 @@ ADR 0005 and ADR 0016 rather than from a run:
   its stated bound? (`bug1743245.pdf` reproduces it in one command)
 - is the **gpu lane's y coverage quantised**, and to what? (`issue16500.pdf` at page scale,
   raster column 120, rows 141–142 is their smallest witness)
+
+**§31's state after 2026-08-22**: narrowed, not answered, and it produced ADR 0073 on the
+way — which is a bigger finding than the one asked about. A stroked hairline is exact in both
+settings to a byte of alpha; on a default atlas both settings take the *same* lane for a mark
+that size; their own measurement had the quantum off, so their offset is not the quantum.
+Their second question needs a fixture that reaches the sampled lane at all, and
+`doc/notes-glyph-phase-carry.md` §3 names the condition standing in the way.
 
 **Their §33 — `upload_outline` builds the GPU lane's quadratics eagerly and a launch never
 reads them.** Measured on their side, two instruments agreeing: on a 3 011 919-segment drawing,
@@ -660,6 +676,23 @@ forbids stream objects inside object streams; a dictionary-only key needs the `/
 inflation. Reach for this **before** a narrowing round, not after.
 
 ## Traps
+
+**A sweep whose step divides the quantity it sweeps measures that quantity's fixed points.**
+The instrument that found ADR 0073 first swept 16 sub-pixel positions of 1/16 against a
+quantum of 1/16 and reported **exactly zero error at all sixteen** — every sample sat on a
+bucket boundary, so the quantiser had nothing to do and the defect sat inside the buckets
+untouched. Choose a step sharing no factor with the thing under test (37 there), and append
+the positions where the arithmetic changes branch. The same round's `--check` assertion could
+not fail for its own regression for the same reason: four uniform steps visit 0, ¼, ½, ¾ and
+never the top bucket.
+
+**A gate that turns a feature off cannot see that feature's defects.** The caller's 974-page
+corpus gate sets `glyph_quantum: None` deliberately, to isolate backend fidelity from a
+sub-pixel trade — so the instrument both projects reach for first is blind to the setting
+their product ships, and the separate gate that is not blind is a statistical envelope that a
+3 % population of whole-pixel errors moves without breaking. 133 pages hid behind that pair.
+When a defect "cannot be reproduced on the corpus", check what the corpus run configures
+before concluding anything.
 
 **Re-derive a gate's constant from its own fixture before you reuse it.** `m1.rs`'s
 `UNORM_TOLERANCE = 2` carried the derivation "`255/α` on this golden, whose minimum alpha is

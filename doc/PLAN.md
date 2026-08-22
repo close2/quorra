@@ -270,6 +270,32 @@ who could remove it.
 
 ### What is still open
 
+- **A cached mark could land a whole device pixel from where it was placed, and 133 corpus
+  pages were waiting on the fix** (ADR 0073, 2026-08-22, `doc/notes-glyph-phase-carry.md`).
+  `GlyphPlacement::of` quantised a placement's fractional offset with `.round() as u16 % q`,
+  and that expression reaches `q` itself for `fx ≥ 1 − 1/2q` — 3.1 % of phases per axis —
+  where the modulo sent it to bucket 0 of the *same* pixel and left the integer origin alone.
+  Measured at the quantum the caller ships, one copy of their tree: **800/155/2/17 →
+  933/22/2/17**, no page regressed, and the 22 that still differ are name for name the 22
+  that differ with the quantum off. **The quantum now costs no page its verdict**, which
+  retires a claim both trees carried: the page-level cost attributed to "the deliberate
+  sub-1/32-pixel trade" was this defect, not the trade.
+  Three things kept it invisible and each is a trap now: `GlyphPlacement::of` had **no unit
+  test**; every sweep that could have found it was **aliased with the quantum** (16 steps of
+  1/16 measure the quantiser's fixed points and call them the quantiser); and **the caller's
+  corpus gate runs with `glyph_quantum: None`**, so the 974-page instrument both projects
+  rely on cannot reach the path at all.
+- **The caller's §31 is narrowed, not answered.** Their four pages were measured with an
+  instrument that also sets `glyph_quantum: None`, so the per-command offset they report is
+  neither the quantum nor ADR 0073. What our own sweep establishes
+  (`examples/lane_placement.rs`): a **stroked** hairline is exact in both coverage settings to
+  0.0019 device pixels, which is a byte of alpha; and **on a default atlas the two settings
+  are the same lane** for a mark that size, because `take_gpu_lane` declines the device lane
+  for anything `worth_caching`. Their second question — is the sampled lane's y coverage
+  quantised, and to what — is **open**, and the obstacle is named: `take_gpu_lane`'s
+  area-against-triangle-bytes condition refuses a six-triangle band of 528 texels, so no
+  hairline in the tree reaches that grid yet.
+
 - **The residue-clip seam, taken.** The residue is rasterised once per chain rather than
   once per clipped command (ADR 0049), and a clipped mark's coverage tile is now bounded
   by its chain's own device box (ADR 0057) — which took `bug1703683_page2_reduced.pdf`
