@@ -19,6 +19,16 @@
 //! decision, and one is the fuzzer. No test anywhere walked a *range* of scales, and
 //! `examples/zoom.rs`, which does, asserts nothing and is never run by CI.
 //!
+//! **The golden line above is history as of 2026-08-22**, and it is left standing because
+//! it is what this file was written against: `m1.rs`'s
+//! `golden_matches_cpu_reference_at_every_magnification` now runs that comparison at 2× and
+//! 4× as well (ADR 0072, `doc/notes-scale-reference.md`). The division between the two
+//! files is deliberate and is the one below — *this* file states properties that hold at
+//! any scale over three lanes, and `m1.rs` compares bytes against the reference over the
+//! one lane its reference implements. Neither subsumes the other: a reference comparison
+//! cannot reach a stroke or a residue clip, and a property cannot catch an area that is
+//! wrong by 2 %.
+//!
 //! # Why a property and not bytes
 //!
 //! The same page at two magnifications is two different pictures: coverage is an area, so

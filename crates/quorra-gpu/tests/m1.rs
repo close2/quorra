@@ -19,10 +19,20 @@
 //! was **measured and is "no"**: the float→unorm8 store conversion of the
 //! fixed-function raster path is implementation-defined per driver — a single opaque
 //! rectangle of colour 0.1 stores as 26 on llvmpipe and 25 on RADV — so those gates
-//! pin a stated bound instead: ±1 unorm step per blend stage in premultiplied space,
-//! which the straight-alpha conversion amplifies by at most 255/α (≤ ±2 on this
-//! golden, whose minimum alpha is 128). ADR 0006 records the probes and the design
-//! consequence; drift beyond the bound still fails loudly.
+//! pin a stated bound instead: ±1 unorm step per store in premultiplied space, which
+//! the straight-alpha conversion amplifies by 255/α. ADR 0006 records the probes and
+//! the design consequence; drift beyond the bound still fails loudly.
+//!
+//! **The bound is read at each pixel, not off the fixture's worst one** ([`bound_at`]),
+//! and that is a correction made on 2026-08-22 rather than the shape this file was
+//! written in. It carried a single `UNORM_TOLERANCE = 2`, derived in its own comment
+//! from "this golden, whose minimum alpha is 128" — and **this golden's minimum alpha
+//! is 24**, at the corner pixel where an extent of 0.75 meets one of 0.125. The
+//! constant was therefore enforcing something its stated derivation does not give
+//! (255/24 ≈ 11), which is the failure principle 5 names: a number that passes for a
+//! reason nobody can re-derive. Read at the pixel, the same derivation is *stronger*
+//! than the constant almost everywhere — 2 where α is 255 and two commands stored, as
+//! before — and honest at the four sliver pixels where the amplification is real.
 
 // Integration-test files sit outside `#[cfg(test)]`, so `clippy.toml`'s
 // allow-unwrap-in-tests does not reach them; this is the same policy, stated here.
@@ -45,8 +55,6 @@ use quorra_scene::{
 };
 
 mod common;
-
-use common::probe::max_byte_diff;
 
 /// Every Vulkan adapter on this machine, by name. The determinism promises quoted in
 /// the module docs are made for Vulkan adapters (RADV and lavapipe are what the
@@ -150,12 +158,17 @@ fn golden_scene() -> Scene {
 const GOLDEN_W: u32 = 48;
 const GOLDEN_H: u32 = 32;
 
-/// The golden viewport carries the y-flip, as §3 of the brief places it: scene y-up,
-/// device y-down.
-fn golden_viewport() -> Viewport<'static> {
+/// The golden viewport at magnification `scale`: the y-flip §3 of the brief places
+/// there — scene y-up, device y-down — into a target `scale` times the golden.
+///
+/// The flip is applied in scene units and magnified afterwards, so that one scene
+/// describes the fixture at every scale and the only thing a magnification changes is
+/// how much of a device pixel each edge covers.
+fn golden_viewport_at(scale: u32) -> Viewport<'static> {
+    let s = scale as f32;
     Viewport::full(
-        GOLDEN_W,
-        GOLDEN_H,
+        GOLDEN_W * scale,
+        GOLDEN_H * scale,
         Affine {
             a: 1.0,
             b: 0.0,
@@ -163,19 +176,45 @@ fn golden_viewport() -> Viewport<'static> {
             d: -1.0,
             e: 0.0,
             f: 32.0,
-        },
+        }
+        .then(Affine::scale(s, s)),
     )
+}
+
+/// The golden viewport the M1 gates are stated at.
+fn golden_viewport() -> Viewport<'static> {
+    golden_viewport_at(1)
+}
+
+/// What the reference rasterised: its straight-alpha bytes, and **how many times each
+/// pixel was stored**.
+///
+/// The second field is not decoration. ADR 0006's bound is *per store* — the
+/// float→unorm8 conversion is what differs between implementations, and it happens once
+/// per command that covers the pixel — so the number of stores is the multiplier of the
+/// bound at that pixel, and it is a fact only the rasteriser knows. Counting it here is
+/// what lets [`bound_at`] be derived rather than typed, at any scale and for any scene
+/// this reference can draw.
+struct Reference {
+    /// Straight-alpha RGBA, as [`quorra_gpu::Raster`] hands back.
+    pixels: Vec<u8>,
+    /// Commands that stored to each pixel, in the same order as `pixels`' four-byte groups.
+    ///
+    /// Signed because every use of it is one side of a difference of bytes, and a count
+    /// that has to be cast at each use is a cast that can be wrong at one of them.
+    stores: Vec<i32>,
 }
 
 /// The reference rasteriser: the documented coverage and compositing rule of
 /// `doc/adr/0005`, implemented independently of the GPU path (same definition, second
 /// implementation — which is what makes the comparison a check and not a tautology).
-fn cpu_reference(scene: &Scene, viewport: &Viewport<'_>) -> Vec<u8> {
+fn cpu_reference(scene: &Scene, viewport: &Viewport<'_>) -> Reference {
     let width = viewport.width as usize;
     let height = viewport.height as usize;
     // Premultiplied f32 working target, quantised to unorm8 after every command —
     // matching an rgba8unorm attachment, which stores 8 bits between draws.
     let mut target = vec![[0_u8; 4]; width * height];
+    let mut stores = vec![0_i32; width * height];
     for command in scene.commands() {
         let quorra_scene::Command::Rect {
             rect,
@@ -215,6 +254,7 @@ fn cpu_reference(scene: &Scene, viewport: &Viewport<'_>) -> Vec<u8> {
                     continue;
                 }
                 let dst = &mut target[y * width + x];
+                stores[y * width + x] += 1;
                 let src_a = premul[3] * coverage;
                 for channel in 0..4 {
                     let src = premul[channel] * coverage;
@@ -241,7 +281,10 @@ fn cpu_reference(scene: &Scene, viewport: &Viewport<'_>) -> Vec<u8> {
             out.push(a);
         }
     }
-    out
+    Reference {
+        pixels: out,
+        stores,
+    }
 }
 
 /// On mismatch, both rasters land as PNGs a person can look at.
@@ -261,24 +304,92 @@ fn write_artifact(name: &str, width: u32, height: u32, pixels: &[u8]) -> std::pa
     path
 }
 
-fn render_golden(device: &mut Device) -> Vec<u8> {
+fn render_golden_at(device: &mut Device, scale: u32) -> Vec<u8> {
     device
-        .render(&golden_scene(), &golden_viewport(), Target::Readback)
+        .render(
+            &golden_scene(),
+            &golden_viewport_at(scale),
+            Target::Readback,
+        )
         .expect("the golden scene is within every budget")
         .into_raster()
         .expect("a Readback frame carries a raster")
         .into_pixels()
 }
 
-/// The stated cross-implementation bound (module docs, ADR 0006): ±1 unorm step per
-/// blend stage in premultiplied space, amplified to at most ±2 by the straight-alpha
-/// conversion on this golden (minimum alpha 128).
+fn render_golden(device: &mut Device) -> Vec<u8> {
+    render_golden_at(device, 1)
+}
+
+/// The stated cross-implementation bound (module docs, ADR 0006), **read at one pixel**:
+/// ±1 unorm step per store in premultiplied space, amplified by the straight-alpha
+/// conversion by `255/α`.
 ///
-/// **A property of this golden, which is why it did not move to `common::probe` with
-/// [`max_byte_diff`].** The `255/α` amplification is read off *this* fixture's minimum
-/// alpha; `m3.rs` states its own for the same reason, and its page's is 29 rather than
-/// 128. One name over two fixtures would be one number claiming two derivations.
-const UNORM_TOLERANCE: i32 = 2;
+/// Both inputs are properties of the pixel rather than of the fixture, which is what
+/// makes this derivable instead of typed: `stores` is what the reference counted (see
+/// [`Reference`]), and `alpha` is what the two sides agree the pixel's coverage came to.
+/// A pixel nothing stored to must agree exactly — a device that inks where the reference
+/// does not is not a rounding difference, and §3's "transparent is `[0, 0, 0, 0]`" is what
+/// makes that checkable.
+///
+/// **`m3.rs` states its own bound and should keep doing so**: that page's is a claim about
+/// a fixture, and this is arithmetic over a pixel. The two are different kinds of thing,
+/// which is the seam `tests/common/probe.rs` already draws — a measurement is shared, a
+/// claim about a fixture is not.
+fn bound_at(alpha: u8, stores: i32) -> i32 {
+    if alpha == 0 {
+        return 0;
+    }
+    let alpha = i32::from(alpha);
+    // Rounded up: the bound is what the conversion can produce, and a fractional step is
+    // a whole one once it lands in a byte.
+    (stores * 255 + alpha - 1) / alpha
+}
+
+/// The worst pixel at which `actual` differs from `reference` by more than [`bound_at`]
+/// allows, described in the terms an assertion needs — or `None` if none does.
+///
+/// "Worst" is by how far the difference **exceeds its own bound**, not by the raw
+/// difference: a 3-step difference at α = 24 is inside the amplification and a 3-step one
+/// at α = 255 is not, and the pixel worth naming in the panic is the second.
+fn disagreement(actual: &[u8], reference: &Reference, width: u32) -> Option<String> {
+    assert_eq!(
+        actual.len(),
+        reference.pixels.len(),
+        "the device and the reference rasterised different numbers of pixels"
+    );
+    let mut worst: Option<(usize, usize, i32, i32)> = None;
+    for (index, stores) in reference.stores.iter().enumerate() {
+        let (got, want) = (
+            &actual[index * 4..index * 4 + 4],
+            &reference.pixels[index * 4..index * 4 + 4],
+        );
+        // The smaller of the two alphas is the one that amplifies more, so it is the one
+        // the bound is read at: taking the reference's alone would let a device that
+        // rounded α down claim the slack of an α it did not produce.
+        let colour = bound_at(got[3].min(want[3]), *stores);
+        for channel in 0..4 {
+            // The alpha channel is stored straight and so is never amplified: it carries
+            // the per-store bound itself.
+            let bound = if channel == 3 { *stores } else { colour };
+            let excess = (i32::from(got[channel]) - i32::from(want[channel])).abs() - bound;
+            if excess > 0 && worst.is_none_or(|(_, _, previous, _)| excess > previous) {
+                worst = Some((index, channel, excess, bound));
+            }
+        }
+    }
+    let (index, channel, excess, bound) = worst?;
+    let (x, y) = (index as u32 % width, index as u32 / width);
+    Some(format!(
+        "at ({x}, {y}) channel {channel}: got {:?}, expected {:?} — {} unorm steps past a \
+         bound of {bound} ({} stores at α {})",
+        &actual[index * 4..index * 4 + 4],
+        &reference.pixels[index * 4..index * 4 + 4],
+        excess + bound,
+        reference.stores[index],
+        actual[index * 4 + 3].min(reference.pixels[index * 4 + 3]),
+    ))
+}
 
 /// The golden: every Vulkan adapter agrees with the CPU reference within the stated
 /// unorm-conversion bound.
@@ -288,8 +399,7 @@ fn golden_matches_cpu_reference_on_every_adapter() {
     for adapter in vulkan_adapters() {
         let mut device = device_for(&adapter);
         let actual = render_golden(&mut device);
-        let diff = max_byte_diff(&actual, &expected);
-        if diff > UNORM_TOLERANCE {
+        if let Some(where_) = disagreement(&actual, &expected, GOLDEN_W) {
             let got = write_artifact(
                 &format!("golden-actual-{adapter}"),
                 GOLDEN_W,
@@ -300,17 +410,63 @@ fn golden_matches_cpu_reference_on_every_adapter() {
                 &format!("golden-expected-{adapter}"),
                 GOLDEN_W,
                 GOLDEN_H,
-                &expected,
+                &expected.pixels,
             );
             panic!(
-                "adapter '{}' differs from the CPU reference by {} unorm steps (bound: {}; \
-                 artefacts: {} vs {})",
+                "adapter '{}' differs from the CPU reference: {where_} (artefacts: {} vs {})",
                 device.description(),
-                diff,
-                UNORM_TOLERANCE,
                 got.display(),
                 want.display()
             );
+        }
+    }
+}
+
+/// The magnifications this file compares the reference at, beyond the scale-1 gate above.
+///
+/// 2 is where the caller's corpus starts refusing and 4 is their separate gate, which is
+/// `scale_invariance.rs`'s reason for the same two numbers.
+const GOLDEN_SCALES: [u32; 2] = [2, 4];
+
+/// **The reference comparison, at a magnification.** Until 2026-08-22 this suite checked
+/// its pixels against the independent CPU rasteriser at scale 1 and nowhere else — 187 of
+/// 198 viewports in the suite were scale 1, and `scale_invariance.rs` closed half of that
+/// with a property (ink is area) rather than with a reference.
+///
+/// A magnification is not a repetition here. Every edge of the golden is fractional, so
+/// `s` changes which fraction of a device pixel each edge covers and therefore every
+/// coverage value, every partial alpha and the amplification the bound is read through:
+/// the fixture's own minimum alpha is 24 at 1×, 32 at 2× and 128 at 4×. What must not
+/// change is that the device computes the same areas the ADR defines.
+#[test]
+fn golden_matches_cpu_reference_at_every_magnification() {
+    for scale in GOLDEN_SCALES {
+        let viewport = golden_viewport_at(scale);
+        let expected = cpu_reference(&golden_scene(), &viewport);
+        for adapter in vulkan_adapters() {
+            let mut device = device_for(&adapter);
+            let actual = render_golden_at(&mut device, scale);
+            if let Some(where_) = disagreement(&actual, &expected, viewport.width) {
+                let got = write_artifact(
+                    &format!("golden-{scale}x-actual-{adapter}"),
+                    viewport.width,
+                    viewport.height,
+                    &actual,
+                );
+                let want = write_artifact(
+                    &format!("golden-{scale}x-expected-{adapter}"),
+                    viewport.width,
+                    viewport.height,
+                    &expected.pixels,
+                );
+                panic!(
+                    "adapter '{}' differs from the CPU reference at {scale}×: {where_} \
+                     (artefacts: {} vs {})",
+                    device.description(),
+                    got.display(),
+                    want.display()
+                );
+            }
         }
     }
 }
@@ -355,15 +511,24 @@ fn cross_adapter_output_stays_within_the_stated_bound() {
             (name.clone(), render_golden(&mut device))
         })
         .collect();
+    // Each adapter is within one store's rounding of the CPU reference, so between two of
+    // them the same derivation gives twice that — the only place in this file where the
+    // bound is doubled, and it is doubled because there are two conversions in it rather
+    // than because a run needed the slack.
+    let counted = cpu_reference(&golden_scene(), &golden_viewport());
     let (reference_name, reference) = &rasters[0];
+    let between_adapters = Reference {
+        pixels: reference.clone(),
+        stores: counted.stores.iter().map(|stores| stores * 2).collect(),
+    };
     for (name, raster) in &rasters[1..] {
-        let diff = max_byte_diff(raster, reference);
-        assert!(
-            diff <= UNORM_TOLERANCE,
-            "adapters '{name}' and '{reference_name}' differ by {diff} unorm steps \
-             (stated bound: {UNORM_TOLERANCE}, ADR 0006) — something beyond store-conversion \
-             rounding diverged"
-        );
+        if let Some(where_) = disagreement(raster, &between_adapters, GOLDEN_W) {
+            panic!(
+                "adapters '{name}' and '{reference_name}' differ beyond twice the \
+                 store-conversion bound (ADR 0006): {where_} — something beyond rounding \
+                 diverged"
+            );
+        }
     }
 }
 
