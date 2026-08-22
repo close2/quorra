@@ -124,13 +124,30 @@ impl GlyphPlacement {
         rule: Rule,
         quantum: Option<u16>,
     ) -> Self {
-        let (ix, fx) = (to_device.e.floor(), to_device.e - to_device.e.floor());
-        let (iy, fy) = (to_device.f.floor(), to_device.f - to_device.f.floor());
+        let (mut ix, fx) = (to_device.e.floor(), to_device.e - to_device.e.floor());
+        let (mut iy, fy) = (to_device.f.floor(), to_device.f - to_device.f.floor());
         let (phase, px, py) = match quantum {
             Some(q) => {
                 let fq = f32::from(q);
-                let nx = (fx * fq).round() as u16 % q;
-                let ny = (fy * fq).round() as u16 % q;
+                // **`round` reaches `q` itself, and that is a carry rather than a wrap.**
+                // A fraction within half a quantum of the next pixel — `fx ≥ 1 − 1/2q`,
+                // which is 3.1 % of phases at the default quantum of 16 — rounds to the
+                // *next pixel's* phase zero. Taking `% q` and leaving the integer part
+                // alone drew such a mark a whole device pixel low: the tile was
+                // rasterised at phase 0 and seated at `floor(e)`, where the placement
+                // asked for `floor(e) + 1`. It is the one input the quantum is not a
+                // bound for, so it must be added to the origin instead of discarded
+                // (ADR 0073; found by `examples/lane_placement.rs`).
+                let mut nx = (fx * fq).round() as u16;
+                let mut ny = (fy * fq).round() as u16;
+                if nx == q {
+                    nx = 0;
+                    ix += 1.0;
+                }
+                if ny == q {
+                    ny = 0;
+                    iy += 1.0;
+                }
                 (
                     PhaseKey::Quantised(nx, ny),
                     f32::from(nx) / fq,
@@ -483,7 +500,7 @@ impl AtlasStore {
 #[allow(clippy::arithmetic_side_effects)] // test tile sizes are tiny and literal
 mod tests {
     use super::{AtlasStore, GlyphKey, GlyphPlacement, PhaseKey};
-    use crate::raster::{CoverageMask, Rule};
+    use crate::raster::{CoverageMask, DeviceTransform, Rule};
 
     fn key(outline: u32, phase: (u16, u16)) -> GlyphKey {
         GlyphKey {
@@ -502,6 +519,99 @@ mod tests {
             height,
             coverage: vec![255; (width * height) as usize],
         }
+    }
+
+    /// A placement of outline 1 at a device translation, through the default quantum.
+    fn placed(e: f32, f: f32, quantum: Option<u16>) -> GlyphPlacement {
+        GlyphPlacement::of(
+            quorra_scene::OutlineId(1),
+            &DeviceTransform {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e,
+                f,
+            },
+            Rule::NonZero,
+            quantum,
+        )
+    }
+
+    /// Where the placement says the mark's own origin lands, which is the sum the tile is
+    /// seated at: the integer origin plus the phase it was rasterised for.
+    fn lands_at(placement: &GlyphPlacement) -> (f32, f32) {
+        (
+            placement.origin[0] + placement.phase[0],
+            placement.origin[1] + placement.phase[1],
+        )
+    }
+
+    /// **The quantum is a bound on where a mark lands, and this is that bound.**
+    ///
+    /// `Options::glyph_quantum` rounds a placement's fractional device offset to `1/q` of
+    /// a pixel so that repeats of one outline share a rasterisation (ADR 0009, §4.5's
+    /// fifth decision). Rounding to the nearest of `q` buckets moves a mark by at most
+    /// half a bucket, so the whole of what the setting costs in *position* is
+    /// `1/2q` — 1/32 of a device pixel at the default 16, in each axis independently.
+    #[test]
+    fn a_quantised_phase_moves_a_mark_by_at_most_half_a_quantum() {
+        for step in 0_u16..=512 {
+            let offset = f32::from(step) / 512.0;
+            let (x, y) = lands_at(&placed(20.0 + offset, 40.0 + offset, Some(16)));
+            for (got, want) in [(x, 20.0 + offset), (y, 40.0 + offset)] {
+                assert!(
+                    (got - want).abs() <= 1.0 / 32.0,
+                    "a placement at {want} landed at {got}, past half of a 1/16 quantum"
+                );
+            }
+        }
+    }
+
+    /// **A fraction within half a quantum of the next pixel carries, and does not wrap.**
+    ///
+    /// The regression this file had no test for until 2026-08-22: `(fx * q).round()`
+    /// reaches `q` for any `fx ≥ 1 − 1/2q`, and taking `% q` of it mapped such a placement
+    /// to phase zero of the *same* pixel instead of phase zero of the next one — a whole
+    /// device pixel, on 3.1 % of phases per axis, on the lane that draws text. Stated as
+    /// the two halves it is made of, so that a future `%` cannot pass one of them.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "every value compared here is exact by construction: a phase of zero, an \
+                  integer origin, and 0.875 = 14/16, none of which is the result of an \
+                  approximation"
+    )]
+    fn a_phase_that_rounds_to_the_next_pixel_carries_into_the_origin() {
+        let placement = placed(20.99, 40.99, Some(16));
+        assert_eq!(
+            placement.phase,
+            [0.0, 0.0],
+            "it is the next pixel's phase 0"
+        );
+        assert_eq!(
+            placement.origin,
+            [21.0, 41.0],
+            "and the next pixel's origin"
+        );
+        assert_eq!(placement.key.phase, PhaseKey::Quantised(0, 0));
+        // The bucket below it does not carry: 0.9 × 16 = 14.4, which rounds to 14.
+        let below = placed(20.9, 40.9, Some(16));
+        assert_eq!(below.origin, [20.0, 40.0]);
+        assert_eq!(below.phase, [0.875, 0.875]);
+    }
+
+    /// An exact-phase placement is exact: no quantum, no carry, no bound to state.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "an unquantised placement is exact: that is the whole claim, so an \
+                  approximate comparison would test something weaker than it states"
+    )]
+    fn an_unquantised_placement_lands_where_it_was_asked_to() {
+        let placement = placed(20.99, 40.99, None);
+        assert_eq!(lands_at(&placement), (20.99, 40.99));
+        assert!(matches!(placement.key.phase, PhaseKey::Exact(_, _)));
     }
 
     /// Insert, hit, and the pending upload carries the packed position.
