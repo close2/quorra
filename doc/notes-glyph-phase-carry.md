@@ -83,11 +83,15 @@ the bound over 513 positions, the carry itself in both halves, and the exact-pha
 
 ## 5. The corpus, and the gate that could not see it
 
-**The first corpus run measured nothing, and said so only when it was checked.** The
-`[patch]` produced `warning: patch 'quorra' was not used in the crate graph`, and it took
-reading `Cargo.lock` for a missing `source =` line to establish that `quorra-gpu` and
-`quorra-scene` *were* patched and only the unused umbrella crate was not. Then the
-instrumentation printed nothing at all, which is what led to the real obstacle:
+**The first pair of runs looked like a broken instrument and was not one** — corrected here
+on the same day it was written, because the first draft of this section said they "measured
+nothing" and that is false. The `[patch]` does print `warning: patch 'quorra' was not used in
+the crate graph`, which is alarming and is about the **umbrella crate the caller does not
+depend on**; `Cargo.lock`'s entries for `quorra-gpu` and `quorra-scene` carry no `source =`
+line, which is how a patched path dependency appears, so both runs were real. What they
+measured is a genuine and useful null: **at their gate's own configuration the fix moves
+nothing**, 933/22/2/17 before and after. The instrumentation's silence is the same fact from
+the other side, and it is what led to the obstacle:
 
 **`render-quorra/tests/corpus.rs` sets `glyph_quantum: None`.** Their gate runs with the
 quantum *off*, on purpose — their comment says it isolates the backend's fidelity from "the
@@ -97,7 +101,8 @@ that can is an envelope over mean, worst tile and SSIM, which a 3 % population o
 misplacements moves but does not break.
 
 Re-run in the same copy with `glyph_quantum: Some(16)` — the setting `render_quorra::options()`
-actually ships — base against the working tree, 2026-08-22:
+actually ships, and the one thing that had to change to see anything at all — base against the
+working tree, 2026-08-22:
 
 | | agree | differ | refused | not comparable |
 |---|---:|---:|---:|---:|
