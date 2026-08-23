@@ -54,6 +54,43 @@ use quorra_scene::{Affine, OutlineId, Scene};
 /// and re-cutting one in the round that moved it is the trap
 /// `doc/notes-clipped-instrument.md` §3.4 names.
 ///
+/// # Why the dense-text row stays unclipped — decided 2026-08-23, not deferred again
+///
+/// `doc/HANDOVER.md` carried this as an open question from 2026-08-17: whether the sweep
+/// should run `DENSE_TEXT` — the archetype, with its two curve clips — and put its 40
+/// residue-clipped marks into the "does not divide" column where `ARTWORK` already is.
+/// **Measured, and declined.** Three numbers, none of them a clock:
+///
+/// - **Those 40 marks really do not divide**, and that is a fact about the dispatch rather
+///   than about a timing. `Encoder::deferrable_bounds` returns `None` whenever the chain
+///   has a residue, and the glyph lane's guard requires `residues.is_none()`, so a
+///   residue-clipped mark reaches neither queued lane and is flattened and scanned on the
+///   walk. The premise is sound; it is the *size* of it that decides this.
+/// - **It is 1.84 % of the page's coverage work.** The archetype's serial residue is
+///   40 tiles of **8 956** coverage texels (`quorra_pages::DENSE_TEXT`'s recorded row);
+///   the parallel side is the atlas working set, **476 892** bytes — identical on both
+///   pages, measured here on llvmpipe, since the clips change no glyph tile. 8 956 of
+///   485 848. Carried through Amdahl at the ~2.8× this page actually reaches at 24
+///   threads, that moves the scaling ratio by about **3 %**.
+/// - **`ARTWORK` says the same thing 396× louder.** Its serial residue is 3 542 360
+///   coverage texels against dense text's 8 956. The archetype would not be a second
+///   entry in the "does not divide" column; it would be the unclipped page plus a quarter
+///   of one percent of artwork's.
+///
+/// Against that 3 %, this instrument's reproducibility on this machine: two sweeps of the
+/// *same* configuration on 2026-08-23, 9 rounds at load average 19 and 15 rounds at load
+/// average 101, reported 1-thread `encode: geometry` minima of **6.17 ms and 11.68 ms**
+/// for the archetype — an 89 % spread, and in the lower run the clipped page came out
+/// *faster* than the unclipped one, which the dispatch above says is impossible. The
+/// effect the switch exists to expose is thirty times smaller than the noise the
+/// instrument had that day. A shape that earns its place in a sweep is one the sweep can
+/// resolve; this one is not, and adding it would cost ADR 0054's series its comparability
+/// for a row nobody could read.
+///
+/// What the question was really about — that "dense text" here and "dense text" in
+/// `tests/archetypes.rs` were two pages under one name — is closed already, and by naming
+/// rather than by measuring: the row this prints says `dense text, unclipped`.
+///
 /// The order is the order the sweep prints: the caller's page first, because it is the
 /// one their `doc/QUORRA_ENCODE_THREADS.md` asks about; artwork second, because its 600
 /// residue-clipped marks are the case that does **not** divide; then the atlas shape and
