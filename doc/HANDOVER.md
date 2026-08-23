@@ -24,9 +24,12 @@ headings in these documents**: the function lane's three coverage gaps closed on
 and the soft-mask/`AIS` question was settled by ADR 0066 on 2026-08-18, while `PLAN.md` went
 on calling all four open. Every one is corrected at its site.
 
-**One document of ours lives in their tree, by the owner's instruction** (2026-08-22):
-`/home/cl/projects/pdf-viewer/doc/QUORRA_GLYPH_PHASE_CARRY.md`, written there rather than
-drafted here because the owner asked for it in that form. It is **left uncommitted** — their
+**Two documents of ours live in their tree, by the owner's instruction** (2026-08-22 and
+2026-08-23): `/home/cl/projects/pdf-viewer/doc/QUORRA_GLYPH_PHASE_CARRY.md` and
+`QUORRA_CLIP_LANE_AND_UPLOAD.md` — the second answers their §36, §33 and §31 and **asks them
+three questions**, of which the first (is `alpha_is_shape` set on any group of
+`22060_A1_01_Plans.pdf`?) blocks ADR 0074's remaining half. Written there rather than drafted
+here because the owner asked for them in that form. It is **left uncommitted** — their
 tree is theirs to commit, and they work in it concurrently. The standing rule is unchanged
 and this is the exception that proves it needs naming: **we do not edit their tree unless the
 owner says to, and we never commit in it.**
