@@ -144,6 +144,23 @@ const LEFT: f32 = 20.2;
 /// stopped working below here".
 const SUB_PIXEL_WIDTHS: [f32; 6] = [0.75, 0.5, 0.25, 0.125, 0.1, 0.05];
 
+/// Widths at or above the sample spacing that the grid's own pitch does **not** divide.
+///
+/// **Every width in [`SUB_PIXEL_WIDTHS`] at or above the spacing is a multiple of a
+/// quarter** — 0.75, 0.5 and 0.25 — and a quarter is exactly the default grid's pitch. A
+/// band whose width is a multiple of the pitch contains the same number of sample rows
+/// *wherever it lands*, so the device lane draws its exact area at every position and the
+/// two tests below have been measuring the quantiser's own fixed points since they were
+/// written. That is the aliasing trap `doc/notes-glyph-phase-carry.md` §2 records having
+/// already been paid for once in the glyph phase, standing here in the coverage grid.
+///
+/// These are the widths that can see it. 0.878 is the caller's own witness —
+/// `QUORRA_FEEDBACK.md` §31.2, `issue16500.pdf`'s table rule, where they measured 0.753 of
+/// ink for 0.878 of shape — and the other two are a wide and a narrow one either side of
+/// it. None of the three is a multiple of ¼, ½ or ⅛, so none is a fixed point of any grid
+/// `Options::coverage_samples` admits. ADR 0076 is what they measure.
+const OFF_LATTICE_WIDTHS: [f32; 3] = [0.878, 0.6, 0.31];
+
 fn device_with(coverage: Coverage) -> Device {
     Device::headless(&Options {
         adapter: Some("llvmpipe".into()),
@@ -282,19 +299,36 @@ fn rasterised_bar(device: &mut Device, width: f32) -> Scene {
 
 /// §10.7.4's two decidable requirements, asserted over one row of a mark of width `w`.
 fn assert_the_clause_holds(ink: f32, w: f32, lane: &str) {
+    assert_the_shape_did_not_disappear(ink, w, lane);
+    // "The area covered by painted pixels shall always be at least as large as the area of
+    // the original shape" — in the units an antialiased device has, with one 8-bit
+    // rounding allowed for by ADR 0006's store.
+    //
+    // **Not asserted of the device lane at an arbitrary width**, and ADR 0076 is why: that
+    // lane's ink is a count of sample rows times the grid's pitch, so it is below the
+    // shape's area whenever the pitch does not divide the width. Every device-lane caller
+    // of this function passes a width the pitch *does* divide, which is what made the
+    // requirement hold there; `the_device_lanes_ink_is_quantised_to_one_sample_row` is the
+    // sweep that does not, and it states the honest bound instead.
+    assert!(
+        ink >= w - 1.0 / 255.0,
+        "{lane}, width {w}: {ink} of ink where §10.7.4 requires the covered area to be at \
+         least the shape's own"
+    );
+}
+
+/// §10.7.4's first decidable requirement alone — the one that holds on **every** lane.
+///
+/// > A shape shall be scan-converted by painting any pixel whose half-open square region
+/// > intersects the shape, no matter how small the intersection is. This ensures that no
+/// > shape ever disappears as a result of unfavourable placement relative to the device
+/// > pixel grid, as might happen with other possible scan conversion rules.
+fn assert_the_shape_did_not_disappear(ink: f32, w: f32, lane: &str) {
     assert!(
         ink > 0.0,
         "{lane}, width {w}: the mark disappeared. §10.7.4: painting any pixel the shape \
          intersects \"ensures that no shape ever disappears as a result of unfavourable \
          placement relative to the device pixel grid\""
-    );
-    // "The area covered by painted pixels shall always be at least as large as the area of
-    // the original shape" — in the units an antialiased device has, with one 8-bit
-    // rounding allowed for by ADR 0006's store.
-    assert!(
-        ink >= w - 1.0 / 255.0,
-        "{lane}, width {w}: {ink} of ink where §10.7.4 requires the covered area to be at \
-         least the shape's own"
     );
 }
 
@@ -407,6 +441,15 @@ fn sample_column_spacing() -> f32 {
 /// The device lane, on the widths its sample grid can represent: a mark at least one column
 /// spacing wide catches at least one column of samples wherever it sits, so §10.7.4 holds
 /// there.
+///
+/// **And it holds there for a narrower reason than the name suggests**, which ADR 0076
+/// found and this comment records rather than leaving to be inferred. The widths this sweep
+/// reaches are 0.75, 0.5 and 0.25 — every one of them a multiple of the grid's own ¼ pitch —
+/// and a band whose width the pitch divides holds the same count of sample rows *wherever it
+/// lands*. Its ink is therefore exact at every position by arithmetic, not by fidelity, and
+/// the clause's area floor cannot fail here whatever the lane does elsewhere.
+/// [`the_device_lanes_ink_is_quantised_to_one_sample_row`] is the sweep at widths the pitch
+/// does not divide, and there it does fail.
 #[test]
 fn the_device_lane_meets_the_clause_down_to_its_sample_spacing() {
     let mut device = device_with(Coverage::Gpu);
@@ -433,6 +476,59 @@ fn the_device_lane_meets_the_clause_down_to_its_sample_spacing() {
         "the sweep no longer contains widths the sample grid can represent, so this test \
          asserted nothing"
     );
+}
+
+/// **What the device lane's grid does to a mark whose width its pitch does not divide** —
+/// ADR 0076, and the half of §10.7.4 that lane does not meet.
+///
+/// The neighbouring tests sweep 0.75, 0.5 and 0.25, every one of them a multiple of the
+/// default grid's ¼ pitch, so a band of any of them holds the same number of sample rows at
+/// every position and the clause's area floor holds there by arithmetic rather than by
+/// fidelity. [`OFF_LATTICE_WIDTHS`] is what that leaves out, and what it leaves out is the
+/// caller's `issue16500.pdf`.
+///
+/// **What this asserts, and what it deliberately does not.** The ink is a count of sample
+/// rows times the pitch, so it is within one pitch of the shape's area and no closer — that
+/// is the bound, and it is two-sided. The clause's *floor* is not asserted here because it
+/// does not hold: a band of 0.878 pixels covering three sample rows draws 0.75, which is
+/// less area than the shape has, and no arrangement of a sample-counting rasteriser avoids
+/// it. §10.7.4's first requirement is asserted, because the mark still cannot disappear —
+/// ADR 0070's condition guarantees it above the spacing — and it is the requirement this
+/// lane does keep.
+#[test]
+fn the_device_lanes_ink_is_quantised_to_one_sample_row() {
+    let mut device = device_with(Coverage::Gpu);
+    let pitch = sample_column_spacing();
+    // Ten sub-pixel positions per width, so no single placement carries the result — the
+    // quantiser's answer is a function of where the band's edges fall between the columns,
+    // which is the whole subject.
+    for w in OFF_LATTICE_WIDTHS {
+        // The guard on the guard: a width the pitch divides is a fixed point of the
+        // quantiser and this sweep would assert nothing at it. Both sides of the fraction,
+        // because 3.99 pitches is as near a fixed point as 4.01 is.
+        let pitches = (w / pitch).fract();
+        assert!(
+            w > pitch && (0.05..=0.95).contains(&pitches),
+            "{w} is {pitches:.3} of a pitch from a multiple of the grid's {pitch}, so it is a \
+             fixed point of the quantiser and this sweep would assert nothing"
+        );
+        for step in 0..10 {
+            let left = 20.0 + step as f32 / 10.0;
+            let scene = rasterised_bar_at(&mut device, left, w);
+            let ink = row_ink(&render(&mut device, &scene, TALL), TALL, TALL / 2);
+            let named = format!("the device lane at {left}");
+            assert_the_shape_did_not_disappear(ink, w, &named);
+            // The bound ADR 0076 states, and the reason a `Coverage::Gpu` caller can price
+            // this lane: the answer is `k` sample rows of `pitch` each, so it is inside one
+            // pitch of the area either way. The 8-bit store adds `n/8` levels on top, which
+            // at sixteen samples is four hundredths of a pitch.
+            assert!(
+                (ink - w).abs() <= pitch + 4.0 / 255.0,
+                "{named}, width {w}: {ink} of ink, further from the shape's area than the \
+                 sample grid's own pitch of {pitch}"
+            );
+        }
+    }
 }
 
 /// The **upper edge of the recorded gap below**, which is the width every option in
