@@ -24,17 +24,22 @@ use quorra_scene::{
 
 mod common;
 
+use common::bound::{Reference, disagreement};
 use common::headless::device;
-use common::probe::max_byte_diff;
 use common::scene::rect_outline;
 
 /// The reference for clipped rectangles: ADR 0005's coverage and compositing rule
 /// with ADR 0007's clip resolution — chains intersect to one rectangle, applied by
 /// intersection before coverage.
-fn cpu_reference(scene: &Scene, viewport: &Viewport<'_>, clip_rects: &[Rect]) -> Vec<u8> {
+///
+/// It counts its stores, which is what [`disagreement`] reads the bound at each pixel
+/// from — see the note above [`three_hundred_three_identical_clips_collapse_to_one_region`]
+/// for why a clip suite in particular wants that rather than a constant.
+fn cpu_reference(scene: &Scene, viewport: &Viewport<'_>, clip_rects: &[Rect]) -> Reference {
     let width = viewport.width as usize;
     let height = viewport.height as usize;
     let mut target = vec![[0_u8; 4]; width * height];
+    let mut stores = vec![0_i32; width * height];
     for command in scene.commands() {
         let quorra_scene::Command::Rect {
             rect,
@@ -86,6 +91,7 @@ fn cpu_reference(scene: &Scene, viewport: &Viewport<'_>, clip_rects: &[Rect]) ->
                     continue;
                 }
                 let dst = &mut target[y * width + x];
+                stores[y * width + x] += 1;
                 let src_a = premul[3] * coverage;
                 for channel in 0..4 {
                     let src = premul[channel] * coverage;
@@ -113,28 +119,47 @@ fn cpu_reference(scene: &Scene, viewport: &Viewport<'_>, clip_rects: &[Rect]) ->
             out.push(a);
         }
     }
-    out
+    Reference {
+        pixels: out,
+        stores,
+    }
 }
-
-/// This gate's bound, kept apart from `m1.rs`'s on purpose — and **not** derived the way
-/// that one is, which is what this comment used to imply by pointing at it.
-///
-/// `m1.rs` derives ±2 from *its own* golden: ADR 0006's ±1 unorm step per blend stage in
-/// premultiplied space, which the straight-alpha conversion amplifies by `255/α`, and that
-/// golden's minimum alpha is 128. **That derivation does not reach this page.** Measured
-/// on 2026-08-17, the alphas this fixture produces are `{0, 29, 57, 86, 115, 172, 230}` —
-/// its quarter-pixel grid puts an eighth of a cell under a 0.9-alpha rect at the corners —
-/// so the same premise gives `255/29 ≈ 9` here, not 2.
-///
-/// What the number actually is, measured the same day: **slack this gate has never
-/// spent.** The page and [`cpu_reference`] agree to **0** unorm steps. It is left at 2
-/// rather than tightened because a threshold is behaviour and this round moves none;
-/// `doc/notes-test-probes.md` §3 records the measurement and what tightening it buys.
-const UNORM_TOLERANCE: i32 = 2;
 
 /// The page-6 shape at a window scale: 303 clip identifiers over one identical
 /// region, thousands of clipped fills — the counter says **1**, and the pixels agree
 /// with the reference. A full page at a real size, per trap 12b.
+///
+/// # Where this gate's bound comes from
+///
+/// It is [`common::bound::bound_at`], read at each pixel, and it replaced a
+/// `const UNORM_TOLERANCE: i32 = 2` on 2026-08-23 (ADR 0077). Three facts about the
+/// constant, all measured on this fixture rather than argued:
+///
+/// - **Its stated derivation was `m1.rs`'s and did not reach this page.** The alphas this
+///   fixture produces are `{0, 29, 57, 86, 115, 172, 230}` — its quarter-pixel grid puts
+///   an eighth of a cell under a 0.9-alpha rect at the corners — so ADR 0006's ±1 per
+///   store amplified by `255/α` gives `⌈255/29⌉ = 9` here, not 2. The constant enforced
+///   something nobody could re-derive from the sentence beside it, which is the same
+///   defect ADR 0072 found in `m1.rs`.
+/// - **No pixel of this page is stored to twice.** The 4 000 marks are 10.25 × 24.5 on a
+///   14.75 × 32.5 pitch, so they do not overlap: the store histogram over the 2 005 644
+///   pixels is `{0: 1 071 244, 1: 934 400}` exactly. Read at the pixel, the bound is
+///   therefore `⌈255/α⌉` where there is ink — it takes the four values `{2, 3, 5, 9}`,
+///   one per distinct non-zero alpha — and **0** where there is none.
+/// - **The 0 is why this is worth doing on a clip page in particular**, and it is the one
+///   place the new bound is *stronger* rather than merely honest. A clip that leaks admits
+///   ink at pixels whose store count is zero — which is 1 071 244 of them, 53 % of the
+///   raster — and that is exactly where a fixture-wide tolerance handed out slack.
+///   Measured, with `rect_link_box` outset by 0.004 device pixels: **3 696 pixels are
+///   inked where nothing stored, and `max_byte_diff` over the whole raster is 1**, so the
+///   old gate passed. This one fails at (60, 79) — `got [0, 0, 0, 1], expected
+///   [0, 0, 0, 0] — 1 unorm steps past a bound of 0 (0 stores at α 0)`.
+///
+/// Everywhere else the bound is *looser* than the constant it replaced — 9 at the α = 29
+/// slivers against 2 — and that is the honest direction rather than a regression: 2 was
+/// never derivable there, and ADR 0077 records the trade. The page and the reference in
+/// fact agree **byte for byte** (largest raw difference over the whole raster: 0, llvmpipe,
+/// 2026-08-23, as on 2026-08-17), so no slack of either shape is being spent today.
 #[test]
 fn three_hundred_three_identical_clips_collapse_to_one_region() {
     let mut device = device();
@@ -183,11 +208,12 @@ fn three_hundred_three_identical_clips_collapse_to_one_region() {
 
     let actual = frame.into_raster().unwrap().into_pixels();
     let expected = cpu_reference(&scene, &viewport, &vec![page; 303]);
-    let diff = max_byte_diff(&actual, &expected);
-    assert!(
-        diff <= UNORM_TOLERANCE,
-        "clipped page differs from the reference by {diff} unorm steps"
-    );
+    if let Some(where_) = disagreement(&actual, &expected, viewport.width) {
+        panic!(
+            "the clipped page differs from the reference beyond the store-conversion \
+             bound (ADR 0006): {where_}"
+        );
+    }
 }
 
 /// An empty clip admits nothing, and that is different from an absent clip: same

@@ -1,12 +1,25 @@
 //! The probes: **a drawn raster turned into the number an assertion is written on.**
 //!
 //! One responsibility, and it is the mirror of [`super::headless`]'s. That module asks a
-//! device for a frame and hands back its bytes; this one turns those bytes into a number —
-//! at a device pixel a test names ([`pixel`], [`alpha`]) or over the whole raster
-//! ([`max_byte_diff`]). Nothing here draws, and nothing here asserts: the expectation and
-//! its bound belong to the file that states them, because both are properties of that
-//! file's fixture rather than of this arithmetic. [`super::clause`] already splits along
-//! that seam and says so.
+//! device for a frame and hands back its bytes; this one turns those bytes into the byte a
+//! test names ([`pixel`], [`alpha`]). Nothing here draws, and nothing here asserts: the
+//! expectation and its bound belong to the file that states them, because both are
+//! properties of that file's fixture rather than of this arithmetic. [`super::clause`]
+//! already splits along that seam and says so.
+//!
+//! # `max_byte_diff` was here and is not
+//!
+//! It reduced a whole raster to its largest per-byte difference, and it had three call
+//! sites when `doc/notes-test-probes.md` gave the probes this home. ADR 0072 took two of
+//! them and ADR 0077 the third, both for the same reason: a single number over a whole
+//! raster has to be compared against a bound that holds at the raster's *worst* pixel, so
+//! it hands out that slack at every other one — and it cannot express the clause that
+//! matters most, which is that a pixel nothing stored to must agree **exactly**.
+//! [`super::bound`] is what replaced it, and it is not a generalisation of this module: it
+//! reads a store count the reference had to count, which no probe over two rasters can
+//! recover. Deleted rather than kept for a future caller, because
+//! `tests/common/mod.rs`'s `allow(dead_code)` means an unused helper here is one nothing
+//! will ever notice.
 //!
 //! # Why a probe takes the raster's width, and why that is what made the merge safe
 //!
@@ -50,24 +63,4 @@ pub fn pixel(raster: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
 /// come to disagree about which byte belongs to which pixel.
 pub fn alpha(raster: &[u8], width: u32, x: u32, y: u32) -> u8 {
     pixel(raster, width, x, y)[3]
-}
-
-/// The largest per-byte difference between two rasters of the same length.
-///
-/// It reports; it does not judge. The bound a caller compares this against is a property
-/// of that caller's fixture — `m1.rs`'s ±2 is derived from its golden's minimum alpha —
-/// so the tolerance and the artefacts written when it is exceeded both stay with the
-/// test, and this function neither knows nor names them.
-pub fn max_byte_diff(actual: &[u8], expected: &[u8]) -> i32 {
-    assert_eq!(
-        actual.len(),
-        expected.len(),
-        "two rasters of different lengths are not two readings of one frame"
-    );
-    actual
-        .iter()
-        .zip(expected)
-        .map(|(a, e)| (i32::from(*a) - i32::from(*e)).abs())
-        .max()
-        .unwrap_or(0)
 }

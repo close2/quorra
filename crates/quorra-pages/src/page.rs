@@ -285,9 +285,15 @@ pub const CALLERS_DRAWING: Archetype = Archetype {
 ///
 /// **Nothing about it is changed here.** ADR 0054's thread sweep was measured on this
 /// page, and re-cutting it would invalidate that measurement in the same round that
-/// moved it — which is the trap `doc/notes-clipped-instrument.md` §3.4 names. Whether
-/// the sweep should run on the archetype instead is a question with a measurement
-/// attached, and it belongs to the round that takes it.
+/// moved it — which is the trap `doc/notes-clipped-instrument.md` §3.4 names.
+///
+/// **Whether the sweep should run on the archetype instead was measured on 2026-08-23 and
+/// declined**, and the reason is that the two pages differ by less than the sweep can
+/// read: the archetype's 40 residue-clipped marks are 8 956 coverage texels against an
+/// atlas working set of 476 892 that the clips leave untouched — **1.84 %** of its
+/// coverage work, and 0.25 % of the 3 542 360 texels [`ARTWORK`] already contributes to
+/// the same column. `examples/encode_threads.rs`'s `SHAPES` carries the decision and the
+/// noise figure it is measured against.
 pub const DENSE_TEXT_UNCLIPPED: Archetype = Archetype {
     name: "dense text, unclipped",
     commands: 4_320,

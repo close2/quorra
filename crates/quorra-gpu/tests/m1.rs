@@ -23,16 +23,20 @@
 //! the straight-alpha conversion amplifies by 255/α. ADR 0006 records the probes and
 //! the design consequence; drift beyond the bound still fails loudly.
 //!
-//! **The bound is read at each pixel, not off the fixture's worst one** ([`bound_at`]),
-//! and that is a correction made on 2026-08-22 rather than the shape this file was
-//! written in. It carried a single `UNORM_TOLERANCE = 2`, derived in its own comment
-//! from "this golden, whose minimum alpha is 128" — and **this golden's minimum alpha
-//! is 24**, at the corner pixel where an extent of 0.75 meets one of 0.125. The
-//! constant was therefore enforcing something its stated derivation does not give
-//! (255/24 ≈ 11), which is the failure principle 5 names: a number that passes for a
+//! **The bound is read at each pixel, not off the fixture's worst one**
+//! ([`common::bound::bound_at`]), and that is a correction made on 2026-08-22 rather than
+//! the shape this file was written in. It carried a single `UNORM_TOLERANCE = 2`, derived
+//! in its own comment from "this golden, whose minimum alpha is 128" — and **this
+//! golden's minimum alpha is 24**, at the corner pixel where an extent of 0.75 meets one
+//! of 0.125. The constant was therefore enforcing something its stated derivation does not
+//! give (255/24 ≈ 11), which is the failure principle 5 names: a number that passes for a
 //! reason nobody can re-derive. Read at the pixel, the same derivation is *stronger*
 //! than the constant almost everywhere — 2 where α is 255 and two commands stored, as
 //! before — and honest at the four sliver pixels where the amplification is real.
+//!
+//! The arithmetic itself moved to `tests/common/bound.rs` on 2026-08-23 (ADR 0077), where
+//! `m3.rs` reaches it too. What stayed here is [`cpu_reference`] — the *reference*, which
+//! is this file's own reading of ADR 0005 and is not shared with anything.
 
 // Integration-test files sit outside `#[cfg(test)]`, so `clippy.toml`'s
 // allow-unwrap-in-tests does not reach them; this is the same policy, stated here.
@@ -55,6 +59,8 @@ use quorra_scene::{
 };
 
 mod common;
+
+use common::bound::{Reference, disagreement};
 
 /// Every Vulkan adapter on this machine, by name. The determinism promises quoted in
 /// the module docs are made for Vulkan adapters (RADV and lavapipe are what the
@@ -186,25 +192,6 @@ fn golden_viewport() -> Viewport<'static> {
     golden_viewport_at(1)
 }
 
-/// What the reference rasterised: its straight-alpha bytes, and **how many times each
-/// pixel was stored**.
-///
-/// The second field is not decoration. ADR 0006's bound is *per store* — the
-/// float→unorm8 conversion is what differs between implementations, and it happens once
-/// per command that covers the pixel — so the number of stores is the multiplier of the
-/// bound at that pixel, and it is a fact only the rasteriser knows. Counting it here is
-/// what lets [`bound_at`] be derived rather than typed, at any scale and for any scene
-/// this reference can draw.
-struct Reference {
-    /// Straight-alpha RGBA, as [`quorra_gpu::Raster`] hands back.
-    pixels: Vec<u8>,
-    /// Commands that stored to each pixel, in the same order as `pixels`' four-byte groups.
-    ///
-    /// Signed because every use of it is one side of a difference of bytes, and a count
-    /// that has to be cast at each use is a cast that can be wrong at one of them.
-    stores: Vec<i32>,
-}
-
 /// The reference rasteriser: the documented coverage and compositing rule of
 /// `doc/adr/0005`, implemented independently of the GPU path (same definition, second
 /// implementation — which is what makes the comparison a check and not a tautology).
@@ -319,76 +306,6 @@ fn render_golden_at(device: &mut Device, scale: u32) -> Vec<u8> {
 
 fn render_golden(device: &mut Device) -> Vec<u8> {
     render_golden_at(device, 1)
-}
-
-/// The stated cross-implementation bound (module docs, ADR 0006), **read at one pixel**:
-/// ±1 unorm step per store in premultiplied space, amplified by the straight-alpha
-/// conversion by `255/α`.
-///
-/// Both inputs are properties of the pixel rather than of the fixture, which is what
-/// makes this derivable instead of typed: `stores` is what the reference counted (see
-/// [`Reference`]), and `alpha` is what the two sides agree the pixel's coverage came to.
-/// A pixel nothing stored to must agree exactly — a device that inks where the reference
-/// does not is not a rounding difference, and §3's "transparent is `[0, 0, 0, 0]`" is what
-/// makes that checkable.
-///
-/// **`m3.rs` states its own bound and should keep doing so**: that page's is a claim about
-/// a fixture, and this is arithmetic over a pixel. The two are different kinds of thing,
-/// which is the seam `tests/common/probe.rs` already draws — a measurement is shared, a
-/// claim about a fixture is not.
-fn bound_at(alpha: u8, stores: i32) -> i32 {
-    if alpha == 0 {
-        return 0;
-    }
-    let alpha = i32::from(alpha);
-    // Rounded up: the bound is what the conversion can produce, and a fractional step is
-    // a whole one once it lands in a byte.
-    (stores * 255 + alpha - 1) / alpha
-}
-
-/// The worst pixel at which `actual` differs from `reference` by more than [`bound_at`]
-/// allows, described in the terms an assertion needs — or `None` if none does.
-///
-/// "Worst" is by how far the difference **exceeds its own bound**, not by the raw
-/// difference: a 3-step difference at α = 24 is inside the amplification and a 3-step one
-/// at α = 255 is not, and the pixel worth naming in the panic is the second.
-fn disagreement(actual: &[u8], reference: &Reference, width: u32) -> Option<String> {
-    assert_eq!(
-        actual.len(),
-        reference.pixels.len(),
-        "the device and the reference rasterised different numbers of pixels"
-    );
-    let mut worst: Option<(usize, usize, i32, i32)> = None;
-    for (index, stores) in reference.stores.iter().enumerate() {
-        let (got, want) = (
-            &actual[index * 4..index * 4 + 4],
-            &reference.pixels[index * 4..index * 4 + 4],
-        );
-        // The smaller of the two alphas is the one that amplifies more, so it is the one
-        // the bound is read at: taking the reference's alone would let a device that
-        // rounded α down claim the slack of an α it did not produce.
-        let colour = bound_at(got[3].min(want[3]), *stores);
-        for channel in 0..4 {
-            // The alpha channel is stored straight and so is never amplified: it carries
-            // the per-store bound itself.
-            let bound = if channel == 3 { *stores } else { colour };
-            let excess = (i32::from(got[channel]) - i32::from(want[channel])).abs() - bound;
-            if excess > 0 && worst.is_none_or(|(_, _, previous, _)| excess > previous) {
-                worst = Some((index, channel, excess, bound));
-            }
-        }
-    }
-    let (index, channel, excess, bound) = worst?;
-    let (x, y) = (index as u32 % width, index as u32 / width);
-    Some(format!(
-        "at ({x}, {y}) channel {channel}: got {:?}, expected {:?} — {} unorm steps past a \
-         bound of {bound} ({} stores at α {})",
-        &actual[index * 4..index * 4 + 4],
-        &reference.pixels[index * 4..index * 4 + 4],
-        excess + bound,
-        reference.stores[index],
-        actual[index * 4 + 3].min(reference.pixels[index * 4 + 3]),
-    ))
 }
 
 /// The golden: every Vulkan adapter agrees with the CPU reference within the stated
