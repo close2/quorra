@@ -503,11 +503,15 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
   the fix. A fourth consumer is the trigger to re-open it, with the dev-dependency cycle on
   the table: it **works** (ADR 0060 verified it in a scratch workspace) and was refused on
   principle 4, not on feasibility.
-- **`examples/encode_threads.rs` sweeps `DENSE_TEXT_UNCLIPPED`, not the dense-text
-  archetype.** It has since ADR 0054, and its comment said otherwise until 2026-08-17.
-  Whether the thread sweep should run on the archetype — putting its 40 residue-clipped marks
-  into the "does not divide" column where artwork already is — is a question with a
-  measurement attached.
+- ~~**Should `examples/encode_threads.rs` sweep the archetype instead of
+  `DENSE_TEXT_UNCLIPPED`?**~~ **Measured and declined, 2026-08-23.** The archetype's 40
+  residue-clipped marks are **8 956 coverage texels against an atlas working set of 476 892
+  the clips leave untouched — 1.84 %** of its coverage work, and 0.25 % of what `ARTWORK`
+  already contributes to the same column, so at the ~2.8× this page reaches the sweep would
+  move about 3 %. Against that, the same configuration's one-thread minimum moved **6.17 →
+  11.68 ms (89 %) between two sweeps on one day** — and in the quieter run the clipped page
+  came out *faster*, which the dispatch says is impossible. The decision and the noise figure
+  are in the example's `SHAPES` doc and in `DENSE_TEXT_UNCLIPPED`'s.
 - **`deny.toml` bans by name, which is a blocklist**, and a blocklist is silent about next
   year's crate. `tests/no_colour_management.rs` closes the shape with an allowlist over the
   published crates' direct dependencies plus a pattern walk of the shipping graph. What
@@ -516,20 +520,26 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
   `Cargo.lock` through `winit → sctk-adwaita` and reachable from no published crate.
   `doc/notes-hayro-boundary.md` carries a `wrappers` block for them. `cargo-deny` is not
   installed for the `AI` user, so it has not been run.
-- **Four things the `encode.rs` split found and left**, in `doc/notes-encode-split.md` §5:
-  `push_op`'s doc comment is two openings for one function — the same defect this file's
-  traps record from `take_pass_query`, now in `encode/plan.rs`; `CULL_MARGIN`'s comment cites
-  `Encoder::push_glyph`, which ADR 0054 deleted; **`fill_solid` repeats `encode_fill`'s
-  `HashMap` lookup of the outline**, once per solid fill on the hottest walk in the tree
-  (4 320 of them on the dense-text archetype), and fixing it needs a lifetime that fights
-  `&mut self`; and `command`'s `#[allow(clippy::only_used_in_recursion)]` no longer fires and
-  is a one-line deletion. `visible_tile` and `coverage_tile` are now adjacent, and their ten
-  lines of identical arithmetic are visible in one screen for the first time.
+- ~~**Four things the `encode.rs` split found and left.**~~ **All four were closed months
+  ago and this bullet was the only thing still saying otherwise** (checked 2026-08-23).
+  `fill_solid`'s duplicate `HashMap` lookup is gone — `SolidFill<'a>` carries
+  `stored: &'a StoredOutline`, `grep '\.outline('` over `encode/fill.rs` returns one line,
+  and `doc/notes-fill-solid-lookup.md` has the callgrind numbers (**9 340 817 Ir** on the
+  caller's page, 2.26 % of its `recording`; **5.93 %** of dense text's). That note also
+  **disproved the obstacle this bullet kept quoting** — the "lifetime that fights `&mut
+  self`" — which is why a stale bullet is worse than no bullet: it re-argues a settled point
+  every time it is read. `push_op`'s two openings, `CULL_MARGIN`'s dead `push_glyph` citation
+  and `command`'s `#[allow(clippy::only_used_in_recursion)]` are closed too.
 - **`SceneBuilder::image` refuses a bad image alpha with `SceneError::InvalidGroupAlpha`**
   — a shared variant. Public API, so it is a bump's business rather than a refactor's.
-- **`tests/shader_copies.rs` keeps its own `include_str!` list of the shader files**, which
-  since the layout gate is the second such list beside `src/shaders.rs`. An integration test
-  cannot reach a private module, so closing it means deciding whether that list is public.
+- ~~**`tests/shader_copies.rs` keeps its own `include_str!` list of the shader files.**~~
+  **Closed by ADR 0059** — that file does not exist; the gate is `src/shaders/copies.rs`
+  reading `super::ALL`, inside the crate, which is exactly the shape ADR 0059 decided.
+  **Re-verified able to fail on 2026-08-23** rather than trusted, because what it replaced
+  passed green for months while comparing five shaders and asserting five: forcing
+  `function_lane.wgsl` out of `ALL` reddens **four** tests —
+  `every_wgsl_file_is_named_here`, `promised_helpers_are_textually_identical`,
+  `every_sameness_promise_is_guarded` and `a_shape_pass_cannot_reach_the_soft_mask`.
 - **The shared probes have a home, and one number in the list was wrong.**
   `tests/common/probe.rs` holds `pixel`, `alpha` and `max_byte_diff`; the eight private
   two-argument `render`s point at `common::headless::render`. The obstacle this list carried
@@ -720,6 +730,17 @@ their product ships, and the separate gate that is not blind is a statistical en
 3 % population of whole-pixel errors moves without breaking. 133 pages hid behind that pair.
 When a defect "cannot be reproduced on the corpus", check what the corpus run configures
 before concluding anything.
+
+**One shared `target-dir` plus concurrent worktrees serves you another tree's crate.** The
+`AI` user's `~/.cargo/config.toml` pins a single `target-dir`, which is right for *sequential*
+worktree builds (sccache goes from 0 % to 100 % hits). With several agents building at once it
+is not: two worktrees' `quorra-scene` share a name and a version and differ only by path, and
+one gets served to the other's `quorra-gpu`. It surfaces as a compile error naming a symbol
+**that exists nowhere in your tree** — `missing field alpha_is_shape in initializer of
+GroupSpec`, a field another agent was adding in its own worktree — so it reads as a bug in
+your own source. Two agents lost time to it in one round on 2026-08-23. When parallel work is
+running, give the integrating session its own `CARGO_TARGET_DIR` and tell each agent to do the
+same; suspect this **first** when an error names a symbol you cannot grep for.
 
 **Re-derive a gate's constant from its own fixture before you reuse it.** `m1.rs`'s
 `UNORM_TOLERANCE = 2` carried the derivation "`255/α` on this golden, whose minimum alpha is
