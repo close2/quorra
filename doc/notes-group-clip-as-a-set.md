@@ -183,3 +183,54 @@ nothing validates where a field sits inside it.
 - **No corpus run.** Owed, and the main session runs them in one copy of the caller's tree.
   Both halves of this change are reachable from their corpus as it stands — no adapter change
   is needed, which is the difference the declined boolean would have made.
+
+---
+
+## The corpus run the round owed, and the trigger it fired
+
+Taken by the integrating session on 2026-08-23, one copy of the caller's tree rsynced that
+day, both columns in the same copy, `[patch]` flipped between `97ad95ac` and the merged tree
+(ADR 0074 + ADR 0075 + ADR 0077), page one at scale 1, their gate's own configuration — which
+since their §37.2 is **the shipping quantum**, not the quantum off.
+
+| | agree | differ | refused | not comparable |
+|---|---:|---:|---:|---:|
+| `97ad95ac` | 933 | 22 | 2 | 17 |
+| merged | 933 | 22 | 2 | 17 |
+
+**Exactly one page line moves out of 957**, and per-page comparison is the only reason it was
+seen at all — every total is identical:
+
+```
+- differs: 22060_A1_01_Plans.pdf: mean 0.7838 worst tile 5.69 at (576, 768) … ssim 0.98626
++ differs: 22060_A1_01_Plans.pdf: mean 0.8248 worst tile 5.69 at (576, 768) … ssim 0.98558
+```
+
+**It moves away from their oracle**, and that is the finding rather than a disappointment,
+because their oracle has *already taken this same clause reading*: their §36.5 records the
+group-level intersection landing on their CPU backend with their cross-backend gate unmoved at
+933 / 22. Two implementations of one clause should have converged. On this page they parted.
+
+**The trigger this ADR named has therefore fired on the first corpus run.** ADR 0074 §"What
+this does not decide" says the caller's boolean is the answer "if a corpus page turns up in
+it". One has. The difference between the two sides is exactly the one the ADR isolates: they
+*state* `alpha_is_shape` from the interpreter, because only the interpreter has read `/AIS`;
+we *prove* it from the command list, and the proof cannot see a mask that `/AIS true` made a
+shape. Such a group keeps the product here and takes the `min` there.
+
+Two candidate readings of the direction, and they are distinguishable:
+
+1. **Our proof is too strict** — the page has a masked group under `/AIS true`, we keep the
+   product, their oracle takes `min`, and we part by the shortfall this round already measured
+   at 92 of 255 against 153.
+2. **Our proof is too permissive** — it fires on a group their flag leaves unset, and we take
+   a `min` they do not.
+
+**What settles it is one line on their side**: whether `alpha_is_shape` is set on any group of
+`22060_A1_01_Plans.pdf`'s first page. It is their flag, from their interpreter, on their page;
+we cannot read it from here and should not guess at it. Either way the remedy is the same and
+it is the one they asked for — the boolean — which is why this note ends by handing the page
+back rather than by proposing arithmetic.
+
+**Nothing else moved.** ADR 0075 and ADR 0077 predicted no movement and moved nothing: the
+other 956 page lines are identical to the character.
