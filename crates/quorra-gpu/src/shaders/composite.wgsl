@@ -10,8 +10,10 @@
 // (ADR 0006).
 //
 // The group's own clip rectangle (ADR 0007), an optional clip-residue mask and an
-// optional soft mask (§11.6.4.3) all modulate the group's alpha and shape here,
-// which is where §11.4.5 applies them.
+// optional soft mask (§11.6.4.3) all reach the group here, which is where §11.4.5
+// applies them — and they do not all reach it the same way. The mask and the constant
+// are §11.3.7.2's opacity inputs and multiply; the clip is a **set**, and §8.5.4
+// intersects it with the group's own shape (ADR 0074).
 
 struct Params {
     // §11.3.5's mode, numbered in the BlendMode enum's declaration order.
@@ -56,6 +58,12 @@ struct Params {
     // transparent pixel, since the mask's group marks nothing out there. A size of
     // (0, 0) is an absent mask, and then this is 1 and admits everything.
     mask_outside: vec4f,
+    // 1 when this layer's alpha *is* §11.6.4.2's group shape — which the encoder proves
+    // from the group's own commands, by finding no opacity input below 1.0 anywhere
+    // inside it (`every_opacity_is_one`). That is what decides whether the clip below
+    // meets the group by §8.5.4's intersection or by the product a compositor that
+    // cannot tell shape from opacity is left with (ADR 0074).
+    alpha_is_shape: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -270,6 +278,50 @@ fn residue_value(p: vec2f) -> f32 {
     return textureLoad(scratch_tex, texel, 0).r;
 }
 
+// The clip in force at this blit, as **one region** rather than as two factors.
+//
+// A chain is one clipping path in the graphics state — ISO 32000-2 §8.5.4: "After the
+// path has been painted, the clipping path in the graphics state shall be set to the
+// intersection of the current clipping path and the newly constructed path" — and this
+// pass receives it split in two only because the rectangular links resolve into a
+// rectangle at encode time (ADR 0007) while the rest rasterise into the residue. Putting
+// the two halves back together owes the clause an intersection, which is `min` and not a
+// product (ADR 0030). The two differ only where both halves are fractional in one pixel;
+// `residue_value` is exactly 1 wherever there is no residue, and `min` leaves the
+// rectangle alone there.
+fn clip_at(p: vec2f) -> f32 {
+    return min(clip_coverage(p), residue_value(p));
+}
+
+// The group's premultiplied raster met with that clip (§8.5.4, §10.7.4, ADR 0074).
+//
+// §10.7.4 states the meeting as a set operation: "Subsequent painting operations shall
+// affect a region that is the intersection of the set of pixels defined by the clipping
+// region with the set of pixels for the region to be painted." Where `alpha_is_shape`
+// holds — the encoder proved this raster's alpha to be the group's shape — that
+// intersection is `min` per pixel,
+// and `S ∩ C = S` wherever `S ⊆ C` — a clip that contains the group takes nothing from
+// it, including from its own anti-aliased boundary.
+//
+// A clip cuts a shape and never touches a colour, so the straight colour is unchanged
+// and only the alpha moves: the premultiplied vector is rescaled by the ratio of the two
+// alphas. The division is safe because `s.a > c` implies `s.a > 0` — `c` is an area and
+// a coverage byte, never negative.
+//
+// Where it does not hold the alpha is shape times opacity, the two are not separable in
+// one raster, and `min` would paint a half-transparent group at full coverage wherever
+// the clip admits more than its alpha. The product stays there: exact wherever the clip
+// admits all or none of a pixel, and the square of the truth where two edges share one.
+fn meet_clip(s: vec4f, c: f32) -> vec4f {
+    if params.alpha_is_shape == 0u {
+        return s * c;
+    }
+    if s.a <= c {
+        return s;
+    }
+    return vec4f(s.rgb * (c / s.a), c);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
     // Device space, which is what `clip`, `residue` and the mask are stated in; the
@@ -281,11 +333,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     let inside = all(child >= vec2f(0.0)) && all(child < params.child_size);
     var s = select(vec4f(0.0), textureLoad(src_tex, vec2i(child), 0), inside);
 
-    // §11.6.4.4: the group's constant alpha — "the nonstroking alpha constant shall
-    // also be applied when painting a transparency group's results onto its backdrop";
-    // §11.6.4.3: its soft mask; ADR 0007: its clip. All scale the group's
-    // premultiplied contribution uniformly.
-    let w = params.alpha * soft_mask_at(p) * clip_coverage(p) * residue_value(p);
+    // The group's **opacity** inputs, which §11.3.7.2 multiplies in as many words —
+    // "The three opacity inputs shall be multiplied together, producing an intermediate
+    // value called the source opacity" — with §11.6.4.4's constant ("the nonstroking
+    // alpha constant shall also be applied when painting a transparency group's results
+    // onto its backdrop") and §11.6.4.3's mask as two of the three. The clip is in
+    // neither of that subclause's two products, which is why it is not here.
+    let q = params.alpha * soft_mask_at(p);
+    // The clip, as the region §8.5.4 makes it, and the group met with it.
+    let c = clip_at(p);
+    let clipped = meet_clip(s, c);
 
     // The staged stages, before §11.4.4's interpolation and §11.3.6's formula, because
     // they replace both: this group is one half of somebody's expansion of §11.4.6 and
@@ -293,13 +350,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     //
     // The erase weight is the group's own **alpha**, which is its shape when the caller
     // draws the shape half opaque — the only way a group's shape can reach a raster
-    // (Table 140's group alpha is not carried here). `w` scales it because a group's
-    // constant alpha, soft mask and clip are the caller's statements about this half.
+    // (Table 140's group alpha is not carried here). The clip meets that shape and the
+    // opacity scales it, because a group's constant alpha and soft mask are the caller's
+    // statements about this half (ADR 0033, ADR 0066).
     if params.compose == 1u {
-        return b * (1.0 - s.a * w);
+        return b * (1.0 - clipped.a * q);
     }
     if params.compose == 2u {
-        return b + s * w;
+        return b + clipped * q;
     }
 
     // §11.4.4, the non-isolated group. `s` holds E(B): this group's elements
@@ -310,11 +368,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     // backdrop under Normal. The two cancel, leaving one interpolation, exact for
     // every backdrop alpha and every blend mode *inside* the group (ADR 0019; the
     // builder refuses the three cases where the cancellation is false).
+    //
+    // **The clip is a weight here and not a set**, and it has to be: `s` is not the
+    // group, it is the group over this backdrop, so its alpha is the backdrop's as well
+    // and no part of it is the group's shape. `alpha_is_shape` is therefore never set for
+    // a non-isolated group, whatever its elements are (ADR 0074) — and this branch takes
+    // `s` rather than `clipped` so that the reading is stated here as well as encoded.
     if params.non_isolated != 0u {
-        return mix(b, s, w);
+        return mix(b, s, q * c);
     }
 
-    s = s * w;
+    s = clipped * q;
 
     let ab = b.a;
     let as_ = s.a;

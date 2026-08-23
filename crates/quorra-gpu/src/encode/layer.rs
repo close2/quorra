@@ -19,6 +19,7 @@
 use quorra_scene::{BlendMode, Command, Compose, GroupSpec, MaskId, MaskKind};
 
 use super::clips::{OPEN_CLIP, ResolvedClip};
+use super::opacity::every_opacity_is_one;
 use super::{DrawStyle, Encoder, LayerPlan, Op};
 use crate::error::RenderError;
 use crate::raster;
@@ -48,6 +49,11 @@ pub(crate) struct ChildOp {
     /// (ADR 0019). The implicit one-element groups §11.3.5 needs for a blended
     /// element are isolated: the wrapper is a device trick, not a PDF group.
     pub isolated: bool,
+    /// Whether this layer's alpha **is** §11.6.4.2's group shape, which is what lets the
+    /// composite meet it with the clip by §8.5.4's intersection rather than by a product
+    /// (ADR 0074). Proved from the group's own commands by [`every_opacity_is_one`], never
+    /// asserted by a caller.
+    pub alpha_is_shape: bool,
 }
 
 impl ChildOp {
@@ -69,8 +75,14 @@ impl ChildOp {
     /// element is re-encoded without it, so the mask weighs the finished group once
     /// rather than each draw inside it.
     ///
+    /// **And its alpha is not known to be its shape** (ADR 0074): the wrapper holds one
+    /// element, whose paint alpha is §11.6.4.4's constant *opacity* and lives in this
+    /// raster beside its coverage. The element resolved its own clip before it was
+    /// wrapped, so there is no clip left at this blit for the distinction to reach — the
+    /// `false` costs nothing here and keeps the field meaning one thing.
+    ///
     /// Three arms reach this — a fill, a stroke and an image — and while each wrote the
-    /// eleven fields out, a field that came to differ between them would have been
+    /// twelve fields out, a field that came to differ between them would have been
     /// three lanes disagreeing about one clause.
     pub(super) fn implicit_blend_group(layer: usize, blend: BlendMode, mask: Option<u32>) -> Self {
         Self {
@@ -83,6 +95,7 @@ impl ChildOp {
             compose: 0,
             mask,
             isolated: true,
+            alpha_is_shape: false,
         }
     }
 }
@@ -191,6 +204,10 @@ impl Encoder<'_> {
             },
             mask,
             isolated: spec.isolated,
+            // §11.4.4 seeds a non-isolated group's buffer with its own backdrop, so its
+            // raster's alpha carries the backdrop's as well as the group's and is nobody's
+            // shape however opaque the elements are (ADR 0074).
+            alpha_is_shape: spec.isolated && every_opacity_is_one(commands),
         }))
     }
 

@@ -96,6 +96,7 @@ mod function;
 mod hull;
 mod instance;
 mod layer;
+mod opacity;
 mod parallel;
 mod plan;
 mod rare;
