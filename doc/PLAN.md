@@ -270,6 +270,32 @@ who could remove it.
 
 ### What is still open
 
+- **The sampled lane's coverage is one sample row, and that is a non-conformance we have
+  stated rather than removed** (ADR 0076, 2026-08-23, `doc/notes-sampled-lane-quantum.md`).
+  It answers the caller's §31 second question with the arithmetic rather than a curve fit:
+  `winding::sample_offsets` is an `n`-sample `√n × √n` ordered grid whose rows form one
+  lattice of period `p = 1/√n` across the device, and `winding.wgsl`'s `fs_resolve` stores
+  `covered / n` — so an axis-aligned band's ink is `k · p`, **a quarter of a device pixel at
+  the default sixteen samples**. Their reported 0.753 is **192/255**, reproduced to the byte,
+  and their row split with it.
+  **The defect is not the coarseness but the zero**: at a fraction of placements equal to the
+  pitch — a quarter at the default — a pixel the shape's boundary passes through receives
+  *exactly nothing*, which §10.7.4's first sentence forbids under both its binary and its
+  anti-aliased reading (NOTE 1 puts that pixel inside the requirement). **No widening of
+  ADR 0070's thin-mark condition reaches it**: the error is `p·k − w`, near a whole pitch for
+  any width just above a multiple of one, and independent of how wide the mark is. The only
+  construction that removes it is the area rule ADR 0070 priced and declined, which costs
+  ADR 0016 its scale-independence. So the bound is stated on `Coverage::Gpu`'s own rustdoc
+  where the lane is chosen, and a routing change waits on a corpus column nobody has run.
+- **The caller's §31 first question is not ours, and their own six numbers say so.** Our
+  default lane is exact to 0.0017 px on their construction. Reading their published §31.2
+  table: their sampled column is the lattice mean of their default column **six for six to
+  zero**, and their default column is their *oracle* column under **one affine** — scale
+  0.998899, offset +0.1571 px, worst residual 0.0014. Two free values fitting six commands is
+  not a per-command quantiser, so the difference is in the **device transform each backend is
+  handed**, upstream of both lanes. `doc/notes-sampled-lane-quantum.md` §4.4 names the single
+  artefact that would settle it, and it is one they can print.
+
 - **A group's clip is a set now, and the first corpus run fired the question the round left
   open** (ADR 0074, 2026-08-23, `doc/notes-group-clip-as-a-set.md`). The child composite
   multiplied the clip into the same scalar as the group's alpha and its mask, where §8.5.4

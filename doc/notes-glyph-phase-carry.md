@@ -68,8 +68,15 @@ Measured on llvmpipe, 37 positions per row, `WIDTH` = 1 device pixel, the caller
   not.
 - **A filled hairline goes to the glyph lane**, where the quantum applies, and there the
   placement is quantised — bounded, after ADR 0073, at **1/32 of a device pixel**.
-- **The sampled lane needs an atlas that refuses the tile** to be reached at all. Even then,
-  this round did not get a hairline onto it: `take_gpu_lane`'s last condition compares the
+- ~~**The sampled lane needs an atlas that refuses the tile** to be reached at all.~~
+  **Wrong twice over, and ADR 0076 found it by trying to make its own reachability assertion
+  fail.** This round *did* have a hairline on the sampled lane and read it as the processor's,
+  because **`LaneCounts::path` names both rasterisers** — the instrument's "lane" column could
+  not tell them apart and nobody had asked it to. Measured there, the stroke's sampled column
+  snaps to a quarter pixel at ±0.1071 where its processor column is exact to 0.0019. The
+  triangle floor also reads the mark's **own** device box rather than the visible tile, which
+  is why one geometry cleared it for a stroke (384 bytes against 528 texels) and failed it for
+  a fill (576). The sentence as written was: `take_gpu_lane`'s last condition compares the
   tile's area against its triangles' bytes, and a six-triangle band of 528 texels fails it.
   **So §31's second question — is the gpu lane's y coverage quantised, and to what — is
   not answered here.** What can be said is where to look: the condition is in
