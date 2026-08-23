@@ -209,6 +209,22 @@ this section named as waiting on them had been answered, and two items nobody he
 of were waiting on us. Their document is the state of the conversation; this one goes stale
 between sessions.
 
+### 0a. What the 2026-08-23 round left for the caller — one decision, one line of theirs
+
+**The boolean, and it is now evidenced rather than hypothetical.** ADR 0074 fixed §36 without
+touching `GroupSpec` by *proving* that a group's alpha is a shape; the proof cannot see a mask
+that `/AIS true` made a shape, and the ADR said the caller's `alpha_is_shape` would be the
+answer if a corpus page ever landed in that hole. **`22060_A1_01_Plans.pdf` landed in it on the
+first run** — the only page line of 957 that moves, moving *away* from an oracle that has
+already taken the same clause reading. Before proposing arithmetic, ask them the one thing only
+they can answer: **is `alpha_is_shape` set on any group of that page's first page?** Too-strict
+and too-permissive part in opposite directions and their flag distinguishes them.
+
+**The bump also owes them `RenderError::OutlineConversionBudgetExceeded`** (ADR 0075) — and
+with it the observation that neither `RenderError` nor `SceneError` is `#[non_exhaustive]`, so
+every variant this project has called "additive" was additive by their luck rather than by
+contract.
+
 ### 0. The two live asks, both theirs, both measured, neither started
 
 **Their §31 — our two coverage lanes disagree about *where* a mark goes**, by up to an eighth
@@ -232,6 +248,10 @@ settings to a byte of alpha; on a default atlas both settings take the *same* la
 that size; their own measurement had the quantum off, so their offset is not the quantum.
 Their second question needs a fixture that reaches the sampled lane at all, and
 `doc/notes-glyph-phase-carry.md` §3 names the condition standing in the way.
+
+**Their §33 — taken on 2026-08-23 as ADR 0075**, and what follows is kept as the ask it
+answered. Measured here: 400 000 cubic segments upload in **2.90 ms against 49.1**, and a cubic
+outline cost 9.5× its own chords before and 1.07× now. What they wrote:
 
 **Their §33 — `upload_outline` builds the GPU lane's quadratics eagerly and a launch never
 reads them.** Measured on their side, two instruments agreeing: on a 3 011 919-segment drawing,

@@ -270,6 +270,41 @@ who could remove it.
 
 ### What is still open
 
+- **A group's clip is a set now, and the first corpus run fired the question the round left
+  open** (ADR 0074, 2026-08-23, `doc/notes-group-clip-as-a-set.md`). The child composite
+  multiplied the clip into the same scalar as the group's alpha and its mask, where §8.5.4
+  says the clip constrains a *shape* and §10.7.4 makes that an intersection of sets — so a
+  group whose `/BBox` shares a boundary pixel with its clip was painted at the **square** of
+  its coverage, 0.254 where the clause asks 0.504. The clip and the residue now intersect each
+  other by `min`, and the group's raster meets that region by `min` **wherever the encoder can
+  prove the raster's alpha is a shape** — §11.3.7.1's `α = f × q` with §11.6.4.2 giving every
+  elementary object an opacity of 1.0, which leaves the proof three doors to check in the
+  command list. The proof is what keeps it honest in both directions: `min` against an
+  *opacity* is wrong the other way, at **128 of 255 where the clause asks 77**.
+  **What is open is the hole the proof cannot see**: a mask that `/AIS true` made a shape. The
+  caller *states* that as a flag because only an interpreter has read `/AIS`; we derive it, and
+  cannot derive that case. ADR 0074 said the caller's boolean is the answer if a corpus page
+  ever landed in the hole — **one did, on the first run**: `22060_A1_01_Plans.pdf` is the only
+  page line of 957 that moves, and it moves *away* from an oracle that has already taken this
+  same clause reading (their §36.5). One line on their side settles which way it parted, and
+  then the boolean is a decision for both projects.
+- **The lane that never runs no longer converts the outline** (ADR 0075, 2026-08-23, the
+  caller's §33). `upload_outline` built the GPU lane's quadratics for every outline, and a
+  launch under the default coverage setting reads none of them: on their 3 011 919-segment
+  drawing that was **156.0 ms of a 187.6 ms first frame**. The quadratics are a `OnceLock`
+  filled where `encode::fill` first asks, which meant splitting `take_gpu_lane` into
+  `gpu_lane_admissible` (the cheap four, no geometry) and `triangles_under_coverage`
+  (ADR 0026's byte comparison), so the geometry is built after the cheap tests rather than
+  before them. Measured here: **400 000 cubic segments upload in 2.90 ms against 49.1**, and
+  the control is the result — a cubic outline cost **9.5× its own chords** before and 1.07×
+  now, so the upload no longer depends on the shape of what is uploaded. The budget follows
+  the bytes rather than estimating at upload (one cubic becomes between 1 and 2⁸ quadratics,
+  so the only safe estimate would over-charge a page of straight edges ~180×), at the cost of
+  one new refusal: `RenderError::OutlineConversionBudgetExceeded`, which a device near its
+  ceiling now meets on the first frame that crosses into `Coverage::Gpu` rather than at
+  upload. That is the second budget principle 6's "discoverable before the frame" does not
+  reach, and it is documented on the variant.
+
 - **A cached mark could land a whole device pixel from where it was placed, and 133 corpus
   pages were waiting on the fix** (ADR 0073, 2026-08-22, `doc/notes-glyph-phase-carry.md`).
   `GlyphPlacement::of` quantised a placement's fractional offset with `.round() as u16 % q`,
@@ -446,7 +481,14 @@ who could remove it.
   and `Counters::coverage` with `RenderError::ScratchExhausted`'s three new fields
   (ADR 0057), `RenderError::ViewportTransformTooLarge`, `SceneError::KnockoutElementGroupUnsupported`
   (ADR 0069), and one further `SceneError` addition,
-  `InvalidImageAlpha`, whose transfer document is `doc/api-change-image-alpha.md`.
+  `InvalidImageAlpha`, whose transfer document is `doc/api-change-image-alpha.md`, and — from
+  2026-08-23 — `RenderError::OutlineConversionBudgetExceeded` (ADR 0075). **All of these are
+  additive in practice and none is additive by contract**: `RenderError` and `SceneError` are
+  not `#[non_exhaustive]`, so each addition is a breaking change for any exhaustive match, and
+  it has been safe only because the caller has none — verified 2026-08-23, they hold
+  `#[from] quorra_gpu::RenderError` and one single-variant arm. Whether these enums should
+  carry `#[non_exhaustive]`, so that the next addition is safe by contract rather than by
+  their good luck, is a decision to take **with** them at a bump rather than announce at one.
 - **A paint the device evaluates — built** (ADR 0053, 2026-08-15). `Paint::Function` is a
   §7.10.5 type 4 program uploaded once, admitted at `Device::upload_function`, generated
   into a WGSL shader cached by the program's content hash, and drawn through the rare
