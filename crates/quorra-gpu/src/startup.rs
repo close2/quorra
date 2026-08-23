@@ -160,6 +160,34 @@ pub enum Coverage {
     ///
     /// Commands under a non-rectangular clip still take the CPU lane, because the
     /// residue multiply is CPU-side; both kinds of tile share one sheet.
+    ///
+    /// # What sampled coverage costs, and the clause it does not meet (ADR 0076)
+    ///
+    /// "Sampled rather than exact" is a stronger statement than a level count, and it is
+    /// stated here because this variant is where it is chosen. The samples lie on one
+    /// lattice of period `p = 1/√`[`coverage_samples`] across the whole device — **0.25 of
+    /// a device pixel at the default sixteen** — so for an axis-aligned mark:
+    ///
+    /// - its **coverage** is a count of lattice rows times `p`, and so within one `p` of
+    ///   the area ISO 32000-2 §8.5.3.3 gives it, in either direction. A rule 0.878 pixels
+    ///   thick draws 0.75 or 1.0 depending only on where it lands.
+    /// - its **placement** — the centroid of its coverage — moves by up to `p`, and by up
+    ///   to `p/2` where its width is a multiple of `p`, which a one-pixel hairline is.
+    /// - **a pixel the mark intersects may receive nothing at all.** ISO 32000-2 §10.7.4
+    ///   requires "painting any pixel whose half-open square region intersects the shape,
+    ///   no matter how small the intersection is", and its NOTE 1 puts a pixel the mark's
+    ///   *boundary* crosses inside that requirement. This lane leaves such a pixel at zero
+    ///   whenever no sample row falls in it. **That is a non-conformance and it is
+    ///   recorded as one**; the mark itself cannot disappear, which is the part ADR 0070
+    ///   guarantees by keeping anything narrower than `p` on the [`Cpu`](Coverage::Cpu)
+    ///   lane.
+    ///
+    /// Raising [`coverage_samples`] narrows `p` and costs one pass pair per four samples;
+    /// it does not remove the last point, because a finer lattice still has gaps. Only
+    /// [`Cpu`](Coverage::Cpu) computes exact area (ADR 0005), and a caller that needs it —
+    /// a page whose subject is hairlines — should ask for it.
+    ///
+    /// [`coverage_samples`]: Options::coverage_samples
     Gpu,
 }
 

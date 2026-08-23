@@ -194,9 +194,17 @@ fn fs_resolve(input: TileOut) -> @location(0) vec4f {
         }
     }
     // The frame's coverage is the fraction of *all* its samples that landed inside,
-    // and this pass contributes the four it holds. Additive blending sums the groups;
-    // the single quantisation to a byte happens once, at the store, which is the same
-    // discipline ADR 0005 states for the CPU lane and the reason the two can be held
-    // to a stated difference rather than to a hope.
+    // and this pass contributes the four it holds. Additive blending sums the groups.
+    //
+    // **Once per group of four, not once per frame** — this comment claimed the latter
+    // until 2026-08-23 and it was false for every frame above four samples. The sheet is
+    // `r8unorm`, so each group's store rounds the running sum to 1/255, and a frame of
+    // `n` samples pays `n/4` of those roundings rather than one. Measured by
+    // `examples/lane_placement` at the default sixteen: three sample rows of four read
+    // back as 192/255 = 0.7529 where a single quantisation of 3/4 would give 191/255 =
+    // 0.7490, and a full pixel reads 1.0039. The drift is bounded by half a level per
+    // group, `n/8` levels in all, and ADR 0076 prices it against the ¼-pixel quantum
+    // the sample count itself imposes — which is thirty times larger and is what
+    // actually decides this lane's fidelity.
     return vec4f(covered / input.rule_and_samples.y, 0.0, 0.0, 0.0);
 }
