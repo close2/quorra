@@ -13,9 +13,14 @@
 //!   its own orientation. Nothing here has to know which.
 //!
 //! The whole point is that **no step depends on the device scale**: this module runs
-//! once per outline at upload, and a frame at 100× re-uses exactly what a frame at 1×
-//! did. That is the difference from `raster.rs`, whose flattening tolerance is in
-//! device pixels and whose cost therefore grows with magnification.
+//! once per outline, and a frame at 100× re-uses exactly what a frame at 1× did. That
+//! is the difference from `raster.rs`, whose flattening tolerance is in device pixels
+//! and whose cost therefore grows with magnification.
+//!
+//! *Once per outline*, and — since ADR 0075 — **not once per upload**: the conversion is
+//! the most expensive thing an outline costs, at 490 instructions per segment, and a host
+//! on `Coverage::Cpu` never reads its result. So it runs on the first frame that asks
+//! (`StoredOutline::quads`) and never at all on a host that does not ask.
 //!
 //! # Cubics, and why they become quadratics here
 //!
@@ -38,10 +43,10 @@
 //! The seam is *when* each half runs, which is also who calls it:
 //!
 //! - **this file** — the conversion. One outline, cubics to quadratics, subpaths to
-//!   closed contours, priced and counted. It runs **once per outline at upload**
-//!   (`resources.rs` is its only caller) and its result is resident for the outline's
-//!   life, which is the whole reason the GPU lane's cost does not grow with
-//!   magnification.
+//!   closed contours, priced and counted. It runs **once per outline, on the first frame
+//!   that reads the result** (`resources::StoredOutline::quads` is its only caller), and
+//!   that result is then resident for the outline's life — which is the whole reason the
+//!   GPU lane's cost does not grow with magnification.
 //! - **`triangles`** — the triangles that converted form becomes, and
 //!   [`WindingVertex`], the vertex the winding pass reads. It runs **once per placement
 //!   per frame**, and its callers are the frame path: `encode/coverage.rs`, `pane.rs`,
@@ -121,8 +126,10 @@ pub(crate) struct QuadSegment {
 
 /// An outline as closed contours of quadratic segments — the form the GPU lane draws.
 ///
-/// Built once per outline at upload ([`Self::from_segments`]) because nothing in it
-/// depends on the transform the outline is eventually drawn under.
+/// Built once per outline ([`Self::from_segments`]) because nothing in it depends on
+/// the transform the outline is eventually drawn under — and built by the first frame
+/// that reads it rather than by the upload, because a host that never takes this lane
+/// never needs it at all (ADR 0075).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct QuadOutline {
     /// Every contour, each as its start point and the segments that leave it.

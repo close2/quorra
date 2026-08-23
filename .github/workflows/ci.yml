@@ -73,6 +73,7 @@ jobs:
               function_compile \
               function_paint \
               lane_placement \
+              outline_upload \
               present_thread \
               rect_lane \
               residue_clip \

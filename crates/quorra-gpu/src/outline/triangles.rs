@@ -5,7 +5,7 @@
 //! and its curve purely by its own orientation. Everything here runs **per placement,
 //! per frame** — its input is already-converted geometry plus a map into device space —
 //! which is what separates it from its parent, where the conversion runs once per outline
-//! at upload and never again.
+//! — on the first frame that reads it (ADR 0075) — and never again.
 //!
 //! [`WindingVertex`] is the seam with the device: `pipeline/spec.rs` states its attribute
 //! layout, `pane.rs` and `winding/sheet.rs` count and write it, and its

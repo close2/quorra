@@ -149,10 +149,12 @@ pub enum Coverage {
     /// Outline triangles rasterised by the device, winding accumulated in a float
     /// target (ADR 0016 — Wallace's method).
     ///
-    /// **Nothing in it depends on the magnification**: cubics become quadratics once,
-    /// at upload, so a frame at 100× re-uses what a frame at 1× built, and a zoom
-    /// gesture — where every cached tile is cold on every frame — costs the same as
-    /// standing still. Its weakness is the other end: coverage is sampled rather than
+    /// **Nothing in it depends on the magnification**: cubics become quadratics once —
+    /// on the first frame that takes this lane, never at upload (ADR 0075) — so a frame
+    /// at 100× re-uses what the frame that converted built, and a zoom gesture, where
+    /// every cached tile is cold on every frame, costs the same as standing still.
+    /// Setting this is therefore what makes a host pay for that conversion at all, and
+    /// the frame it is first set on is the one that pays. Its weakness is the other end: coverage is sampled rather than
     /// exact ([`Options::coverage_samples`] levels, not 256), and there is no atlas in
     /// front of it, so a dense page of small text pays per glyph per frame.
     ///
