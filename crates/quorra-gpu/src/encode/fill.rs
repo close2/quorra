@@ -241,46 +241,58 @@ impl<'a> Encoder<'a> {
             tile_height,
             placed_once,
         )?;
-        // The GPU lane takes the outline as it was uploaded — quadratics, not polylines
-        // — which is the whole of why its cost does not grow with the magnification:
-        // there is no flattening here to be done again at a new scale, and no atlas in
-        // front of it to be cold (ADR 0016).
-        if !stored.quads.is_empty()
-            && self.take_gpu_lane(
-                resolved,
-                cache,
-                tile_width,
-                tile_height,
-                // A fill has no width of its own, so its device box is the whole measure
-                // — and for a curve that box is the control hull's, which over-states a
-                // thin curve's extent. Both limits are stated on [`ThinAxis`] (ADR 0070).
-                ThinAxis::of(fill.bounds, None),
-                stored.quads.triangle_count(),
-            )
-        {
-            let Some(tile) = self.visible_tile(fill.bounds, resolved) else {
-                return Ok(());
-            };
-            let quads = &stored.quads;
-            let device = fill.to_device;
-            return self.push_gpu_tile(
-                tile,
-                fill.rule,
-                fill.color,
-                resolved,
-                fill.style,
-                fill.mask,
-                |out, origin, clip| {
-                    quads.append_triangles(
-                        |p| {
-                            let q = apply(&device, p);
-                            [q.x + origin[0], q.y + origin[1]]
-                        },
-                        clip,
-                        out,
-                    );
-                },
-            );
+        // The GPU lane takes the outline as quadratics, not polylines — which is the
+        // whole of why its cost does not grow with the magnification: there is no
+        // flattening here to be done again at a new scale, and no atlas in front of it
+        // to be cold (ADR 0016).
+        //
+        // **The order of the three tests below is the optimisation** (ADR 0075). The
+        // conversion into quadratics is the most expensive thing an outline ever costs —
+        // 490 instructions per segment, 156 ms of the caller's 187.6 ms launch scene
+        // phase when it ran at upload — and every test that can answer without it is
+        // asked first. A host on `Coverage::Cpu` stops at `gpu_lane_admissible` and
+        // converts nothing, ever; `examples/outline_upload.rs` is the measurement.
+        if self.gpu_lane_admissible(
+            resolved,
+            cache,
+            // A fill has no width of its own, so its device box is the whole measure —
+            // and for a curve that box is the control hull's, which over-states a thin
+            // curve's extent. Both limits are stated on [`ThinAxis`] (ADR 0070).
+            ThinAxis::of(fill.bounds, None),
+        ) {
+            // Copied out of `self` so the borrow is the store's `'a` and not a reborrow
+            // of the `&mut self` `push_gpu_tile` needs below.
+            let resources = self.resources;
+            let quads = stored.quads(resources.budget())?;
+            // Emptiness and the triangle count were two questions of one converted form;
+            // asking them in this order rather than before the conversion changes which
+            // test answers first and not what the conjunction answers.
+            if !quads.is_empty()
+                && Self::triangles_under_coverage(tile_width, tile_height, quads.triangle_count())
+            {
+                let Some(tile) = self.visible_tile(fill.bounds, resolved) else {
+                    return Ok(());
+                };
+                let device = fill.to_device;
+                return self.push_gpu_tile(
+                    tile,
+                    fill.rule,
+                    fill.color,
+                    resolved,
+                    fill.style,
+                    fill.mask,
+                    |out, origin, clip| {
+                        quads.append_triangles(
+                            |p| {
+                                let q = apply(&device, p);
+                                [q.x + origin[0], q.y + origin[1]]
+                            },
+                            clip,
+                            out,
+                        );
+                    },
+                );
+            }
         }
         // Cacheable is a question for the atlas — how much of it this tile would take —
         // rather than a constant here (ADR 0024). A residue chain still takes the

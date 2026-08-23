@@ -284,17 +284,43 @@ impl Encoder<'_> {
         thin: ThinAxis,
         triangles: usize,
     ) -> bool {
-        // Ordered by what each costs to ask, not by which matters most: the setting is one
-        // comparison and answers `false` for the caller's default configuration on sight,
-        // and the thin-axis test is one float compare against a spacing the frame computed
-        // once (`Encoder::sample_spacing`).
-        if self.coverage != Coverage::Gpu
-            || resolved.residues.is_some()
-            || cache.worth_caching()
-            || thin.can_fall_between_sample_columns(self.sample_spacing)
-        {
-            return false;
-        }
+        self.gpu_lane_admissible(resolved, cache, thin)
+            && Self::triangles_under_coverage(width, height, triangles)
+    }
+
+    /// The four tests a lane choice can make **before any geometry exists**.
+    ///
+    /// Split from [`Encoder::take_gpu_lane`] by ADR 0075, because the fifth test needs a
+    /// triangle count and an outline's triangle count needs its quadratics: this is the
+    /// gate that decides whether that conversion is paid for at all. Under
+    /// [`Coverage::Cpu`] — the caller's default, and what their viewer draws with below
+    /// ten times magnification — it answers `false` here and no outline is ever
+    /// converted.
+    ///
+    /// Ordered by what each costs to ask, not by which matters most: the setting is one
+    /// comparison and answers `false` for the caller's default configuration on sight,
+    /// and the thin-axis test is one float compare against a spacing the frame computed
+    /// once ([`Encoder::sample_spacing`]).
+    pub(super) fn gpu_lane_admissible(
+        &self,
+        resolved: &ResolvedClip,
+        cache: CacheProspect,
+        thin: ThinAxis,
+    ) -> bool {
+        self.coverage == Coverage::Gpu
+            && resolved.residues.is_none()
+            && !cache.worth_caching()
+            && !thin.can_fall_between_sample_columns(self.sample_spacing)
+    }
+
+    /// Whether this shape's triangles cost the device less than its coverage would cost
+    /// the processor (ADR 0026).
+    ///
+    /// One placement's triangles are three vertices each at
+    /// [`WindingVertex::STRIDE`](crate::outline::WindingVertex::STRIDE) bytes; the same
+    /// placement's coverage is its tile's area in bytes. Both are bytes and the
+    /// comparison is between them directly.
+    pub(super) fn triangles_under_coverage(width: u32, height: u32, triangles: usize) -> bool {
         let area = u64::from(width).saturating_mul(u64::from(height));
         let triangle_bytes = (triangles as u64)
             .saturating_mul(3)

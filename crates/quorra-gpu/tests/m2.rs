@@ -138,8 +138,10 @@ fn the_upload_once_reference_many_round_trip() {
 fn resource_budget_is_discoverable_and_loud() {
     // Big enough for exactly one of the test outlines, not two — *measured* rather
     // than written down, because what an outline costs is a property of what the
-    // device keeps for it (segments, and since ADR 0016 the quadratics the GPU lane
-    // draws), and a constant here would fail the day that changes for a good reason.
+    // device keeps for it, and a constant here would fail the day that changes for a
+    // good reason. It changed twice: ADR 0016 added the quadratics the GPU lane draws,
+    // and ADR 0075 moved them off the upload, so what this measures now is the
+    // segments alone until a frame takes that lane.
     let budget = {
         let mut sizing = Device::headless(&Options {
             adapter: Some("llvmpipe".into()),

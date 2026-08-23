@@ -147,6 +147,14 @@ impl Device {
 
     /// Bytes currently resident across all uploaded resources, against
     /// [`Limits::max_resource_bytes`](crate::device::Limits::max_resource_bytes).
+    ///
+    /// **It can grow without an upload** (ADR 0075). An outline is converted into the
+    /// GPU coverage lane's quadratics by the first frame that reads them, not by
+    /// [`Device::upload_outline`], and those bytes are charged when they become
+    /// resident. So a host on `Coverage::Cpu` sees only what it uploaded, and one that
+    /// crosses into `Coverage::Gpu` sees this rise once per outline the page draws
+    /// through that lane. Both readings are true: this counts what is resident, and
+    /// what is resident is what the ceiling bounds.
     #[must_use]
     pub fn resource_bytes_in_use(&self) -> u64 {
         self.resources.in_use_bytes()

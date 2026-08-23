@@ -26,33 +26,46 @@
 //! registry in another — is refused for a reason that is checkable rather than
 //! aesthetic:
 //!
-//! - **[`ResourceStore::charge`] and [`ResourceStore::allocate_id`] have no caller
-//!   anywhere but those five methods.** A seam between them would separate two private
-//!   helpers from every call site they have, which is a cut through the middle of one
-//!   operation rather than along a join between two.
+//! - **[`ResourceStore::allocate_id`] has no caller anywhere but those five methods.** A
+//!   seam there would separate a private helper from every call site it has, which is a
+//!   cut through the middle of one operation rather than along a join between two.
 //! - **The order is the subject.** "Nothing is stored and nothing is charged" is promised
-//!   by each of the five and kept by the two, and the only thing that checks the five
-//!   promises against the two implementations is a reader with both in front of them.
-//!   `allocate_id` is called *before* `charge` on purpose, and the bound it states — an
-//!   identifier is never reused — is what [`ResourceStore::generation`]'s soundness rests
-//!   on, three screens away.
+//!   by each of the five and kept by `allocate_id` and [`budget::ResourceBudget::charge`]
+//!   together, and the only thing that checks the five promises against the two
+//!   implementations is a reader with both in front of them. `allocate_id` is called
+//!   *before* the charge on purpose, and the bound it states — an identifier is never
+//!   reused — is what [`ResourceStore::generation`]'s soundness rests on, three screens
+//!   away.
 //! - The five uploads are not five subjects but one shape repeated, and reviewing the
 //!   fifth *is* comparing it with the first four.
 //!
-//! What the length actually buys is written down rather than left to be discovered: of
-//! the 635 lines here, **417 carry code and 150 of those are the tests**; the longest
-//! single item is `upload_outline` at forty. The rest is clause citation and stated
-//! invariant, which is the part a reader of a security boundary is here for — and it is
-//! why the count that matters for this file is the code line rather than the line.
+//! The counter itself **did** leave, in ADR 0075, and for the reason this comment used to
+//! give against it: `charge` stopped having only these five callers the moment an
+//! outline's quadratic form began converting on the frame that reads it, because that
+//! conversion charges the same ceiling through a shared reference and refuses in a
+//! frame's vocabulary. `budget.rs` is that number and its two refusals.
+//!
+//! What the length still buys is written down rather than left to be discovered: of the
+//! lines here, fewer than two in three carry code and a third of those are the tests; the
+//! longest single item is `upload_outline` at forty. The rest is clause citation and
+//! stated invariant, which is the part a reader of a security boundary is here for — and
+//! it is why the count that matters for this file is the code line rather than the line.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use quorra_scene::{
     FnOp, FunctionId, ImageId, ImageSpec, MAX_COORDINATE, MeshId, MeshSpec, OutlineId, RampId,
     Rect, ResourceId, Segment, Stop, axis_aligned_rect,
 };
 
-use crate::error::{DeviceError, ResourceProblem};
+use crate::error::{DeviceError, RenderError, ResourceProblem};
+use crate::outline::QuadOutline;
+
+mod budget;
+
+pub(crate) use budget::ResourceBudget;
 
 /// A validated, resident outline.
 #[derive(Debug)]
@@ -61,17 +74,79 @@ pub(crate) struct StoredOutline {
     /// for flattening into the coverage lane, and for the segment counter — so this is
     /// the form the lanes work from, not an archive of the upload.
     pub segments: Box<[Segment]>,
-    /// The same outline as closed contours of quadratic segments, for the GPU lane.
+    /// The same outline as closed contours of quadratic segments, for the GPU lane —
+    /// converted by the **first frame that reads it**, and never on a host that never
+    /// takes that lane (ADR 0075).
     ///
-    /// Built here, once, and that is the whole reason the GPU lane's cost does not
+    /// Converted once either way, which is the whole reason the GPU lane's cost does not
     /// grow with magnification: the conversion depends on the outline and on nothing
-    /// else, so a frame at 100× re-uses what the upload built (ADR 0016).
-    pub quads: crate::outline::QuadOutline,
+    /// else, so a frame at 100× re-uses what the frame that first needed it built
+    /// (ADR 0016).
+    quads: OnceLock<QuadOutline>,
     /// The axis-aligned rectangle the outline traces, when it traces exactly one —
     /// recognised once, at upload, because §6.4 turns on it: a rectangular clip is
     /// four floats, never a mask, and the encoder asks this on every frame.
     pub rect_hint: Option<Rect>,
+    /// What the segments cost, charged at upload.
     bytes: u64,
+    /// What [`Self::quads`] cost, charged when it was converted and zero until then.
+    ///
+    /// Separate from `bytes` because the two are charged at different moments and only
+    /// [`ResourceStore::release`] adds them up — and it does so through
+    /// [`AtomicU64::into_inner`], which it may because a release owns the record.
+    quad_bytes: AtomicU64,
+}
+
+impl StoredOutline {
+    /// The GPU coverage lane's quadratics, converting and charging on the first ask.
+    ///
+    /// **This is the ask, and it is the only one** (ADR 0075). The caller's
+    /// `QUORRA_FEEDBACK.md` §33 measured 156 ms of a 187.6 ms scene phase inside
+    /// `upload_outline` on a 3 011 919-segment drawing, all of it converting a
+    /// representation that frame never read: their default is
+    /// [`Coverage::Cpu`](crate::startup::Coverage::Cpu) and
+    /// [`Encoder::gpu_lane_admissible`](crate::encode::Encoder) answers `false` on sight
+    /// under it. So the conversion moved here, behind the lane's own cheap tests.
+    ///
+    /// The budget is charged **when the bytes become resident**, not when the outline
+    /// was uploaded, because a ceiling that priced a form it had not built would be
+    /// pricing an estimate — and the estimate cannot be an upper bound worth having: one
+    /// cubic converts to between one and 2⁸ quadratics
+    /// ([`MAX_SPLIT_DEPTH`](crate::outline)), so a bound that could not lie would
+    /// over-charge a page of straight edges by two orders of magnitude. The cost of that
+    /// honesty is written down in ADR 0075: a device filled close to its ceiling can now
+    /// refuse the *frame* that first crosses the coverage threshold, where before it
+    /// refused the upload.
+    pub(crate) fn quads(&self, budget: &ResourceBudget) -> Result<&QuadOutline, RenderError> {
+        if let Some(built) = self.quads.get() {
+            return Ok(built);
+        }
+        let built = QuadOutline::from_segments(&self.segments);
+        let bytes = built.stored_bytes();
+        budget
+            .charge(bytes)
+            .map_err(|over| RenderError::OutlineConversionBudgetExceeded {
+                needed: over.needed,
+                budget: over.limit,
+            })?;
+        match self.quads.set(built) {
+            Ok(()) => self.quad_bytes.store(bytes, Ordering::Relaxed),
+            // Another thread converted the same outline first and its charge stands, so
+            // ours is returned rather than left on the budget. The two are the same
+            // number: the conversion is a pure function of the segments.
+            Err(_) => budget.refund(bytes),
+        }
+        // Set on either arm just above — by us, or by whoever we lost the race to — and
+        // `OnceLock` has no infallible getter afterwards.
+        #[allow(clippy::expect_used)]
+        Ok(self.quads.get().expect("set on either arm above"))
+    }
+
+    /// Whether the converted form is resident, for the tests that state *when* it is.
+    #[cfg(test)]
+    pub(crate) fn quads_converted(&self) -> bool {
+        self.quads.get().is_some()
+    }
 }
 
 /// A validated, resident image.
@@ -116,8 +191,7 @@ pub(crate) struct ResourceStore {
     meshes: HashMap<u32, StoredMesh>,
     functions: HashMap<u32, StoredFunction>,
     next_id: u32,
-    in_use_bytes: u64,
-    budget_bytes: u64,
+    budget: ResourceBudget,
     /// Bumped by every [`ResourceStore::release`], so that anything holding an encode
     /// that names resource ids can tell whether those ids still mean what they meant
     /// (`retained.rs`, ADR 0048).
@@ -140,8 +214,7 @@ impl ResourceStore {
             meshes: HashMap::new(),
             functions: HashMap::new(),
             next_id: 0,
-            in_use_bytes: 0,
-            budget_bytes,
+            budget: ResourceBudget::new(budget_bytes),
             generation: 0,
         }
     }
@@ -153,7 +226,14 @@ impl ResourceStore {
 
     /// Bytes currently resident, for `Limits` and diagnostics.
     pub(crate) fn in_use_bytes(&self) -> u64 {
-        self.in_use_bytes
+        self.budget.in_use()
+    }
+
+    /// The ceiling every resident byte is admitted against, for the one charge a *frame*
+    /// takes: an outline's conversion into the GPU coverage lane's quadratics
+    /// ([`StoredOutline::quads`], ADR 0075).
+    pub(crate) fn budget(&self) -> &ResourceBudget {
+        &self.budget
     }
 
     /// The resident outline behind an id, for the encoder.
@@ -192,8 +272,7 @@ impl ResourceStore {
             .any(|stored| stored.analysis.program_hash() == hash)
     }
 
-    /// Validate an outline, price it, and store both the segments and the quadratic
-    /// form the GPU lane needs.
+    /// Validate an outline, price its segments, and store them.
     ///
     /// The path must be non-empty, must start with a `MoveTo` — nothing else has a
     /// current point to draw from (ISO 32000-2 §8.5.2) — and every coordinate must be
@@ -201,6 +280,11 @@ impl ResourceStore {
     /// [`DeviceError::InvalidResource`] naming its own [`ResourceProblem`]; a path over
     /// the store's budget is [`DeviceError::ResourceBudgetExceeded`]. Either way
     /// nothing is stored and nothing is charged.
+    ///
+    /// **What it no longer does is convert** (ADR 0075). The GPU coverage lane's
+    /// quadratic form is built by the first frame that reads it and charged then;
+    /// [`StoredOutline::quads`] is that ask and states why the budget follows the bytes
+    /// rather than anticipating them.
     pub(crate) fn upload_outline(&mut self, path: &[Segment]) -> Result<OutlineId, DeviceError> {
         if path.is_empty() {
             return Err(DeviceError::InvalidResource {
@@ -234,21 +318,20 @@ impl ResourceStore {
             }
         }
         let rect_hint = axis_aligned_rect(path);
-        let quads = crate::outline::QuadOutline::from_segments(path);
-        // Both forms are charged: the quadratics are as resident as the segments, and
-        // a budget that priced only half of what it stores would be a budget in name.
-        let bytes = (path.len() as u64)
-            .saturating_mul(size_of::<Segment>() as u64)
-            .saturating_add(quads.stored_bytes());
+        // The segments, and only the segments: those are what this call makes resident.
+        // The converted form is charged by the frame that converts it, so that the
+        // ceiling counts bytes that exist rather than bytes that might (ADR 0075).
+        let bytes = (path.len() as u64).saturating_mul(size_of::<Segment>() as u64);
         let id = self.allocate_id()?;
-        self.charge(bytes)?;
+        self.budget.charge(bytes)?;
         self.outlines.insert(
             id,
             StoredOutline {
                 rect_hint,
-                quads,
+                quads: OnceLock::new(),
                 segments: path.into(),
                 bytes,
+                quad_bytes: AtomicU64::new(0),
             },
         );
         Ok(OutlineId(id))
@@ -274,7 +357,7 @@ impl ResourceStore {
         }
         let bytes = image.byte_size();
         let id = self.allocate_id()?;
-        self.charge(bytes)?;
+        self.budget.charge(bytes)?;
         self.images.insert(
             id,
             StoredImage {
@@ -325,7 +408,7 @@ impl ResourceStore {
         }
         let bytes = (stops.len() as u64).saturating_mul(size_of::<Stop>() as u64);
         let id = self.allocate_id()?;
-        self.charge(bytes)?;
+        self.budget.charge(bytes)?;
         self.ramps.insert(
             id,
             StoredRamp {
@@ -356,7 +439,7 @@ impl ResourceStore {
         }
         let bytes = mesh.byte_size();
         let id = self.allocate_id()?;
-        self.charge(bytes)?;
+        self.budget.charge(bytes)?;
         self.meshes.insert(
             id,
             StoredMesh {
@@ -384,7 +467,7 @@ impl ResourceStore {
             .map_err(|reason| DeviceError::InvalidFunction { reason })?;
         let bytes = analysis.stored_bytes();
         let id = self.allocate_id()?;
-        self.charge(bytes)?;
+        self.budget.charge(bytes)?;
         self.functions
             .insert(id, StoredFunction { analysis, bytes });
         Ok(FunctionId(id))
@@ -398,7 +481,14 @@ impl ResourceStore {
     /// note 7).
     pub(crate) fn release(&mut self, id: ResourceId) -> Result<(), DeviceError> {
         let freed = match id {
-            ResourceId::Outline(OutlineId(raw)) => self.outlines.remove(&raw).map(|r| r.bytes),
+            // Both charges come back, and the second is zero unless a frame converted
+            // this outline for the GPU coverage lane (ADR 0075). `into_inner` is sound
+            // rather than merely convenient: a release owns the record it removed, so no
+            // shared reference to the counter can exist.
+            ResourceId::Outline(OutlineId(raw)) => self
+                .outlines
+                .remove(&raw)
+                .map(|r| r.bytes.saturating_add(r.quad_bytes.into_inner())),
             ResourceId::Image(ImageId(raw)) => self.images.remove(&raw).map(|r| r.bytes),
             ResourceId::Ramp(RampId(raw)) => self.ramps.remove(&raw).map(|r| r.bytes),
             ResourceId::Mesh(MeshId(raw)) => self.meshes.remove(&raw).map(|r| r.bytes),
@@ -406,26 +496,12 @@ impl ResourceStore {
         };
         match freed {
             Some(bytes) => {
-                self.in_use_bytes = self.in_use_bytes.saturating_sub(bytes);
+                self.budget.refund(bytes);
                 self.generation = self.generation.wrapping_add(1);
                 Ok(())
             }
             None => Err(DeviceError::UnknownResource { id }),
         }
-    }
-
-    /// Count, then admit: the budget is checked before anything is stored.
-    fn charge(&mut self, bytes: u64) -> Result<(), DeviceError> {
-        let needed = self.in_use_bytes.saturating_add(bytes);
-        if needed > self.budget_bytes {
-            return Err(DeviceError::ResourceBudgetExceeded {
-                needed,
-                in_use: self.in_use_bytes,
-                budget: self.budget_bytes,
-            });
-        }
-        self.in_use_bytes = needed;
-        Ok(())
     }
 
     /// One id space across the five families, so a stale id of one kind can never
@@ -462,7 +538,7 @@ mod tests {
     use quorra_scene::{ImageSpec, Point, ResourceId, Segment, Stop};
 
     use super::ResourceStore;
-    use crate::error::{DeviceError, ResourceProblem};
+    use crate::error::{DeviceError, RenderError, ResourceProblem};
 
     fn square() -> Vec<Segment> {
         vec![
@@ -471,6 +547,128 @@ mod tests {
             Segment::LineTo(Point::new(1.0, 1.0)),
             Segment::Close,
         ]
+    }
+
+    /// A curve, so that the conversion this file defers has real work to defer: a
+    /// cubic subdivides until Loop and Blinn's bound holds, which is the 490
+    /// instructions per segment ADR 0075 moved off the upload.
+    fn curved() -> Vec<Segment> {
+        vec![
+            Segment::MoveTo(Point::new(0.0, 0.0)),
+            Segment::CubicTo {
+                c1: Point::new(0.0, 40.0),
+                c2: Point::new(60.0, 40.0),
+                to: Point::new(60.0, 0.0),
+            },
+            Segment::CubicTo {
+                c1: Point::new(60.0, -40.0),
+                c2: Point::new(0.0, -40.0),
+                to: Point::new(0.0, 0.0),
+            },
+            Segment::Close,
+        ]
+    }
+
+    /// What an upload charges is the segments and **nothing else** (ADR 0075): the
+    /// converted form does not exist yet, and a budget counts what is resident.
+    #[test]
+    fn an_upload_charges_the_segments_and_converts_nothing() {
+        let mut store = ResourceStore::new(u64::MAX);
+        let id = store.upload_outline(&curved()).expect("valid outline");
+        assert_eq!(
+            store.in_use_bytes(),
+            (curved().len() * size_of::<Segment>()) as u64,
+            "the upload's charge is the segments it stored"
+        );
+        let stored = store.outline(id).expect("resident");
+        assert!(
+            !stored.quads_converted(),
+            "no frame has asked for the GPU lane's geometry, so none was made"
+        );
+    }
+
+    /// The first ask converts and charges; every ask after it is the same borrow and
+    /// costs nothing. That is the whole of ADR 0075's contract at this level.
+    #[test]
+    fn the_first_ask_converts_and_charges_and_no_later_ask_does() {
+        let mut store = ResourceStore::new(u64::MAX);
+        let id = store.upload_outline(&curved()).expect("valid outline");
+        let uploaded = store.in_use_bytes();
+
+        let stored = store.outline(id).expect("resident");
+        let first = stored
+            .quads(store.budget())
+            .expect("the budget is boundless");
+        assert!(!first.is_empty(), "a closed cubic contour covers area");
+        let triangles = first.triangle_count();
+        let converted = store.in_use_bytes();
+        assert!(
+            converted > uploaded,
+            "the conversion made bytes resident, so the ceiling counted them"
+        );
+        assert!(stored.quads_converted());
+
+        let second = stored.quads(store.budget()).expect("already converted");
+        assert_eq!(
+            second.triangle_count(),
+            triangles,
+            "one conversion, re-read"
+        );
+        assert_eq!(
+            store.in_use_bytes(),
+            converted,
+            "a second ask charges nothing, or a page of repeats would charge per mark"
+        );
+    }
+
+    /// A release returns **both** charges, so a device that drew through the GPU lane
+    /// and then released everything is a device with nothing resident.
+    #[test]
+    fn a_release_returns_the_conversions_charge_too() {
+        let mut store = ResourceStore::new(u64::MAX);
+        let id = store.upload_outline(&curved()).expect("valid outline");
+        store
+            .outline(id)
+            .expect("resident")
+            .quads(store.budget())
+            .expect("the budget is boundless");
+        assert!(store.in_use_bytes() > 0);
+        store.release(ResourceId::Outline(id)).expect("release");
+        assert_eq!(
+            store.in_use_bytes(),
+            0,
+            "a conversion charged at frame time is refunded at release like any other byte"
+        );
+    }
+
+    /// **The cost of charging honestly, stated as a test** (ADR 0075). A ceiling with
+    /// exactly the segments' room admits the upload and refuses the conversion — by
+    /// name, without charging, and without leaving a half-built form behind.
+    #[test]
+    fn a_conversion_over_the_ceiling_is_a_frames_refusal() {
+        let segments_only = (curved().len() * size_of::<Segment>()) as u64;
+        let mut store = ResourceStore::new(segments_only);
+        let id = store.upload_outline(&curved()).expect("the segments fit");
+        let stored = store.outline(id).expect("resident");
+        match stored.quads(store.budget()) {
+            Err(RenderError::OutlineConversionBudgetExceeded { needed, budget }) => {
+                assert_eq!(budget, segments_only);
+                assert!(
+                    needed > budget,
+                    "a refusal names what it would have come to"
+                );
+            }
+            other => panic!("expected the conversion to be refused, got {other:?}"),
+        }
+        assert_eq!(
+            store.in_use_bytes(),
+            segments_only,
+            "a refused conversion charges nothing"
+        );
+        assert!(
+            !stored.quads_converted(),
+            "and stores nothing, so a device given more room can ask again"
+        );
     }
 
     /// Upload, reference, release: the bytes come back, and a second release of the

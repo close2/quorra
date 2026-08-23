@@ -124,6 +124,47 @@ pub enum RenderError {
         /// ([`Options::max_frame_bytes`](crate::startup::Options::max_frame_bytes)).
         budget: u64,
     },
+    /// Converting an outline into the GPU coverage lane's quadratics would push the
+    /// device's **resource** budget over (ADR 0075).
+    ///
+    /// Distinct from [`RenderError::FrameBudgetExceeded`] because the two are different
+    /// ceilings: this one is
+    /// [`Options::max_resource_bytes`](crate::startup::Options::max_resource_bytes), the
+    /// bound on what stays resident between frames, and the bytes in question outlive
+    /// the frame that built them.
+    ///
+    /// **It exists because the conversion moved.** Until ADR 0075 an outline was
+    /// converted at `Device::upload_outline` and both forms were charged there, so this
+    /// overflow was a
+    /// [`DeviceError::ResourceBudgetExceeded`](crate::error::DeviceError::ResourceBudgetExceeded)
+    /// on the upload. Converting on the first frame that reads the quadratics is what
+    /// makes a launch stop paying for a lane it does not take, and this is that
+    /// decision's cost: a device filled close to its ceiling can be refused by the frame
+    /// that first crosses `Coverage::Gpu` rather than by the upload before it.
+    ///
+    /// It is the second budget principle 6's "discoverable before the frame" does not
+    /// reach — [`RenderError::ScratchExhausted`] says the same about itself — and for a
+    /// checkable reason: how many quadratics a cubic converts to is a property of the
+    /// curve, so no bound short of 2⁸ per segment could be stated in advance and a bound
+    /// that loose would refuse pages that fit. A caller that needs the old timing back
+    /// gets it by drawing one frame under `Coverage::Gpu`, which converts every outline
+    /// the page names and charges every byte.
+    ///
+    /// The message names the bytes and not the outline, as
+    /// [`RenderError::FrameBudgetExceeded`] does: the budget they share is one number,
+    /// and a host's answer to it is to release resources or to raise the ceiling rather
+    /// than to treat one outline differently.
+    #[error(
+        "converting an outline into the GPU coverage lane's quadratics needs {needed} \
+         resident bytes, over the device's resource budget of {budget}"
+    )]
+    OutlineConversionBudgetExceeded {
+        /// What the device's resident bytes would have come to.
+        needed: u64,
+        /// The configured ceiling
+        /// ([`Options::max_resource_bytes`](crate::startup::Options::max_resource_bytes)).
+        budget: u64,
+    },
     /// `Target::Surface` or
     /// [`Device::invalidate_surface`](crate::device::Device::invalidate_surface) on a
     /// device constructed with [`Device::headless`](crate::device::Device::headless).
