@@ -101,7 +101,7 @@ impl Device {
         let bytes = composite_params_bytes(op, region, backdrop.1, child.1, mask.1);
         let uniform = self.gpu.create_buffer(&wgpu::BufferDescriptor {
             label: Some("quorra composite params"),
-            size: 128,
+            size: 144,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -224,7 +224,7 @@ fn globals_bytes(region: Region) -> [u8; 16] {
     bytes
 }
 
-/// The 128 bytes `composite.wgsl`'s `Params` reads, in its order (§11.4.5).
+/// The 144 bytes `composite.wgsl`'s `Params` reads, in its order (§11.4.5).
 // The offsets are literal layout positions inside a fixed 128-byte array; the index
 // arithmetic cannot leave it.
 #[allow(clippy::arithmetic_side_effects)]
@@ -235,8 +235,8 @@ fn composite_params_bytes(
     backdrop: Region,
     child: Region,
     mask: MaskPlacement,
-) -> [u8; 128] {
-    let mut bytes = [0_u8; 128];
+) -> [u8; 144] {
+    let mut bytes = [0_u8; 144];
     bytes[0..4].copy_from_slice(&op.mode.to_le_bytes());
     bytes[4..8].copy_from_slice(&op.alpha.to_le_bytes());
     let non_isolated = u32::from(!op.isolated);
@@ -274,6 +274,9 @@ fn composite_params_bytes(
         bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
     }
     bytes[96..128].copy_from_slice(&mask.bytes());
+    // ADR 0074's assertion about this layer's alpha, which decides whether the clip
+    // meets it by §8.5.4's intersection or by a product.
+    bytes[128..132].copy_from_slice(&u32::from(op.alpha_is_shape).to_le_bytes());
     bytes
 }
 
@@ -353,6 +356,7 @@ mod tests {
             compose: 2,
             mask: None,
             isolated: false,
+            alpha_is_shape: true,
         };
         let placement = MaskPlacement {
             origin: [21.0, 22.0],
@@ -400,6 +404,7 @@ mod tests {
                 ("backdrop_origin", Lane::Vec2([41.0, 42.0])),
                 ("mask_rect", Lane::Vec4([21.0, 22.0, 23.0, 24.0])),
                 ("mask_outside", Lane::Vec4([0.5, 0.0, 0.0, 0.0])),
+                ("alpha_is_shape", Lane::Word(1)),
             ],
         );
     }

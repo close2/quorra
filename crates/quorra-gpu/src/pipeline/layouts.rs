@@ -247,7 +247,7 @@ fn bind_layouts(device: &wgpu::Device) -> BindLayouts {
         composite: make(
             "quorra composite",
             &[
-                uniform_entry(0, 128, wgpu::ShaderStages::FRAGMENT),
+                uniform_entry(0, 144, wgpu::ShaderStages::FRAGMENT),
                 texture_entry(1),
                 texture_entry(2),
                 texture_entry(3),
