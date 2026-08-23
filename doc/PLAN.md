@@ -289,12 +289,15 @@ who could remove it.
   instrument that also sets `glyph_quantum: None`, so the per-command offset they report is
   neither the quantum nor ADR 0073. What our own sweep establishes
   (`examples/lane_placement.rs`): a **stroked** hairline is exact in both coverage settings to
-  0.0019 device pixels, which is a byte of alpha; and **on a default atlas the two settings
-  are the same lane** for a mark that size, because `take_gpu_lane` declines the device lane
-  for anything `worth_caching`. Their second question — is the sampled lane's y coverage
-  quantised, and to what — is **open**, and the obstacle is named: `take_gpu_lane`'s
-  area-against-triangle-bytes condition refuses a six-triangle band of 528 texels, so no
-  hairline in the tree reaches that grid yet.
+  0.0019 device pixels, which is a byte of alpha. **The reason first given for that was wrong
+  and the caller corrected it** (their §37.4): `worth_caching` cannot decline anything for a
+  stroke, because `Encoder::push_coverage_styled` passes `CacheProspect::TooLarge` — the atlas
+  caches outlines by key, not polylines — so the "two settings are the same lane" claim holds
+  for a solid **fill** and not for a stroke, and their four pages do compare two genuinely
+  different lanes. What kept our hairline off the sampled grid was the **triangle floor**,
+  `take_gpu_lane`'s `area >= triangle_bytes`, which refuses a six-triangle band of 528 texels.
+  Their second question — is the sampled lane's y coverage quantised, and to what — is
+  **open**, and that floor is the obstacle to measuring it.
 
 - **The residue-clip seam, taken.** The residue is rasterised once per chain rather than
   once per clipped command (ADR 0049), and a clipped mark's coverage tile is now bounded

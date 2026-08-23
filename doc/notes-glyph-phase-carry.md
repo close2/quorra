@@ -50,11 +50,22 @@ Measured on llvmpipe, 37 positions per row, `WIDTH` = 1 device pixel, the caller
 `0.317180616` CTM carrying the position the way a PDF's `q … cm … S … Q` does.
 
 - **A stroked hairline is exact in both settings**, to **0.0019 device pixels** — which is a
-  byte of alpha, not a placement. Both settings take the **path lane** for it, and that is
-  not a coincidence: `take_gpu_lane` declines the device lane whenever the tile is
-  `worth_caching`, so **on a default atlas the two coverage settings are the same lane** for
-  a mark this size. Anyone comparing "the two lanes" on hairlines is, most of the time,
-  comparing one lane with itself.
+  byte of alpha, not a placement. Both settings took the **path lane** for it.
+  **The reason given here was wrong, and the caller corrected it** (their §37.4, 2026-08-23):
+  this bullet said the two settings are "the same lane for a mark this size" because
+  `take_gpu_lane` declines the device lane for anything `worth_caching`. That holds for a
+  **solid fill** and not for a **stroke** — `Encoder::push_coverage_styled` passes
+  `CacheProspect::TooLarge` at the call site, its own comment saying why ("the atlas caches
+  outlines by key, not polylines"), so `worth_caching()` is `false` by construction for every
+  stroke and cannot decline anything. What kept *this* hairline off the sampled grid was the
+  third bullet below — the triangle floor — a different condition with a different fix. Their
+  pixels settle it: §31's four pages, default lane against sampled lane, read means of
+  2.5978, 1.5174, 1.1683 and 0.2539, and two settings that were the same lane would differ by
+  zero.
+  **The half of the sentence that survives is its converse**, and it is worth keeping: on a
+  page whose marks are *cached glyph fills*, the two settings do go through the same
+  rasteriser, so a page-wide lane comparison mixes marks the setting moved with marks it could
+  not.
 - **A filled hairline goes to the glyph lane**, where the quantum applies, and there the
   placement is quantised — bounded, after ADR 0073, at **1/32 of a device pixel**.
 - **The sampled lane needs an atlas that refuses the tile** to be reached at all. Even then,

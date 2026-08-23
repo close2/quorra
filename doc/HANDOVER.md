@@ -31,6 +31,17 @@ tree is theirs to commit, and they work in it concurrently. The standing rule is
 and this is the exception that proves it needs naming: **we do not edit their tree unless the
 owner says to, and we never commit in it.**
 
+**ADR 0073 is taken on their side and the movement is bigger than we measured** (their §37,
+2026-08-23). They reproduced our scale-1 matrix to the page, then ran the three columns we had
+not: at **4×**, `cad50156 → 97ad95ac` moves **212 pages** on the default lane (726/223/3/22 →
+938/11/3/22) and **209** on the sampled one, no regression on any of the four lanes and no
+refusal moving — "the largest movement any bump of yours has produced here". It also settles a
+disagreement ADR 0131 could not: their oracle's "clean at 1/16" measurement was right and our
+implementation was not. They took our recommendation — `tests/corpus.rs` now runs at the
+shipping quantum, and it is *faster* there because the run gets the atlas reuse the quantum
+exists for — and re-derived `real_pages.rs`'s envelope, whose true cost is mean +0.02, worst
+tile +0.07, ssim −0.00013.
+
 **The 2026-08-22 §31 round found a whole-pixel misplacement and fixed it** (ADR 0073). A
 cached mark whose fractional device offset was within half a quantum of the next pixel was
 drawn a **whole device pixel** low: `.round() as u16 % q` wrapped where it had to carry.
@@ -683,6 +694,15 @@ forbids stream objects inside object streams; a dictionary-only key needs the `/
 inflation. Reach for this **before** a narrowing round, not after.
 
 ## Traps
+
+**An instrument that is working, watched, and explained away is the worst hiding place there
+is.** The caller's `examples/quantum_diff.rs` printed ADR 0073's defect on **every run since
+the atlas landed** — mean 0.6624 at `Some(16)` against 0.3197 at `None`, twice the error for a
+setting whose stated cost is a thirty-second of a pixel — and nobody on either side read it as
+a defect, because "the quantum's deliberate trade" was a plausible story attached to it (their
+§37.5). A number with a story stops being evidence. When an instrument reports a cost, check
+the cost against the *stated* bound of the thing it is measuring, not against your expectation
+of it: twice is not a thirty-second, and the arithmetic to notice that was always available.
 
 **A sweep whose step divides the quantity it sweeps measures that quantity's fixed points.**
 The instrument that found ADR 0073 first swept 16 sub-pixel positions of 1/16 against a
