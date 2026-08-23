@@ -550,8 +550,14 @@ their tree moved a page from *refused* to *differs* under us. Nothing regressed.
   self`" — which is why a stale bullet is worse than no bullet: it re-argues a settled point
   every time it is read. `push_op`'s two openings, `CULL_MARGIN`'s dead `push_glyph` citation
   and `command`'s `#[allow(clippy::only_used_in_recursion)]` are closed too.
-- **`SceneBuilder::image` refuses a bad image alpha with `SceneError::InvalidGroupAlpha`**
-  — a shared variant. Public API, so it is a bump's business rather than a refactor's.
+- ~~**`SceneBuilder::image` refuses a bad image alpha with `SceneError::InvalidGroupAlpha`.**~~
+  **Closed, and this is the fourth stale bullet this list has been caught holding**
+  (2026-08-23). `validate.rs:151` raises `SceneError::InvalidImageAlpha { alpha }`, the variant
+  exists with its own `Display` arm, and `PLAN.md` has been counting it among what the bump
+  delivers for days while this list still called it a debt. **Read this section against the
+  code before believing any bullet in it**: of the six checked today, four were closed —
+  `fill_solid`'s lookup, `shader_copies.rs`, this one, and the `encode.rs` split's four
+  leftovers.
 - ~~**`tests/shader_copies.rs` keeps its own `include_str!` list of the shader files.**~~
   **Closed by ADR 0059** — that file does not exist; the gate is `src/shaders/copies.rs`
   reading `super::ALL`, inside the crate, which is exactly the shape ADR 0059 decided.
