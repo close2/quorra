@@ -279,20 +279,32 @@ struct Shelf {
     cursor: u32,
 }
 
-/// A pending pixel upload into the atlas texture, staged CPU-side until the device
-/// flushes it before the frame's passes.
-#[derive(Debug)]
-pub(crate) struct AtlasUpload {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-    pub pixels: Vec<u8>,
+/// A contiguous range of atlas rows the texture has not seen yet: `start..end`,
+/// full-width, exclusive at the end.
+///
+/// Rows rather than rectangles, because the flush reads the [`AtlasStore`]'s own sheet
+/// at the sheet's stride — a full-width span uploads as one borrowed slice, where a
+/// tighter rectangle would need its rows repacked into a buffer of their own. The
+/// texels a span carries beyond its tiles are bytes the sheet already holds (zero, or
+/// earlier tiles being restated), so the width costs bandwidth only, and bandwidth is
+/// not what the per-call price was made of (ADR 0078).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DirtyRows {
+    pub start: u32,
+    pub end: u32,
 }
 
-/// The CPU-side state of the atlas: the packer, the key table, and the uploads the
-/// next flush owes the texture. The `wgpu` texture itself lives on the device, which
-/// creates it lazily on the first frame that needs a glyph (startup rule, §7).
+/// The CPU-side state of the atlas: the packer, the key table, the sheet — a CPU
+/// mirror of the texture's texels — and the rows the next flush owes the texture. The
+/// `wgpu` texture itself lives on the device, which creates it lazily on the first
+/// frame that needs a glyph (startup rule, §7).
+///
+/// **The sheet is the price of a batched flush, and it is one atlas of bytes.** Every
+/// tile ever inserted is written into it, so any row range of it is uploadable at any
+/// time — which is what lets a frame that packed fifty-eight thousand tiles hand the
+/// texture one `write_texture` instead of fifty-eight thousand (ADR 0078). Allocated
+/// on the first insert, never on the startup path, and bounded by the same
+/// `2048 × max_dimension` cap as the texture it mirrors.
 #[derive(Debug)]
 pub(crate) struct AtlasStore {
     width: u32,
@@ -300,7 +312,12 @@ pub(crate) struct AtlasStore {
     shelves: Vec<Shelf>,
     next_shelf_y: u32,
     entries: FastMap<GlyphKey, AtlasEntry>,
-    pending: Vec<AtlasUpload>,
+    /// Row-major R8 texels, `width × height`, allocated on first insert.
+    sheet: Vec<u8>,
+    /// Disjoint, sorted, coalesced-when-touching. A cold frame appends shelves
+    /// contiguously, so its spans merge to one; a frame reusing scattered shelves
+    /// keeps one span per cluster rather than one per tile.
+    dirty: Vec<DirtyRows>,
     /// Bumped by [`AtlasStore::reset`] and by nothing else — insertion appends and
     /// never moves an entry, so this is exactly a count of the times every texel origin
     /// in the sheet stopped meaning what it meant.
@@ -341,7 +358,8 @@ impl AtlasStore {
             shelves: Vec::new(),
             next_shelf_y: 0,
             entries: FastMap::default(),
-            pending: Vec::new(),
+            sheet: Vec::new(),
+            dirty: Vec::new(),
             generation: 0,
         }
     }
@@ -411,9 +429,47 @@ impl AtlasStore {
         self.entries.get(key).copied()
     }
 
-    /// Take the uploads owed to the texture (the device flushes them each frame).
-    pub(crate) fn take_pending(&mut self) -> Vec<AtlasUpload> {
-        std::mem::take(&mut self.pending)
+    /// Take the row spans owed to the texture (the device flushes them each frame).
+    pub(crate) fn take_dirty(&mut self) -> Vec<DirtyRows> {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// The sheet's texels for one span of rows, at the sheet's own stride — exactly
+    /// the slice a full-width `write_texture` takes, borrowed rather than built.
+    ///
+    /// # Panics
+    ///
+    /// On a span outside the sheet, which no caller can construct: spans come from
+    /// [`AtlasStore::take_dirty`] and were clamped by the insert that made them.
+    #[allow(clippy::arithmetic_side_effects)] // `span` came from `mark_dirty`, whose
+    // rows were clamped by the allocation, so `end × width` is at most the sheet's own
+    // length — and a `u32 as usize` product cannot overflow a 64-bit usize at all
+    pub(crate) fn rows(&self, span: DirtyRows) -> &[u8] {
+        let start = span.start as usize * self.width as usize;
+        let end = span.end as usize * self.width as usize;
+        &self.sheet[start..end]
+    }
+
+    /// Record `start..end` as rows the texture has not seen, coalescing with any span
+    /// it touches. Insertion order is packer order, so in practice a new span extends
+    /// the last one; the general merge is kept because a frame that fills scattered
+    /// shelves genuinely produces scattered spans.
+    fn mark_dirty(&mut self, start: u32, end: u32) {
+        let mut merged = DirtyRows { start, end };
+        // Keep every span that does not touch the new one; fold the rest in.
+        self.dirty.retain(|span| {
+            if span.end < merged.start || span.start > merged.end {
+                true
+            } else {
+                merged.start = merged.start.min(span.start);
+                merged.end = merged.end.max(span.end);
+                false
+            }
+        });
+        let at = self
+            .dirty
+            .partition_point(|span| span.start < merged.start);
+        self.dirty.insert(at, merged);
     }
 
     /// Insert a rasterised tile under its key. `None` when there is no room for it —
@@ -426,6 +482,9 @@ impl AtlasStore {
     /// (§4.6). Insertion itself never moves an entry that is already here, which is what
     /// lets a retained encode name absolute texel origins and still be replayed after a
     /// frame that inserted more tiles.
+    #[allow(clippy::arithmetic_side_effects)] // row arithmetic is bounded by the
+    // allocation: `allocate` returned a position, so `x + width ≤ self.width` and
+    // `y + height ≤ self.height`, and the sheet is `width × height` bytes
     pub(crate) fn insert(&mut self, key: GlyphKey, mask: &CoverageMask) -> Option<AtlasEntry> {
         let (x, y) = self.allocate(mask.width, mask.height)?;
         let entry = AtlasEntry {
@@ -437,18 +496,26 @@ impl AtlasStore {
             tile_top: mask.top,
         };
         self.entries.insert(key, entry);
-        self.pending.push(AtlasUpload {
-            x,
-            y,
-            width: mask.width,
-            height: mask.height,
-            pixels: mask.coverage.clone(),
-        });
+        // First insert: the mirror the flush reads from. Not in `new`, so the startup
+        // path never pays for it (§7); zeroed, which is what the texture's texels are
+        // before anything names them.
+        if self.sheet.is_empty() {
+            self.sheet = vec![0; self.width as usize * self.height as usize];
+        }
+        let stride = self.width as usize;
+        for row in 0..mask.height as usize {
+            let to = (y as usize + row) * stride + x as usize;
+            let from = row * mask.width as usize;
+            self.sheet[to..to + mask.width as usize]
+                .copy_from_slice(&mask.coverage[from..from + mask.width as usize]);
+        }
+        self.mark_dirty(y, y + mask.height);
         Some(entry)
     }
 
-    /// Drop every entry and start packing afresh. Pending uploads die with the
-    /// layout they were packed for.
+    /// Drop every entry and start packing afresh. Dirty spans die with the layout
+    /// they were packed for, and the sheet is zeroed rather than freed — the repack
+    /// that called this is about to refill it.
     ///
     /// **Called between frames and never inside an encode**, and that is load-bearing
     /// rather than incidental: a retained encode is keyed on the generation read
@@ -460,7 +527,8 @@ impl AtlasStore {
         self.shelves.clear();
         self.next_shelf_y = 0;
         self.entries.clear();
-        self.pending.clear();
+        self.sheet.fill(0);
+        self.dirty.clear();
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -614,7 +682,8 @@ mod tests {
         assert!(matches!(placement.key.phase, PhaseKey::Exact(_, _)));
     }
 
-    /// Insert, hit, and the pending upload carries the packed position.
+    /// Insert, hit, and the dirty rows carry the packed position's span, with the
+    /// tile's bytes readable from the sheet at the sheet's stride.
     #[test]
     fn insert_then_hit() {
         let mut atlas = AtlasStore::new(64 * 64, 4096);
@@ -624,9 +693,42 @@ mod tests {
             Some((entry.x, entry.y))
         );
         assert!(atlas.get(&key(2, (0, 0))).is_none());
-        let uploads = atlas.take_pending();
-        assert_eq!(uploads.len(), 1);
-        assert_eq!((uploads[0].width, uploads[0].height), (10, 12));
+        let spans = atlas.take_dirty();
+        assert_eq!(spans, vec![super::DirtyRows { start: 0, end: 12 }]);
+        let rows = atlas.rows(spans[0]);
+        let (width, _) = atlas.dimensions();
+        assert_eq!(rows.len(), width as usize * 12);
+        assert_eq!(rows[0], 255, "the tile's first texel is in the sheet");
+        assert_eq!(rows[10], 0, "and the texel beside it is the sheet's zero");
+    }
+
+    /// **Adjacent spans coalesce and a taken span is owed once** (ADR 0078): a cold
+    /// frame's appended shelves flush as one `write_texture`, and a later insert dirties
+    /// only its own rows — while the sheet still holds every earlier tile, which is what
+    /// makes restating a shared row correct.
+    #[test]
+    fn dirty_spans_coalesce_and_die_when_taken() {
+        let mut atlas = AtlasStore::new(64 * 64, 4096);
+        atlas.insert(key(1, (0, 0)), &tile(10, 12)).expect("fits");
+        atlas.insert(key(2, (0, 0)), &tile(10, 12)).expect("fits");
+        atlas.insert(key(3, (0, 0)), &tile(64, 20)).expect("fits");
+        assert_eq!(
+            atlas.take_dirty(),
+            vec![super::DirtyRows { start: 0, end: 32 }],
+            "one shelf of 12 and one of 20, packed contiguously, owed as one span"
+        );
+        assert!(atlas.take_dirty().is_empty(), "taken is taken");
+        atlas.insert(key(4, (0, 0)), &tile(10, 12)).expect("fits");
+        let spans = atlas.take_dirty();
+        assert_eq!(
+            spans,
+            vec![super::DirtyRows { start: 0, end: 12 }],
+            "a tile seated in the first shelf owes that shelf's rows again"
+        );
+        // The restated rows carry the first tile too: tile 1 sits at x 0, tile 2 at
+        // x 10, and both are 255 wherever they are — the sheet is a mirror, not a
+        // frame's transient.
+        assert_eq!(atlas.rows(spans[0])[15], 255);
     }
 
     /// A tile wider than the atlas can never fit; a full atlas refuses without
@@ -663,8 +765,8 @@ mod tests {
         assert!(atlas.insert(key(2, (0, 0)), &tile(10, 0)).is_none());
         assert_eq!(atlas.entry_count(), 0, "and neither is stored");
         assert!(
-            atlas.take_pending().is_empty(),
-            "nor queued for upload — a zero-extent write is a wgpu validation error"
+            atlas.take_dirty().is_empty(),
+            "nor any rows owed — a zero-extent write is a wgpu validation error"
         );
         // The atlas is untouched by the refusals: an ordinary tile still packs at the
         // origin, which it would not if a zero-height shelf had been opened above it.

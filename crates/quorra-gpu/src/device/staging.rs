@@ -175,9 +175,17 @@ impl Device {
 
     /// New glyph tiles into the persistent atlas texture (created on first need —
     /// the startup path never pays for it, §7).
+    ///
+    /// **One `write_texture` per dirty row span, never one per tile** (ADR 0078). A
+    /// `write_texture` costs a fixed price before its first byte — validation, a
+    /// staging allocation, a scheduled copy — and on one adapter's DX12 path that
+    /// price was measured at ~110 µs a call: a cold frame of the caller's 58 003-tile
+    /// drawing spent 6.4 s here moving 4.9 MB. The atlas keeps a CPU sheet of its own
+    /// texels, so a span of it uploads as one borrowed full-width slice; the same
+    /// frame's shelves coalesce to a single span, and the loop below runs once.
     fn flush_atlas_tiles(&mut self, bytes: &mut u64) {
-        let pending = self.atlas.take_pending();
-        if pending.is_empty() {
+        let spans = self.atlas.take_dirty();
+        if spans.is_empty() {
             return;
         }
         let (atlas_w, atlas_h) = self.atlas.dimensions();
@@ -199,32 +207,32 @@ impl Device {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             (texture, view)
         });
-        for tile in pending {
+        for span in spans {
+            let rows = self.atlas.rows(span);
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d {
-                        x: tile.x,
-                        y: tile.y,
+                        x: 0,
+                        y: span.start,
                         z: 0,
                     },
                     aspect: wgpu::TextureAspect::All,
                 },
-                &tile.pixels,
+                rows,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(tile.width),
+                    bytes_per_row: Some(atlas_w),
                     rows_per_image: None,
                 },
                 wgpu::Extent3d {
-                    width: tile.width,
-                    height: tile.height,
+                    width: atlas_w,
+                    height: span.end.saturating_sub(span.start),
                     depth_or_array_layers: 1,
                 },
             );
-            *bytes =
-                bytes.saturating_add(u64::from(tile.width).saturating_mul(u64::from(tile.height)));
+            *bytes = bytes.saturating_add(rows.len() as u64);
         }
     }
 }
