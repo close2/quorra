@@ -858,6 +858,13 @@ plan decides.
 caller's CI currently *relies* on RADV and lavapipe agreeing byte-for-byte across
 adapters, which is §11's question 4 and is not assumed here.
 
+**Amended 2026-08-26 (ADR 0082): the byte-for-byte contract is officially relaxed by
+the project owner — a close best effort is good enough.** The same-adapter half of this
+section stands unchanged (it is arranged, and it is free); the cross-adapter and
+CPU-versus-device halves become bounded-closeness claims, each bound a number with a
+derivation. Gates that measure identity keep asserting it while it holds, as evidence
+rather than as contract.
+
 Within one adapter, determinism is arranged rather than hoped for: the sort, the
 batches and the draw order are pure functions of the list (§1.1); blending happens in
 draw order, which the GPU guarantees per draw call sequence; no accumulation whose

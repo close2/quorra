@@ -279,11 +279,12 @@ written in prose is a non-goal that arrives as a transitive dependency.
   *the user's* display — but it can run headless on its own: `Xvfb` and `lavapipe` are
   installed, `xdotool` sends real key presses and `xwd` reads a window's pixels back.
   Hand a run on the real GPU to the user; everything else is testable here.
-- **Two adapters, and the difference is a feature.** RADV and lavapipe produce
-  byte-identical output from the current Vello-based backend, which is what lets the
-  viewer's CI use a software rasteriser. Whether our design can promise the same is
-  §11's question 4, and it is to be answered early because the answer changes how CI
-  works.
+- **Two adapters, and the difference is a feature.** RADV and lavapipe are both here,
+  so a cross-adapter claim is checkable on one machine. **The byte-for-byte contract is
+  officially relaxed (owner, 2026-08-26, ADR 0082): a close best effort is good
+  enough.** Same-adapter determinism stays arranged by construction — it is free and
+  load-bearing — and a cross-adapter or CPU-versus-device difference is a tolerance to
+  state and bound rather than a defect or a crisis. §11's question 4 is retired by it.
 - The sibling checkout at `/home/cl/projects/pdf-viewer` is the caller, the oracle and
   the source of every measurement quoted here. It is not a dependency of this
   workspace and this workspace is not a dependency of it — the two are wired together
