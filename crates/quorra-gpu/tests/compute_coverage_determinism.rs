@@ -88,7 +88,16 @@ fn fill_mask_mirror(edges: &[[f32; 4]], rule: Rule) -> Vec<u8> {
     coverage
 }
 
-fn accumulate_edge(acc: &mut [f32], w: usize, fw: f32, fh: f32, x0: f32, y0: f32, x1: f32, y1: f32) {
+fn accumulate_edge(
+    acc: &mut [f32],
+    w: usize,
+    fw: f32,
+    fh: f32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+) {
     if y0 == y1 {
         return;
     }
@@ -502,7 +511,10 @@ impl Gpu {
 struct Lcg(u64);
 impl Lcg {
     fn next_f32(&mut self, low: f32, high: f32) -> f32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let unit = ((self.0 >> 33) as f32) / (u32::MAX >> 1) as f32;
         low + unit * (high - low)
     }
@@ -570,7 +582,10 @@ fn test_edges() -> Vec<[f32; 4]> {
         let dy = lcg.next_f32(1.0e-5, 3.0e-3);
         let x0 = lcg.next_f32(-10.0, 70.0);
         let x1 = lcg.next_f32(-10.0, 70.0);
-        close_polygon(&[(x0, y), (x1, y + dy), (x1, y + 8.0), (x0, y + 8.0)], &mut edges);
+        close_polygon(
+            &[(x0, y), (x1, y + dy), (x1, y + 8.0), (x0, y + 8.0)],
+            &mut edges,
+        );
     }
     // Sub-pixel shards, §10.7.4's population.
     for _ in 0..40 {

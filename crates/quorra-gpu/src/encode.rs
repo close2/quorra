@@ -160,6 +160,9 @@ struct Encoder<'a> {
     sample_spacing: f32,
     /// The GPU lane's triangles and tiles, empty under [`Coverage::Cpu`].
     winding: crate::winding::Sheet,
+    /// The compute lane's edges and tiles, empty except under [`Coverage::Compute`]
+    /// (ADR 0080).
+    compute: crate::compute::ComputeSheet,
     /// How often the scene places each shape, taken before the walk (ADR 0029).
     census: Census,
     resources: &'a ResourceStore,
@@ -288,6 +291,7 @@ pub(crate) fn encode(
         coverage,
         sample_spacing: thin::sample_column_spacing(coverage_samples),
         winding: crate::winding::Sheet::default(),
+        compute: crate::compute::ComputeSheet::default(),
         // One pass over the commands before the walk: the lane a fill takes depends on
         // how many *other* fills share its tile, which is not knowable from the fill
         // (ADR 0029).
@@ -300,7 +304,9 @@ pub(crate) fn encode(
         // would have taken anyway.
         census: match coverage {
             Coverage::Gpu => Census::of(scene),
-            Coverage::Cpu => Census::default(),
+            // The compute lane has no atlas in front of it, so the census — which only
+            // the cache prospect reads — has nothing to answer for it either.
+            Coverage::Cpu | Coverage::Compute => Census::default(),
         },
         resources,
         atlas,

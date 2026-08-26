@@ -466,9 +466,7 @@ impl AtlasStore {
                 false
             }
         });
-        let at = self
-            .dirty
-            .partition_point(|span| span.start < merged.start);
+        let at = self.dirty.partition_point(|span| span.start < merged.start);
         self.dirty.insert(at, merged);
     }
 

@@ -64,6 +64,9 @@ pub(crate) struct Encoded {
     /// The GPU lane's triangles and tiles for this frame; empty under `Coverage::Cpu`
     /// and for every command that took the CPU lane anyway.
     pub winding: crate::winding::Sheet,
+    /// The compute lane's edges and tiles for this frame; empty except under
+    /// `Coverage::Compute` (ADR 0080).
+    pub compute: crate::compute::ComputeSheet,
     /// Set when a glyph tile no longer fit the atlas and fell through to scratch.
     pub atlas_pressure: bool,
     /// Atlas bytes this frame's *distinct* keys asked for, whether they hit or missed.
@@ -123,6 +126,7 @@ impl Encoded {
             scratch,
             bytes_of(self.winding.vertices.len(), size_of::<f32>()),
             bytes_of(self.winding.tiles.len(), size_of::<crate::pane::Tile>()),
+            self.compute.retained_bytes(),
             plan_bytes(&self.root),
             self.layers.iter().map(plan_bytes).sum::<u64>(),
             bytes_of(self.layers.len(), size_of::<LayerPlan>()),
@@ -152,6 +156,7 @@ pub(super) fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encode
     // frame whose sheet holds no GPU tiles is charged nothing here, because it
     // allocates nothing there: `Sheet::device_bytes` states that condition once.
     let mut winding = std::mem::take(&mut encoder.winding);
+    let mut compute = std::mem::take(&mut encoder.compute);
     let packer = std::mem::replace(&mut encoder.scratch, ScratchPacker::new(1, 1));
     let tiles = packer.placed;
     let coverage = packer.state();
@@ -159,6 +164,8 @@ pub(super) fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encode
     if let Some(sheet) = scratch.as_ref() {
         winding.width = sheet.width;
         winding.height = sheet.height;
+        compute.width = sheet.width;
+        compute.height = sheet.height;
         // The sheet is one texture, and until ADR 0021 the only thing charged for it
         // was the area of the tiles *on* it — so the largest scene-derived allocation
         // a page of path work makes was the one number nobody counted, which is the
@@ -168,6 +175,13 @@ pub(super) fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encode
         encoder.charge(sheet_bytes.saturating_sub(encoder.scratch_charged))?;
     }
     encoder.charge(winding.device_bytes())?;
+    // The compute lane's per-tile bytes were charged at each commit; what only the
+    // final extent decides is the image buffer, one aligned row stride tall the sheet's
+    // height (ADR 0080).
+    if !compute.is_empty() {
+        let stride = u64::from(compute.width).div_ceil(256).saturating_mul(256);
+        encoder.charge(stride.saturating_mul(u64::from(compute.height)))?;
+    }
 
     let sorted = |set: HashSet<u32>| {
         let mut ids: Vec<u32> = set.into_iter().collect();
@@ -200,6 +214,7 @@ pub(super) fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encode
         commands_culled: encoder.culled,
         layers_culled: encoder.culled_layers,
         winding,
+        compute,
         atlas_pressure: encoder.atlas_pressure,
         atlas_requested_bytes: encoder.atlas_requested_bytes,
         atlas_entries_used: encoder.atlas_entries_used,

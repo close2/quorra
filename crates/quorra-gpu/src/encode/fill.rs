@@ -25,6 +25,7 @@ use super::{ChildOp, DrawStyle, Encoder, Op};
 use crate::atlas::GlyphPlacement;
 use crate::error::RenderError;
 use crate::raster::{self, DeviceTransform, Rule};
+use crate::startup::Coverage;
 
 /// One solid fill, resolved as far as the lane choice needs it.
 ///
@@ -226,6 +227,22 @@ impl<'a> Encoder<'a> {
         resolved: &ResolvedClip,
     ) -> Result<(), RenderError> {
         let stored = fill.stored;
+        // The compute lane takes every solid fill the residue multiply does not hold
+        // back (ADR 0080). Before the cache is consulted, because there is no atlas in
+        // front of this lane: consulting it would count keys nobody will insert.
+        if self.coverage == Coverage::Compute && resolved.residues.is_none() {
+            let rect = self.visible_rect(resolved);
+            let bound = self.tile_bound(fill.bounds, resolved);
+            return self.enqueue(Job::compute(
+                &stored.segments,
+                fill.to_device,
+                None,
+                fill.rule,
+                rect,
+                bound,
+                Draw::new(fill.color, resolved.rect, fill.style, fill.mask),
+            ));
+        }
         let (bx0, by0, bx1, by1) = fill.bounds;
         let (tile_width, tile_height) = (tile_side(bx0, bx1), tile_side(by0, by1));
         // What the cache would do with this placement, asked once and answered by the

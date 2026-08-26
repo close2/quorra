@@ -34,6 +34,7 @@
 pub mod atlas;
 mod census;
 mod compose;
+mod compute;
 pub mod device;
 mod encode;
 pub mod error;

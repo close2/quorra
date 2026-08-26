@@ -189,6 +189,21 @@ pub enum Coverage {
     ///
     /// [`coverage_samples`]: Options::coverage_samples
     Gpu,
+    /// The CPU rasteriser's exact arithmetic, run by the device (ADR 0080).
+    ///
+    /// Every solid fill's coverage is computed by a compute dispatch — one invocation
+    /// per tile row, exact signed trapezoid areas, 256 levels — from polylines the
+    /// encode flattened, with **no atlas in front of it**: a page of repeated glyphs
+    /// pays per glyph per frame, which is the price of a lane whose cost does not grow
+    /// with what the atlas holds. Its bytes are the [`Cpu`](Coverage::Cpu) lane's
+    /// bytes — the port's determinism is measured rather than assumed
+    /// (`tests/compute_coverage_determinism.rs`, ADR 0079) — so unlike
+    /// [`Gpu`](Coverage::Gpu) it meets §10.7.4's no-disappearance requirement exactly
+    /// as the CPU lane does, and needs no thin-mark guard.
+    ///
+    /// Strokes, rare paints and anything under a non-rectangular clip still take the
+    /// CPU lane; both kinds of tile share one sheet.
+    Compute,
 }
 
 /// The GPU lane's default sample count: sixteen, on a 4×4 grid.

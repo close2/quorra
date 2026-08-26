@@ -162,6 +162,9 @@ pub struct Device {
     coverage_samples: u32,
     /// The GPU lane's winding target, kept across frames (ADR 0016's measurement).
     winding_texture: crate::winding::WindingTexture,
+    /// The compute coverage lane's pipeline, compiled on the first frame that takes the
+    /// lane and kept — never on the startup path (ADR 0080).
+    compute_pipeline: Option<wgpu::ComputePipeline>,
     /// A layer texture made ahead of the frame that will want it (ADR 0035), and held
     /// only until that frame takes it — the pool itself stays per-frame, as ADR 0012
     /// decided. Worth 0.06 ms and no more; ADR 0040 measured it and says why it stays.

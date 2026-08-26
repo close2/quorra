@@ -115,6 +115,11 @@ impl Device {
             // lanes to a stated difference rather than to a hope.
             usage |= wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
         }
+        if !encoded.compute.is_empty() {
+            // The compute lane's image travels texture → buffer → dispatch → texture
+            // (ADR 0080), so the sheet is a copy source as well as a destination.
+            usage |= wgpu::TextureUsages::COPY_SRC;
+        }
         let texture = self.gpu.create_texture(&wgpu::TextureDescriptor {
             label: Some("quorra scratch coverage"),
             size: wgpu::Extent3d {
@@ -152,6 +157,16 @@ impl Device {
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         *bytes = bytes.saturating_add(scratch.data.len() as u64);
+        if !encoded.compute.is_empty() {
+            *bytes = bytes.saturating_add(encoded.compute.device_bytes());
+            crate::compute::dispatch_into(
+                &self.gpu,
+                &self.queue,
+                &mut self.compute_pipeline,
+                &texture,
+                &encoded.compute,
+            );
+        }
         if !winding.is_empty() {
             *bytes = bytes.saturating_add(winding.device_bytes());
             crate::winding::render_into(

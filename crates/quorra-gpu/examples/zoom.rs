@@ -100,6 +100,8 @@ fn main() {
     let check = std::env::args().any(|arg| arg == "--check");
     let coverage = if std::env::args().any(|arg| arg == "gpu") {
         Coverage::Gpu
+    } else if std::env::args().any(|arg| arg == "compute") {
+        Coverage::Compute
     } else {
         Coverage::Cpu
     };
