@@ -227,21 +227,8 @@ impl<'a> Encoder<'a> {
         resolved: &ResolvedClip,
     ) -> Result<(), RenderError> {
         let stored = fill.stored;
-        // The compute lane takes every solid fill the residue multiply does not hold
-        // back (ADR 0080). Before the cache is consulted, because there is no atlas in
-        // front of this lane: consulting it would count keys nobody will insert.
         if self.coverage == Coverage::Compute && resolved.residues.is_none() {
-            let rect = self.visible_rect(resolved);
-            let bound = self.tile_bound(fill.bounds, resolved);
-            return self.enqueue(Job::compute(
-                &stored.segments,
-                fill.to_device,
-                None,
-                fill.rule,
-                rect,
-                bound,
-                Draw::new(fill.color, resolved.rect, fill.style, fill.mask),
-            ));
+            return self.fill_compute(fill, resolved);
         }
         let (bx0, by0, bx1, by1) = fill.bounds;
         let (tile_width, tile_height) = (tile_side(bx0, bx1), tile_side(by0, by1));
@@ -354,6 +341,64 @@ impl<'a> Encoder<'a> {
         self.push_coverage_styled(
             &polylines, fill.rule, fill.color, resolved, fill.style, None, fill.mask,
         )
+    }
+
+    /// The compute lane's route for one solid fill (ADR 0080, ADR 0081): no job and
+    /// no flattening — the device holds the outline's segments resident and flattens
+    /// them itself. The tile is the control hull's, a superset of the flattened
+    /// geometry's, whose extra pixels read zero coverage. Taken before the cache is
+    /// consulted, because there is no atlas in front of this lane.
+    fn fill_compute(
+        &mut self,
+        fill: &SolidFill<'a>,
+        resolved: &ResolvedClip,
+    ) -> Result<(), RenderError> {
+        let Some((left, top, width, height)) = self.visible_tile(fill.bounds, resolved) else {
+            return Ok(());
+        };
+        self.charge_tile(width, height)?;
+        // The lane's per-tile device bytes: accumulator floats and row jobs. The
+        // edge buffer is counted by the device and checked there (ADR 0081).
+        let acc = u64::from(width.saturating_add(1))
+            .saturating_mul(u64::from(height))
+            .saturating_mul(4);
+        self.charge(acc.saturating_add(u64::from(height).saturating_mul(4)))?;
+        let seat = self
+            .scratch
+            .reserve(width, height)
+            .ok_or_else(|| self.scratch.exhausted(width, height))?;
+        let device = fill.to_device;
+        #[allow(clippy::cast_precision_loss)] // the corner is a device pixel, the
+        // same cast the CPU rasteriser makes on the same value
+        let corner = (left as f32, top as f32);
+        if !self.compute.push_tile(
+            seat,
+            (corner.0, corner.1, width, height),
+            fill.rule == Rule::EvenOdd,
+            [device.a, device.b, device.c, device.d, device.e, device.f],
+            fill.outline.0,
+        ) {
+            // Only reachable when a host stated a budget past what the lane's u32
+            // counters can address; the refusal is the budget's shape because that
+            // is what ran out.
+            return Err(RenderError::FrameBudgetExceeded {
+                needed: u64::from(u32::MAX),
+                budget: self.budget,
+            });
+        }
+        #[allow(clippy::cast_precision_loss)] // seats and extents are texels
+        return self.push_quad_instance(
+            quorra_scene::Point::new(corner.0, corner.1),
+            width as f32,
+            height as f32,
+            seat.0 as f32,
+            seat.1 as f32,
+            super::instance::CoverageSource::Sheet,
+            fill.color,
+            resolved.rect,
+            fill.style,
+            fill.mask,
+        );
     }
 
     /// §11.3.5 for a single element: the implicit one-element group a blended fill

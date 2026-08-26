@@ -159,12 +159,23 @@ impl Device {
         *bytes = bytes.saturating_add(scratch.data.len() as u64);
         if !encoded.compute.is_empty() {
             *bytes = bytes.saturating_add(encoded.compute.device_bytes());
+            // The arena's growth is this frame's staging too: the first frame that
+            // draws an outline pays its residency once, and the counter says so.
+            let arena_before = self.segment_arena.device_bytes();
             crate::compute::dispatch_into(
                 &self.gpu,
                 &self.queue,
-                &mut self.compute_pipeline,
+                &mut self.compute_pipelines,
+                &mut self.segment_arena,
+                &self.resources,
+                self.limits.max_frame_bytes,
                 &texture,
                 &encoded.compute,
+            )?;
+            *bytes = bytes.saturating_add(
+                self.segment_arena
+                    .device_bytes()
+                    .saturating_sub(arena_before),
             );
         }
         if !winding.is_empty() {

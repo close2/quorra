@@ -195,10 +195,6 @@ enum Place {
     Atlas { key: GlyphKey, origin: [f32; 2] },
     /// Pack the tile onto the frame's scratch sheet.
     Sheet,
-    /// Reserve the tile's seat and hand its edges to the compute lane, which
-    /// rasterises them on the device (ADR 0080). The parallel phase still flattens;
-    /// what it does not do is run the scanline pass.
-    Compute,
 }
 
 /// The instance a committed job appends.
@@ -222,23 +218,7 @@ impl Draw {
 
 /// What one job's geometry came to: `None` when the mark reaches no pixel, which is a
 /// command that legitimately draws nothing rather than an error.
-type Rasterised = Option<Product>;
-
-/// The parallel phase's product: coverage bytes for the lanes that rasterise on the
-/// host, or a tile's edges for the lane that rasterises on the device.
-pub(super) enum Product {
-    Mask(CoverageMask),
-    /// The compute lane's tile — its device rectangle and its edges in tile space,
-    /// shifted with exactly [`raster::fill_mask`]'s subtraction so the shader's
-    /// arithmetic sees the same bits the CPU's would.
-    Edges {
-        left: i32,
-        top: i32,
-        width: u32,
-        height: u32,
-        edges: Vec<f32>,
-    },
-}
+type Rasterised = Option<CoverageMask>;
 
 impl<'a> Job<'a> {
     /// A glyph-lane job: the tile is the shape's own bounds at the quantised phase.
@@ -294,35 +274,6 @@ impl<'a> Job<'a> {
         }
     }
 
-    /// A compute-lane job: as [`Job::sheet`], but the parallel phase stops after the
-    /// flattening and the device runs the scanline pass (ADR 0080).
-    ///
-    /// `held` uses the same tile-area bound: the edges a job holds are its flattened
-    /// points at sixteen bytes each, which the bound does not describe — but the frame
-    /// budget charges the true edge bytes at the commit, and the queue's limit is a
-    /// batching granularity rather than a capacity either way.
-    pub(super) fn compute(
-        segments: &'a [Segment],
-        transform: DeviceTransform,
-        stroke: Option<Stroke>,
-        rule: Rule,
-        rect: [f32; 4],
-        tile_bound: u64,
-        draw: Draw,
-    ) -> Self {
-        Self {
-            segments,
-            transform,
-            stroke,
-            rule,
-            extent: Extent::Visible { rect },
-            place: Place::Compute,
-            draw,
-            weight: weight_of(segments, false),
-            held: held_by(tile_bound, false),
-        }
-    }
-
     fn weight(&self) -> u64 {
         self.weight
     }
@@ -342,7 +293,7 @@ impl<'a> Job<'a> {
     fn key_written(&self) -> Option<GlyphKey> {
         match self.place {
             Place::Atlas { key, .. } => Some(key),
-            Place::Resident { .. } | Place::Sheet | Place::Compute => None,
+            Place::Resident { .. } | Place::Sheet => None,
         }
     }
 }
@@ -402,39 +353,9 @@ pub(super) fn rasterise(job: &Job<'_>) -> Rasterised {
     if width == 0 || height == 0 {
         return None;
     }
-    #[allow(clippy::cast_precision_loss)] // the corner is a device pixel, far inside
-    // f32's exact integer range — the same cast `fill_mask` makes on the same values
-    if matches!(job.place, Place::Compute) {
-        // The compute lane stops here: the device runs the scanline pass, and what
-        // travels is the closed edge list in tile space — every subpath closed exactly
-        // as `fill_mask`'s modular walk closes it, coordinates shifted with its own
-        // subtraction, so the shader's arithmetic starts from the same bits.
-        let count: usize = polylines.iter().map(|line| line.points.len()).sum();
-        let mut edges = Vec::with_capacity(count.saturating_mul(4));
-        for polyline in &polylines {
-            let n = polyline.points.len();
-            for i in 0..n {
-                let p0 = polyline.points[i];
-                let p1 = polyline.points[(i + 1) % n];
-                edges.extend_from_slice(&[
-                    p0.x - left as f32,
-                    p0.y - top as f32,
-                    p1.x - left as f32,
-                    p1.y - top as f32,
-                ]);
-            }
-        }
-        return Some(Product::Edges {
-            left,
-            top,
-            width,
-            height,
-            edges,
-        });
-    }
-    Some(Product::Mask(raster::fill_mask(
+    Some(raster::fill_mask(
         &polylines, job.rule, left, top, width, height,
-    )))
+    ))
 }
 
 /// How many jobs each worker takes: balanced by [`Job::weight`], and contiguous.

@@ -302,7 +302,8 @@ impl Device {
                 .max(1)
                 .min(std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)),
             winding_texture: crate::winding::WindingTexture::default(),
-            compute_pipeline: None,
+            compute_pipelines: None,
+            segment_arena: crate::compute::SegmentArena::default(),
             warmed_layer: None,
             // Rounded to a square grid and bounded, here rather than at the call site:
             // an option is a request, and what the lane can actually sample is ours.

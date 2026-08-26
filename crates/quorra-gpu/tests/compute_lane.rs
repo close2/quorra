@@ -188,6 +188,79 @@ fn mosaic(device: &mut Device) -> Scene {
             )
             .expect("a star fill the builder admits");
     }
+    // Cubics, so the flattening arithmetic itself is under test and not only the
+    // scanline pass: wavy blobs whose curves cross the flatness test at many scales,
+    // a sub-pixel loop that exercises the relative-tolerance branch, and a closed
+    // curve whose chord is degenerate (p0 = p3), which is the epsilon fallback.
+    for blob in 0..5 {
+        let cx = 40.0 + blob as f32 * 42.0 + random(-3.0, 3.0);
+        let cy = 210.0 + random(-6.0, 6.0);
+        let r = 12.0 + random(0.0, 10.0);
+        let outline = device
+            .upload_outline(&[
+                Segment::MoveTo(Point::new(cx - r, cy)),
+                Segment::CubicTo {
+                    c1: Point::new(cx - r, cy - r * random(1.0, 1.8)),
+                    c2: Point::new(cx + r, cy - r * random(1.0, 1.8)),
+                    to: Point::new(cx + r, cy),
+                },
+                Segment::CubicTo {
+                    c1: Point::new(cx + r, cy + r * random(1.0, 1.8)),
+                    c2: Point::new(cx - r, cy + r * random(1.0, 1.8)),
+                    to: Point::new(cx - r, cy),
+                },
+                Segment::Close,
+            ])
+            .expect("a blob");
+        builder
+            .fill(
+                outline,
+                Affine::IDENTITY,
+                FillRule::NonZero,
+                Paint::Solid(Color::new(0.9, 0.5, 0.1, 0.9)),
+                None,
+                BlendMode::Normal,
+                Compose::SrcOver,
+                None,
+            )
+            .expect("a blob fill the builder admits");
+    }
+    let degenerate = device
+        .upload_outline(&[
+            Segment::MoveTo(Point::new(120.0, 120.0)),
+            Segment::CubicTo {
+                c1: Point::new(160.0, 80.0),
+                c2: Point::new(160.0, 160.0),
+                to: Point::new(120.0, 120.0),
+            },
+            Segment::Close,
+        ])
+        .expect("a loop whose chord is a point");
+    let speck = device
+        .upload_outline(&[
+            Segment::MoveTo(Point::new(200.25, 200.25)),
+            Segment::CubicTo {
+                c1: Point::new(200.55, 199.95),
+                c2: Point::new(200.85, 200.55),
+                to: Point::new(200.35, 200.65),
+            },
+            Segment::Close,
+        ])
+        .expect("a sub-pixel curve");
+    for outline in [degenerate, speck] {
+        builder
+            .fill(
+                outline,
+                Affine::IDENTITY,
+                FillRule::NonZero,
+                Paint::Solid(Color::new(0.2, 0.2, 0.2, 1.0)),
+                None,
+                BlendMode::Normal,
+                Compose::SrcOver,
+                None,
+            )
+            .expect("a curve fill the builder admits");
+    }
     let diagonal = device
         .upload_outline(&[
             Segment::MoveTo(Point::new(10.0, 240.0)),

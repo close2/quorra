@@ -19,8 +19,7 @@ use crate::startup::Coverage;
 
 use super::super::instance::CoverageSource;
 use super::super::{Encoder, ResolvedClip};
-use super::{Draw, Job, Place, Product, Rasterised, fan_out, rasterise, rasterise_all};
-use crate::raster::Rule;
+use super::{Draw, Job, Place, Rasterised, fan_out, rasterise, rasterise_all};
 
 impl<'a> Encoder<'a> {
     /// What the atlas would do for this placement, asked of an atlas the queue has
@@ -165,89 +164,14 @@ impl<'a> Encoder<'a> {
     }
 
     /// Place one rasterised job: the third phase, in encounter order.
-    fn commit(&mut self, job: &Job<'a>, product: Rasterised) -> Result<(), RenderError> {
-        // The lanes that rasterised on the host handed back a mask; the compute lane
-        // handed back edges. Splitting here keeps each commit's signature the shape of
-        // what it places.
-        let mask = match product {
-            Some(Product::Mask(mask)) => Some(mask),
-            Some(Product::Edges {
-                left,
-                top,
-                width,
-                height,
-                edges,
-            }) => {
-                return self.commit_compute(left, top, width, height, &edges, job.rule, &job.draw);
-            }
-            None => None,
-        };
+    fn commit(&mut self, job: &Job<'a>, mask: Rasterised) -> Result<(), RenderError> {
         match job.place {
             Place::Resident { key, origin, entry } => {
                 self.commit_glyph(key, origin, Some(entry), None, &job.draw)
             }
             Place::Atlas { key, origin } => self.commit_glyph(key, origin, None, mask, &job.draw),
-            Place::Sheet | Place::Compute => self.commit_sheet(mask, &job.draw),
+            Place::Sheet => self.commit_sheet(mask, &job.draw),
         }
-    }
-
-    /// The compute lane's commit: charge the tile and the lane's own bytes, reserve the
-    /// seat, hand the edges over, and draw the quad that will sample the result
-    /// (ADR 0080).
-    #[allow(clippy::cast_precision_loss)] // a tile's corner is an integer device pixel
-    #[allow(clippy::too_many_arguments)] // one tile's fields, destructured once
-    fn commit_compute(
-        &mut self,
-        left: i32,
-        top: i32,
-        width: u32,
-        height: u32,
-        edges: &[f32],
-        rule: Rule,
-        draw: &Draw,
-    ) -> Result<(), RenderError> {
-        self.charge_tile(width, height)?;
-        // The lane's device bytes for this tile, charged as they accrue rather than
-        // only summed at `finish`: the edge buffer, the accumulator row floats, and the
-        // row jobs. This is also what keeps the sheet's u32 counters unreachable for
-        // any budget a host can state in bytes.
-        let acc = u64::from(width.saturating_add(1))
-            .saturating_mul(u64::from(height))
-            .saturating_mul(4);
-        self.charge(
-            (edges.len() as u64)
-                .saturating_mul(4)
-                .saturating_add(acc)
-                .saturating_add(u64::from(height).saturating_mul(4)),
-        )?;
-        let seat = self
-            .scratch
-            .reserve(width, height)
-            .ok_or_else(|| self.scratch.exhausted(width, height))?;
-        if !self
-            .compute
-            .push_tile(seat, width, height, rule == Rule::EvenOdd, edges)
-        {
-            // Only reachable when a host stated a budget past what the lane's u32
-            // counters can address; the refusal is the budget's shape because that is
-            // what ran out.
-            return Err(RenderError::FrameBudgetExceeded {
-                needed: u64::from(u32::MAX),
-                budget: self.budget,
-            });
-        }
-        self.push_quad_instance(
-            Point::new(left as f32, top as f32),
-            width as f32,
-            height as f32,
-            seat.0 as f32,
-            seat.1 as f32,
-            CoverageSource::Sheet,
-            draw.color,
-            draw.clip,
-            draw.style,
-            draw.mask,
-        )
     }
 
     /// The glyph lane's commit: the atlas is offered the tile, and the placement draws
