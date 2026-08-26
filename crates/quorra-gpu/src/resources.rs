@@ -87,6 +87,16 @@ pub(crate) struct StoredOutline {
     /// recognised once, at upload, because §6.4 turns on it: a rectangular clip is
     /// four floats, never a mask, and the encoder asks this on every frame.
     pub rect_hint: Option<Rect>,
+    /// The control points' box in outline space — `min x, min y, max x, max y` —
+    /// taken once at upload from the same walk that validates every point (ADR 0083).
+    ///
+    /// The compute lane bounds a placement by transforming this box's four corners:
+    /// for an axis-preserving transform that is the direct hull to the bit (the
+    /// per-axis monotonicity argument `encode/hull.rs` states), and for a rotated one
+    /// it is a superset whose extra pixels read zero coverage — where the direct hull
+    /// walks every control point per placement, which on a page of 58 009 distinct
+    /// outlines was three million transforms per frame.
+    pub control_box: [f32; 4],
     /// What the segments cost, charged at upload.
     bytes: u64,
     /// What [`Self::quads`] cost, charged when it was converted and zero until then.
@@ -296,6 +306,12 @@ impl ResourceStore {
                 reason: ResourceProblem::OutlineMissingMoveTo,
             });
         }
+        let mut control_box = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
         for segment in path {
             let points: &[quorra_scene::Point] = match segment {
                 Segment::MoveTo(p) | Segment::LineTo(p) => std::slice::from_ref(p),
@@ -315,6 +331,12 @@ impl ResourceStore {
                         },
                     });
                 }
+                control_box = [
+                    control_box[0].min(point.x),
+                    control_box[1].min(point.y),
+                    control_box[2].max(point.x),
+                    control_box[3].max(point.y),
+                ];
             }
         }
         let rect_hint = axis_aligned_rect(path);
@@ -328,6 +350,7 @@ impl ResourceStore {
             id,
             StoredOutline {
                 rect_hint,
+                control_box,
                 quads: OnceLock::new(),
                 segments: path.into(),
                 bytes,

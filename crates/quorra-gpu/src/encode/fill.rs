@@ -98,7 +98,19 @@ impl<'a> Encoder<'a> {
             .ok_or(RenderError::UnknownOutline { outline })?;
         let to_device = compose(transform, self.viewport);
         let resolved = self.resolve_clip(clip)?;
-        let bounds = self.hulls.bounds(outline, &stored.segments, &to_device);
+        // The compute lane bounds by the resident control box's corners — for an
+        // axis-preserving transform the same box to the bit, for a rotated one a
+        // superset whose extra pixels read zero coverage (ADR 0083) — because the
+        // direct hull walks every control point per placement, and on a page of
+        // distinct outlines that walk *was* the encode.
+        let bounds = if self.coverage == Coverage::Compute
+            && matches!(paint, Paint::Solid(_))
+            && resolved.residues.is_none()
+        {
+            Some(corner_bounds(stored.control_box, &to_device))
+        } else {
+            self.hulls.bounds(outline, &stored.segments, &to_device)
+        };
         // A *solid* fill's visibility follows from its outline alone, so it is decided
         // here — before the implicit group a non-Normal blend would otherwise wrap it
         // in, which is the expensive half of an off-screen blended fill. A shaded fill
@@ -357,12 +369,13 @@ impl<'a> Encoder<'a> {
             return Ok(());
         };
         self.charge_tile(width, height)?;
-        // The lane's per-tile device bytes: accumulator floats and row jobs. The
-        // edge buffer is counted by the device and checked there (ADR 0081).
+        // The lane's per-tile device bytes: the accumulator floats. The edge buffer is
+        // counted by the device and checked there (ADR 0081), and the row jobs stopped
+        // existing when the deposit pass learned to search (ADR 0083).
         let acc = u64::from(width.saturating_add(1))
             .saturating_mul(u64::from(height))
             .saturating_mul(4);
-        self.charge(acc.saturating_add(u64::from(height).saturating_mul(4)))?;
+        self.charge(acc)?;
         let seat = self
             .scratch
             .reserve(width, height)
@@ -400,7 +413,43 @@ impl<'a> Encoder<'a> {
             fill.mask,
         );
     }
+}
 
+/// The box of a box under an affine: the four corners transformed and min/maxed —
+/// exact for an axis-preserving transform by `hull.rs`'s monotonicity argument, a
+/// superset under rotation (ADR 0083).
+fn corner_bounds(control_box: [f32; 4], to_device: &DeviceTransform) -> (f32, f32, f32, f32) {
+    let corners = [
+        apply(
+            to_device,
+            quorra_scene::Point::new(control_box[0], control_box[1]),
+        ),
+        apply(
+            to_device,
+            quorra_scene::Point::new(control_box[2], control_box[1]),
+        ),
+        apply(
+            to_device,
+            quorra_scene::Point::new(control_box[0], control_box[3]),
+        ),
+        apply(
+            to_device,
+            quorra_scene::Point::new(control_box[2], control_box[3]),
+        ),
+    ];
+    let mut bounds = (corners[0].x, corners[0].y, corners[0].x, corners[0].y);
+    for corner in &corners[1..] {
+        bounds = (
+            bounds.0.min(corner.x),
+            bounds.1.min(corner.y),
+            bounds.2.max(corner.x),
+            bounds.3.max(corner.y),
+        );
+    }
+    bounds
+}
+
+impl Encoder<'_> {
     /// §11.3.5 for a single element: the implicit one-element group a blended fill
     /// draws through, so the blend function sees the element's own colour rather than
     /// the accumulated layer's.

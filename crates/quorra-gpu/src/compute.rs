@@ -158,12 +158,10 @@ impl ComputeSheet {
             .saturating_mul(TILE_U32S as u64)
             .saturating_mul(4);
         let counts = (self.tiles.len() as u64).saturating_mul(8); // counts + offsets
-        let rows = u64::from(self.rows).saturating_mul(4);
         let acc = self.acc_floats.saturating_mul(4);
         let image = self.stride().saturating_mul(u64::from(self.height));
         tiles
             .saturating_add(counts)
-            .saturating_add(rows)
             .saturating_add(acc)
             .saturating_add(image)
     }
@@ -482,13 +480,29 @@ struct Params {
 @group(0) @binding(0) var<storage, read> tiles: array<u32>;
 @group(0) @binding(1) var<storage, read> offsets: array<u32>;
 @group(0) @binding(2) var<storage, read> counts: array<u32>;
-@group(0) @binding(3) var<storage, read> row_jobs: array<u32>;
-@group(0) @binding(4) var<storage, read> edges: array<vec4<f32>>;
-@group(0) @binding(5) var<storage, read_write> acc: array<f32>;
-@group(0) @binding(6) var<storage, read_write> image: array<atomic<u32>>;
-@group(0) @binding(7) var<uniform> params: Params;
+@group(0) @binding(3) var<storage, read> edges: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> acc: array<f32>;
+@group(0) @binding(5) var<storage, read_write> image: array<atomic<u32>>;
+@group(0) @binding(6) var<uniform> params: Params;
 
 const TILE_U32S: u32 = 20u;
+
+// Which tile owns a row job: the records are in row_start order by construction, so
+// the largest row_start at or below the job is a binary search — sixteen probes on a
+// 58k-tile frame, against a host-built and host-uploaded job table (ADR 0083).
+fn tile_of(job: u32) -> u32 {
+    var lo = 0u;
+    var hi = params.tiles;
+    while (hi - lo > 1u) {
+        let mid = (lo + hi) / 2u;
+        if (tiles[mid * TILE_U32S + 8u] <= job) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
 
 fn deposit_inside(base: u32, fw: f32, dir: f32, xs_in: f32, ys: f32, xe_in: f32, ye: f32) {
     let xs = clamp(xs_in, 0.0, fw);
@@ -569,7 +583,7 @@ fn deposit_slab(base: u32, fw: f32, dir: f32, xs: f32, ys: f32, xe: f32, ye: f32
 fn coverage_rows(@builtin(global_invocation_id) id: vec3<u32>) {
     let job = id.y * 65536u + id.x;
     if (job >= params.rows) { return; }
-    let tile = row_jobs[job];
+    let tile = tile_of(job);
     let t = tile * TILE_U32S;
     let seat_x = tiles[t];
     let seat_y = tiles[t + 1u];
@@ -712,8 +726,7 @@ pub(crate) fn dispatch_into(
     let pipelines = &*pipelines.get_or_insert_with(|| Pipelines::compile(gpu));
     // Residency first: every outline this frame draws, uploaded once ever.
     let mut records: Vec<u32> = Vec::with_capacity(compute.tiles.len().saturating_mul(TILE_U32S));
-    let mut row_jobs: Vec<u8> = Vec::with_capacity((compute.rows as usize).saturating_mul(4));
-    for (index, tile) in compute.tiles.iter().enumerate() {
+    for tile in &compute.tiles {
         let segments: &[Segment] = resources
             .outline(quorra_scene::OutlineId(tile.outline))
             .map_or(&[], |stored| &stored.segments);
@@ -742,10 +755,6 @@ pub(crate) fn dispatch_into(
             0,
             0,
         ]);
-        let index = u32::try_from(index).unwrap_or(u32::MAX);
-        for _ in 0..tile.height {
-            row_jobs.extend_from_slice(&index.to_le_bytes());
-        }
     }
     let Some(arena_buffer) = arena.buffer.as_ref() else {
         return Ok(()); // no outline had segments: nothing to flatten, nothing to draw
@@ -770,7 +779,6 @@ pub(crate) fn dispatch_into(
         })
     };
     let tiles_buffer = storage("quorra compute tiles", &record_bytes);
-    let row_jobs_buffer = storage("quorra compute rows", &row_jobs);
     let tile_count = compute.tiles.len() as u32;
     let counts_buffer = sized(
         "quorra compute counts",
@@ -905,11 +913,10 @@ pub(crate) fn dispatch_into(
             entry(0, &tiles_buffer),
             entry(1, &offsets_buffer),
             entry(2, &counts_buffer),
-            entry(3, &row_jobs_buffer),
-            entry(4, &edges_buffer),
-            entry(5, &acc_buffer),
-            entry(6, &image),
-            entry(7, &params_buffer),
+            entry(3, &edges_buffer),
+            entry(4, &acc_buffer),
+            entry(5, &image),
+            entry(6, &params_buffer),
         ],
     });
     let mut encoder = gpu.create_command_encoder(&wgpu::CommandEncoderDescriptor {
