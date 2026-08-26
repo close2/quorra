@@ -29,7 +29,10 @@ jobs:
       - name: Install lavapipe (software Vulkan), Xvfb and xwd
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers xvfb x11-apps
+          # libxkbcommon-x11-0 is winit's X11 keymap path: the windowed examples
+          # (present_thread, window_smoke) dlopen it, and the runner image stopped
+          # shipping it — the panic is at startup, before any assertion runs.
+          sudo apt-get install -y mesa-vulkan-drivers xvfb x11-apps libxkbcommon-x11-0
       - uses: Swatinem/rust-cache@v2
       - name: Formatting
         run: cargo fmt --all --check

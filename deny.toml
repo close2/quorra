@@ -11,7 +11,16 @@ yanked = "deny"
 # An accepted advisory is recorded here with a comment explaining why it does not
 # apply, so that the exception is reviewable rather than invisible. Empty is the
 # correct state; it is not a placeholder.
-ignore = []
+ignore = [
+    # ttf-parser is unmaintained (its author says so; no fix will come) and has no
+    # drop-in replacement. It reaches this workspace only as a dev-dependency, four
+    # levels under winit: sctk-adwaita uses it to draw title-bar text on Wayland
+    # client-side decorations, which no example of ours even shows (the windowed
+    # examples run under X11/Xvfb). Nothing here parses a font with it and no
+    # untrusted bytes reach it; the exception is reviewed away the day winit's
+    # decoration stack moves off ab_glyph.
+    "RUSTSEC-2026-0192",
+]
 
 [licenses]
 version = 2
