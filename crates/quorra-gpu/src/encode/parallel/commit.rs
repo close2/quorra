@@ -45,7 +45,15 @@ impl<'a> Encoder<'a> {
         if self.threads > 1 && self.queued_keys.contains(&placement.key) {
             self.drain_queue()?;
         }
-        Ok(self.atlas.prospect(placement, width, height, placed_once))
+        // The room probe (ADR 0093) is asked only where a refused tile has somewhere
+        // better to go — the hybrid's device flattening. Jobs still queued for *other*
+        // keys have not consumed their room yet, so the probe can admit a tile a
+        // pending insert will beat to the shelf; that tile falls through at commit
+        // exactly as every over-admitted tile always has, and only misses the reroute.
+        let probe_room = self.compute_assist && self.coverage == Coverage::Cpu;
+        Ok(self
+            .atlas
+            .prospect(placement, width, height, placed_once, probe_room))
     }
 
     /// The largest coverage tile a mark with these bounds can make: the same arithmetic

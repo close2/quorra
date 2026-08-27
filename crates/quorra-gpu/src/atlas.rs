@@ -394,16 +394,44 @@ impl AtlasStore {
         width: u32,
         height: u32,
         placed_once: bool,
+        probe_room: bool,
     ) -> CacheProspect {
         if !self.admits(width, height) {
             return CacheProspect::TooLarge;
         }
         let entry = self.get(&placement.key);
+        // ADR 0093: where the caller has somewhere better to send a refused tile —
+        // the hybrid's device flattening — a tile the packer has no room for is
+        // declined *here*, before a worker rasterises it, instead of falling through
+        // to the sheet at commit with a quantised phase that bought nothing. The
+        // probe is exact: `prospect_for` drains the queue first, so every prior
+        // insert is already in the shelves this reads. Without the flag nothing
+        // changes, so the fall-through path keeps its exact old behaviour.
+        if probe_room && entry.is_none() && !self.would_fit(width, height) {
+            return CacheProspect::TooLarge;
+        }
         CacheProspect::Admitted {
             once: placed_once && entry.is_none(),
             entry,
             placement,
         }
+    }
+
+    /// Whether [`AtlasStore::insert`] would find room for a tile of this size —
+    /// `allocate`'s own search, read-only, condition for condition.
+    fn would_fit(&self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 || width > self.width {
+            return false;
+        }
+        for shelf in &self.shelves {
+            if shelf.height >= height
+                && shelf.height <= height.saturating_mul(2)
+                && shelf.cursor.saturating_add(width) <= self.width
+            {
+                return true;
+            }
+        }
+        self.next_shelf_y.saturating_add(height) <= self.height
     }
 
     /// Whether a tile of this size may be cached at all (ADR 0024).
@@ -784,11 +812,11 @@ mod tests {
             phase: [0.0, 0.0],
         };
         assert!(
-            !atlas.prospect(placement, 16, 16, true).worth_caching(),
+            !atlas.prospect(placement, 16, 16, true, false).worth_caching(),
             "written once, read once: the cache's whole cost and none of its benefit"
         );
         assert!(
-            atlas.prospect(placement, 16, 16, false).worth_caching(),
+            atlas.prospect(placement, 16, 16, false, false).worth_caching(),
             "placed more than once, so the second placement reads what the first wrote"
         );
     }
