@@ -36,6 +36,9 @@ pub(super) struct Upload {
     /// Whether the compute lane stamped its pass queries this frame, which is what
     /// says the query buffers hold this frame's numbers rather than an older one's.
     pub(super) compute_stamped: bool,
+    /// The compute chain in flight (ADR 0095): the eight-byte readback the frame
+    /// checks at its own end-wait, before anything is presented.
+    pub(super) compute_run: Option<crate::compute::ComputeRun>,
 }
 
 impl Device {
@@ -52,35 +55,43 @@ impl Device {
         // The globals are per plan now (ADR 0036) and made where the pass is recorded,
         // so nothing is charged here for them.
         let mut bytes = 0_u64;
-        // The compute lane's count is submitted *first*, so the device counts while
-        // the host stages the instance buffers and flushes the atlas — the stall at
-        // the collect then waits only for what is left of the count (ADR 0088). The
-        // sheet texture exists before it because the lane's image round-trip names
-        // it; nothing else about the lane runs until the staging in between is done.
+        // The compute lane's whole chain is submitted *first* — count, scan, emit,
+        // deposit, one submission with no mid-frame readback (ADR 0095) — so the
+        // device works through it while the host stages the instance buffers and
+        // flushes the atlas. What used to be a stall on the count's map is eight
+        // bytes the frame reads at its own end-wait, before anything is presented.
         let scratch_view = self.create_scratch_sheet(encoded, &mut bytes)?;
-        let pending = if encoded.compute.is_empty() {
+        let compute_run = if encoded.compute.is_empty() {
             None
         } else {
-            bytes = bytes.saturating_add(encoded.compute.device_bytes());
+            bytes = bytes
+                .saturating_add(encoded.compute.device_bytes())
+                .saturating_add(self.compute_persist.capacity_bytes());
             // The arena's growth is this frame's staging too: the first frame that
             // draws an outline pays its residency once, and the counter says so.
             let arena_before = self.segment_arena.device_bytes();
-            let pending = crate::compute::submit_count(
-                &self.gpu,
-                &self.queue,
-                &mut self.compute_pipelines,
-                &mut self.segment_arena,
-                &self.resources,
-                &encoded.compute,
-                self.compute_queries.as_ref(),
-                &mut spans,
-            )?;
+            let run = match scratch_view.as_ref() {
+                Some((texture, _)) => crate::compute::dispatch_chain(
+                    &self.gpu,
+                    &self.queue,
+                    &mut self.compute_pipelines,
+                    &mut self.segment_arena,
+                    &mut self.compute_persist,
+                    &self.resources,
+                    self.limits.max_frame_bytes,
+                    texture,
+                    &encoded.compute,
+                    self.compute_queries.as_ref(),
+                    &mut spans,
+                )?,
+                None => None,
+            };
             bytes = bytes.saturating_add(
                 self.segment_arena
                     .device_bytes()
                     .saturating_sub(arena_before),
             );
-            pending
+            run
         };
         let make_instances = |gpu: &wgpu::Device, queue: &wgpu::Queue, label, data: &[u8]| {
             if data.is_empty() {
@@ -112,21 +123,6 @@ impl Device {
             .saturating_add(encoded.rect_instances.len() as u64)
             .saturating_add(encoded.quad_instances.len() as u64);
         self.flush_atlas_tiles(&mut bytes);
-        // The staging is done; now collect the count and run the passes behind it.
-        if let (Some(pending), Some((texture, _))) = (pending, scratch_view.as_ref()) {
-            crate::compute::finish_dispatch(
-                &self.gpu,
-                &self.queue,
-                &mut self.compute_pipelines,
-                &self.segment_arena,
-                self.limits.max_frame_bytes,
-                texture,
-                &encoded.compute,
-                self.compute_queries.as_ref(),
-                &mut spans,
-                pending,
-            )?;
-        }
         if !encoded.winding.is_empty()
             && let Some((_, view)) = scratch_view.as_ref()
         {
@@ -148,8 +144,9 @@ impl Device {
             )?;
         }
 
-        let compute_stamped = !encoded.compute.is_empty() && self.compute_queries.is_some();
+        let compute_stamped = compute_run.is_some() && self.compute_queries.is_some();
         Ok(Upload {
+            compute_run,
             rect_instances,
             quad_instances,
             scratch_view,

@@ -176,6 +176,10 @@ pub struct Device {
     /// The compute lane's resident segments: every outline it has drawn, uploaded
     /// once (ADR 0081).
     segment_arena: crate::compute::SegmentArena,
+    /// The compute lane's persistent capacity (ADR 0095): the edges buffer, grown to
+    /// its high-water and reused, so a steady zoom allocates nothing data-dependent
+    /// and the host never waits mid-frame.
+    compute_persist: crate::compute::ComputePersist,
     /// A layer texture made ahead of the frame that will want it (ADR 0035), and held
     /// only until that frame takes it — the pool itself stays per-frame, as ADR 0012
     /// decided. Worth 0.06 ms and no more; ADR 0040 measured it and says why it stays.

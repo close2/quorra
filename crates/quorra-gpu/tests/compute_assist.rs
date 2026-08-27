@@ -152,7 +152,7 @@ fn the_big_fill_takes_the_device_and_the_glyphs_keep_the_atlas() {
             .timings()
             .phases
             .iter()
-            .any(|(name, _)| *name == "compute count stall");
+            .any(|(name, _)| *name == "compute residency+records");
         let glyphs = frame.counters().lanes.glyph;
         (compute, glyphs)
     };

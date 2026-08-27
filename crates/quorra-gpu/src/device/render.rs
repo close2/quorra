@@ -207,6 +207,9 @@ impl Device {
     /// across (ADR 0048): the two callers differ only in where the [`Encoded`] came
     /// from, and every refusal below this line is taken by both.
     #[allow(clippy::too_many_arguments)] // one frame's inputs, named once at two call sites
+    #[allow(clippy::too_many_lines)] // one frame's phases in order, with ADR 0095's
+    // growth loop around exactly the two that re-run; a split would scatter the
+    // ordering argument the comments carry
     fn draw_encoded(
         &mut self,
         encoded: &Encoded,
@@ -234,11 +237,6 @@ impl Device {
         let paint_started = Instant::now();
         let paint_bytes = self.ensure_paint_textures(encoded)?;
         let paint_time = paint_started.elapsed();
-        let mut upload = self.upload(encoded)?;
-        let upload_time = upload.time.saturating_add(paint_time);
-        let upload_bytes = upload.bytes.saturating_add(paint_bytes);
-        let upload_spans = std::mem::take(&mut upload.spans);
-        let compute_stamped = upload.compute_stamped;
 
         // Every refusal a scene can earn has been taken; bind the target last, so
         // the acquire happens only for a frame that will run.
@@ -252,6 +250,60 @@ impl Device {
         let acquire = acquire_started.elapsed();
 
         let query = self.take_pass_query();
+        // The frame's body, and the loop it lives in (ADR 0095): the compute chain
+        // runs with no mid-frame readback, guarded against a persistent capacity, and
+        // the eight bytes saying whether it fit are read here — after the wait the
+        // frame pays anyway, before anything is presented. A frame whose emit met the
+        // capacity grows to the scanned total and runs again, whole; a steady frame
+        // pays this branch nothing but the read.
+        let mut attempts = 0_u32;
+        let (upload_time, upload_bytes, upload_spans, compute_stamped, ran) = loop {
+            let mut upload = self.upload(encoded)?;
+            let upload_time = upload.time.saturating_add(paint_time);
+            let upload_bytes = upload.bytes.saturating_add(paint_bytes);
+            let upload_spans = std::mem::take(&mut upload.spans);
+            let compute_stamped = upload.compute_stamped;
+            let compute_run = upload.compute_run.take();
+            let ran = match self.run_frame(encoded, &bound, upload, query.as_ref(), damage) {
+                Ok(ran) => ran,
+                Err(error) => return Err(self.abandon_frame(bound, error)),
+            };
+            let Some(run) = compute_run else {
+                break (
+                    upload_time,
+                    upload_bytes,
+                    upload_spans,
+                    compute_stamped,
+                    ran,
+                );
+            };
+            match run.overflowed(&self.gpu)? {
+                None => {
+                    break (
+                        upload_time,
+                        upload_bytes,
+                        upload_spans,
+                        compute_stamped,
+                        ran,
+                    );
+                }
+                Some(total) => {
+                    // Growth refuses by name past the budget, exactly as the
+                    // per-frame allocation it replaces did.
+                    self.compute_persist
+                        .grow(&self.gpu, total, self.limits.max_frame_bytes)?;
+                    attempts = attempts.saturating_add(1);
+                    if attempts > 3 {
+                        // Three growths that still overflow mean the scanned total
+                        // and the emit disagree, which the shared walk makes
+                        // impossible; refusing beats presenting a truncated frame.
+                        return Err(RenderError::ReadbackFailed {
+                            detail: "the compute capacity kept overflowing its own scan".into(),
+                        });
+                    }
+                }
+            }
+        };
         // A replayed frame spent nothing on geometry or staging, and the clock inside a
         // retained encode still holds what the frame that *made* it spent — so the
         // subdivision has to come from the source, not from the clock (ADR 0048).
@@ -263,11 +315,7 @@ impl Device {
             }
             EncodeSource::Replayed => encoded.encode_phases.replayed(),
         };
-        let (execute_wall, mut phases, layer_textures) =
-            match self.run_frame(encoded, &bound, upload, query.as_ref(), damage) {
-                Ok(ran) => ran,
-                Err(error) => return Err(self.abandon_frame(bound, error)),
-            };
+        let (execute_wall, mut phases, layer_textures) = ran;
 
         // Present before reading instrumentation back: the person sees the frame at
         // the earliest moment, the numbers arrive a map later.

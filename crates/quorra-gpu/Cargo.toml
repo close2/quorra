@@ -39,3 +39,10 @@ quorra-pages.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# The growth road's test seam (ADR 0095): `tests/capacity_growth.rs` starts the
+# persistent edge capacity at one edge so the first emit must overflow and the
+# re-run must draw the steady road's bytes. Never a default; no release binary
+# carries it.
+sabotage-capacity = []

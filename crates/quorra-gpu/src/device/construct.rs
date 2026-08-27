@@ -326,6 +326,7 @@ impl Device {
             pass_query: pass_query_at_startup,
             compute_queries,
             reduced_textures: HashMap::new(),
+            compute_persist: crate::compute::ComputePersist::new(),
             surface: surface_state,
             startup: StartupSteps {
                 instance_creation: pre.instance_creation,

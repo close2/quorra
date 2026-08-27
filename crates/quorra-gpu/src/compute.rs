@@ -287,7 +287,10 @@ struct Params {
     stride_words: u32,
     rows: u32,
     tiles: u32,
-    padding: u32,
+    // The edges buffer's persistent capacity, in edges (ADR 0095): what the emit
+    // guards every write against, since its offsets come from the device's own scan
+    // and the host has not seen a total.
+    capacity: u32,
 }
 
 @group(0) @binding(0) var<storage, read> arena: array<u32>;
@@ -296,6 +299,11 @@ struct Params {
 @group(0) @binding(3) var<storage, read> offsets: array<u32>;
 @group(0) @binding(4) var<storage, read_write> edges: array<vec4<f32>>;
 @group(0) @binding(5) var<uniform> params: Params;
+// The overflow flag (ADR 0095): raised where an emit met the capacity, read on the
+// host at the frame's own end-wait, before anything is presented. Referenced only
+// under EMIT; the count variants bind a placeholder because the layout keeps a
+// const-dead binding.
+@group(0) @binding(6) var<storage, read_write> overflow: array<u32>;
 
 const TILE_U32S: u32 = 20u;
 const FLATTEN_TOLERANCE: f32 = 0.25;
@@ -324,8 +332,15 @@ fn apply(w: ptr<function, Walk>, x: f32, y: f32) -> vec2<f32> {
 
 fn edge(w: ptr<function, Walk>, tail: vec2<f32>, head: vec2<f32>) {
     if (EMIT) {
-        edges[(*w).cursor] = vec4<f32>(tail.x, tail.y, head.x, head.y);
-        (*w).cursor += 1u;
+        // Guarded against the persistent capacity (ADR 0095): an overflow stops
+        // writing, raises the flag, and the frame re-runs grown before any present —
+        // a wrong picture is impossible by construction, only a slower frame.
+        if ((*w).cursor < params.capacity) {
+            edges[(*w).cursor] = vec4<f32>(tail.x, tail.y, head.x, head.y);
+            (*w).cursor += 1u;
+        } else {
+            overflow[0] = 1u;
+        }
     }
     (*w).emitted += 1u;
 }
@@ -469,6 +484,36 @@ fn flatten_tiles(@builtin(global_invocation_id) id: vec3<u32>) {
 /// scanned edge offsets. Its arithmetic is `raster/fill.rs` statement for statement;
 /// the hazard notes live in `tests/compute_coverage_determinism.rs`, which measures
 /// this port's reproducibility in isolation.
+/// The exclusive prefix over the per-tile counts, computed where the counts are
+/// (ADR 0095): one thread, tens of microseconds at fifty-eight thousand tiles, and
+/// the host never reads a count again. Serial on purpose — a prefix sum has one
+/// answer in integers, and one thread is the cheapest way to have exactly one order.
+const SCAN: &str = r"
+struct Params {
+    stride_words: u32,
+    rows: u32,
+    tiles: u32,
+    capacity: u32,
+}
+
+@group(0) @binding(0) var<storage, read> counts: array<u32>;
+@group(0) @binding(1) var<storage, read_write> offsets: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(1)
+fn scan(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x != 0u) { return; }
+    var total = 0u;
+    for (var t = 0u; t < params.tiles; t += 1u) {
+        offsets[t] = total;
+        total += counts[t];
+    }
+    // The total rides at the end, where the emit's per-tile hard edge would read it
+    // and where an eight-byte readback finds it beside the flag.
+    offsets[params.tiles] = total;
+}
+";
+
 const DEPOSIT: &str = r"
 struct Params {
     stride_words: u32,
@@ -651,6 +696,8 @@ fn coverage_rows(@builtin(global_invocation_id) id: vec3<u32>) {
 #[derive(Debug)]
 pub(crate) struct Pipelines {
     count: wgpu::ComputePipeline,
+    /// The device-side prefix over the counts (ADR 0095).
+    scan: wgpu::ComputePipeline,
     emit: wgpu::ComputePipeline,
     deposit: wgpu::ComputePipeline,
 }
@@ -676,9 +723,21 @@ impl Pipelines {
             label: Some("quorra compute deposit"),
             source: wgpu::ShaderSource::Wgsl(DEPOSIT.into()),
         });
+        let scan = gpu.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quorra compute scan"),
+            source: wgpu::ShaderSource::Wgsl(SCAN.into()),
+        });
         Self {
             count: flatten_pipeline("quorra compute count", false),
             emit: flatten_pipeline("quorra compute emit", true),
+            scan: gpu.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("quorra compute scan"),
+                layout: None,
+                module: &scan,
+                entry_point: Some("scan"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            }),
             deposit: gpu.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("quorra compute deposit"),
                 layout: None,
@@ -722,45 +781,144 @@ impl ComputeQueries {
     }
 }
 
-/// The count pass in flight: everything [`finish_dispatch`] needs to collect it and
-/// run the emit and deposit behind it.
-///
-/// The split exists so the host does not stand idle while the device counts: the
-/// count is submitted first ([`submit_count`]), the frame's other staging — instance
-/// buffers, the atlas flush — runs beside it, and only then does the host sit down to
-/// wait for the number it cannot proceed without (ADR 0088).
+/// The chain in flight (ADR 0095): the eight bytes the host reads at the frame's
+/// own end-wait — the overflow flag and the scanned total — and the capacity the
+/// emit was guarded against, so the caller can grow and re-run before presenting.
 #[derive(Debug)]
-pub(crate) struct PendingCount {
-    tiles_buffer: wgpu::Buffer,
-    counts_buffer: wgpu::Buffer,
-    params_buffer: wgpu::Buffer,
+pub(crate) struct ComputeRun {
     readback: wgpu::Buffer,
-    tile_count: u32,
 }
 
-/// Residency, the tile records, and the count dispatch — submitted, not waited for.
+impl ComputeRun {
+    /// The flag and the total, read after the frame's own wait: `None` when the emit
+    /// fit — the steady road — and `Some(total_edges)` where it met the capacity and
+    /// the frame must grow and re-run before any present (ADR 0095).
+    ///
+    /// # Errors
+    ///
+    /// The map's own refusals; the work is already complete when this is called, so
+    /// the poll returns without waiting.
+    pub(crate) fn overflowed(&self, gpu: &wgpu::Device) -> Result<Option<u64>, RenderError> {
+        let slice = self.readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        gpu.poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|_| RenderError::ReadbackFailed {
+                detail: "the device did not answer the overflow readback's map".into(),
+            })?;
+        let (flag, total) = {
+            let mapped = slice
+                .get_mapped_range()
+                .map_err(|_| RenderError::ReadbackFailed {
+                    detail: "the overflow readback did not map".into(),
+                })?;
+            let word = |at: usize| {
+                mapped
+                    .get(at..at.saturating_add(4))
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map_or(0, u32::from_le_bytes)
+            };
+            (word(0), word(4))
+        };
+        self.readback.unmap();
+        Ok((flag != 0).then_some(u64::from(total)))
+    }
+}
+
+/// The persistent half of the lane (ADR 0095): the edges buffer, grow-only, so a
+/// steady zoom allocates nothing data-dependent and the host never waits mid-frame.
+#[derive(Debug)]
+pub(crate) struct ComputePersist {
+    edges: Option<wgpu::Buffer>,
+    /// The capacity in edges. Zero before the first frame; grown to the scanned
+    /// total (plus headroom) whenever the flag says the emit met it.
+    capacity_edges: u32,
+}
+
+impl ComputePersist {
+    pub(crate) const fn new() -> Self {
+        Self {
+            edges: None,
+            capacity_edges: 0,
+        }
+    }
+
+    /// Grow to hold `total` edges, with a quarter of headroom so a slowly growing
+    /// magnification does not re-run every frame, clamped to what `max_frame_bytes`
+    /// prices. The refusal names both numbers, exactly as the per-frame allocation
+    /// it replaces did.
+    pub(crate) fn grow(
+        &mut self,
+        gpu: &wgpu::Device,
+        total: u64,
+        max_frame_bytes: u64,
+    ) -> Result<(), RenderError> {
+        let capacity = Self::price(total, max_frame_bytes)?;
+        self.edges = Some(gpu.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quorra compute edges"),
+            size: u64::from(capacity).saturating_mul(16).max(16),
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }));
+        self.capacity_edges = capacity;
+        Ok(())
+    }
+
+    /// The growth's arithmetic, separated from its allocation so the refusal can be
+    /// tested without a device — which also proves the check precedes the buffer.
+    fn price(total: u64, max_frame_bytes: u64) -> Result<u32, RenderError> {
+        let needed_bytes = total.saturating_mul(16);
+        if needed_bytes > max_frame_bytes || total > u64::from(u32::MAX) {
+            return Err(RenderError::FrameBudgetExceeded {
+                needed: needed_bytes,
+                budget: max_frame_bytes,
+            });
+        }
+        let with_headroom = total
+            .saturating_add(total / 4)
+            .min(max_frame_bytes / 16)
+            .max(total);
+        #[allow(clippy::cast_possible_truncation)] // clamped to u32::MAX just above
+        Ok(with_headroom.min(u64::from(u32::MAX)) as u32)
+    }
+
+    /// Bytes the persistent capacity holds, for the frame's staging accounting.
+    pub(crate) fn capacity_bytes(&self) -> u64 {
+        u64::from(self.capacity_edges).saturating_mul(16)
+    }
+}
+
+/// Runs the whole lane in **one submission with no mid-frame readback** (ADR 0095):
+/// residency, the exact count, the device-side scan of it, the guarded emit, the
+/// deposit and the image round-trip — and schedules the eight-byte readback the
+/// caller checks at the frame's own end-wait.
 ///
-/// `Ok(None)` when no outline had segments: nothing to flatten, nothing to draw, and
-/// nothing for [`finish_dispatch`] to do.
+/// `Ok(None)` when no outline had segments: nothing to flatten, nothing to draw,
+/// nothing to check.
 ///
-/// The `Result` is shape rather than fallibility today — the arena's `ensure` refusal
-/// is absorbed as an empty range exactly as the one-call era did — and it stays
-/// because the split's caller (`staging.rs`) threads one `?` through both halves.
-#[allow(clippy::unnecessary_wraps)]
-#[allow(clippy::too_many_lines)] // one submission's chain, in order, as dispatch_into was
-#[allow(clippy::too_many_arguments)] // the device's own fields, threaded once
+/// # Errors
+///
+/// The arena's own upload refusals, and the growth refusal where even the starting
+/// capacity cannot be priced.
+#[allow(clippy::too_many_lines)]
+// one frame's pass chain, in submission order — the stages read top to bottom and a
+// split would scatter the ordering argument
+#[allow(clippy::too_many_arguments)] // the device's own fields, threaded once from
+// the one call site in `staging.rs`
 #[allow(clippy::cast_possible_truncation)] // strides and word counts are bounded by
 // the device's texture dimension and by the checks above each cast
-pub(crate) fn submit_count(
+pub(crate) fn dispatch_chain(
     gpu: &wgpu::Device,
     queue: &wgpu::Queue,
     pipelines: &mut Option<Pipelines>,
     arena: &mut SegmentArena,
+    persist: &mut ComputePersist,
     resources: &crate::resources::ResourceStore,
+    max_frame_bytes: u64,
+    sheet: &wgpu::Texture,
     compute: &ComputeSheet,
     queries: Option<&ComputeQueries>,
     spans: &mut Vec<(&'static str, std::time::Duration)>,
-) -> Result<Option<PendingCount>, RenderError> {
+) -> Result<Option<ComputeRun>, RenderError> {
     let pipelines = &*pipelines.get_or_insert_with(|| Pipelines::compile(gpu));
     // Residency first: every outline this frame draws, uploaded once ever.
     let residency_started = std::time::Instant::now();
@@ -799,6 +957,21 @@ pub(crate) fn submit_count(
     let Some(arena_buffer) = arena.buffer.as_ref() else {
         return Ok(None); // no outline had segments: nothing to flatten, nothing to draw
     };
+    if persist.capacity_edges == 0 {
+        // The first frame's heuristic: enough for an ordinary page's tiles, priced by
+        // the same clamp every growth is. A page it undershoots pays one re-run.
+        let guess = (compute.tiles.len() as u64).saturating_mul(32).max(65_536);
+        // The growth road's test seam: `tests/capacity_growth.rs` starts the capacity
+        // at one edge so the first emit must overflow, and holds the re-run to the
+        // steady road's bytes. Compiled out everywhere else.
+        #[cfg(feature = "sabotage-capacity")]
+        let guess = if std::env::var_os("QUORRA_SABOTAGE_CAPACITY").is_some() {
+            1
+        } else {
+            guess
+        };
+        persist.grow(gpu, guess, max_frame_bytes)?;
+    }
     let record_bytes: Vec<u8> = records.iter().flat_map(|word| word.to_le_bytes()).collect();
     let storage = |label: &str, bytes: &[u8]| {
         let buffer = gpu.create_buffer(&wgpu::BufferDescriptor {
@@ -823,10 +996,17 @@ pub(crate) fn submit_count(
     let counts_buffer = sized(
         "quorra compute counts",
         u64::from(tile_count).saturating_mul(4),
+        wgpu::BufferUsages::empty(),
+    );
+    // One extra entry holding the scanned total (ADR 0095): the emit's offsets, the
+    // deposit's starts, and the readback's second word are all this one buffer.
+    let offsets_buffer = sized(
+        "quorra compute offsets",
+        u64::from(tile_count).saturating_add(1).saturating_mul(4),
         wgpu::BufferUsages::COPY_SRC,
     );
     let stride = compute.stride() as u32;
-    let params: Vec<u8> = [stride / 4, compute.rows, tile_count, 0]
+    let params: Vec<u8> = [stride / 4, compute.rows, tile_count, persist.capacity_edges]
         .iter()
         .flat_map(|word| word.to_le_bytes())
         .collect();
@@ -837,10 +1017,23 @@ pub(crate) fn submit_count(
         mapped_at_creation: false,
     });
     queue.write_buffer(&params_buffer, 0, &params);
+    let flag = sized(
+        "quorra compute overflow flag",
+        4,
+        wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+    );
+    queue.write_buffer(&flag, 0, &[0u8; 4]);
+    let readback = gpu.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("quorra compute overflow readback"),
+        size: 16,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     // The count pass binds the offsets and edges slots to placeholders: the shader
-    // touches neither under EMIT = false, and a bind group needs a buffer either way —
-    // two of them, because one buffer bound read-only and read-write in a single
-    // dispatch is a usage conflict wgpu refuses.
+    // touches neither under EMIT = false, and a bind group needs a buffer either way
+    // — two of them, because one buffer bound read-only and read-write in a single
+    // dispatch is a usage conflict wgpu refuses. The flag's placeholder exists
+    // because the layout keeps a const-dead binding.
     let placeholder_read = sized(
         "quorra compute placeholder",
         16,
@@ -851,183 +1044,7 @@ pub(crate) fn submit_count(
         16,
         wgpu::BufferUsages::empty(),
     );
-
-    let flatten_group =
-        |pipeline: &wgpu::ComputePipeline, offsets: &wgpu::Buffer, edges: &wgpu::Buffer| {
-            gpu.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("quorra compute flatten"),
-                layout: &pipeline.get_bind_group_layout(0),
-                entries: &[
-                    entry(0, arena_buffer),
-                    entry(1, &tiles_buffer),
-                    entry(2, &counts_buffer),
-                    entry(3, offsets),
-                    entry(4, edges),
-                    entry(5, &params_buffer),
-                ],
-            })
-        };
-
-    // Pass 1: count, and read the counts back — the exact allocation's price.
-    let readback = gpu.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("quorra compute counts readback"),
-        size: u64::from(tile_count).saturating_mul(4).max(16),
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let count_group = flatten_group(&pipelines.count, &placeholder_read, &placeholder_write);
-    let mut encoder = gpu.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("quorra compute count"),
-    });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: None,
-            timestamp_writes: queries.map(|q| wgpu::ComputePassTimestampWrites {
-                query_set: &q.count.set,
-                beginning_of_pass_write_index: Some(0),
-                end_of_pass_write_index: Some(1),
-            }),
-        });
-        pass.set_pipeline(&pipelines.count);
-        pass.set_bind_group(0, &count_group, &[]);
-        let (x, y) = grid(tile_count);
-        pass.dispatch_workgroups(x, y, 1);
-    }
-    encoder.copy_buffer_to_buffer(
-        &counts_buffer,
-        0,
-        &readback,
-        0,
-        u64::from(tile_count).saturating_mul(4),
-    );
-    if let Some(q) = queries {
-        encoder.resolve_query_set(&q.count.set, 0..2, &q.count.resolve, 0);
-        encoder.copy_buffer_to_buffer(&q.count.resolve, 0, &q.count.map, 0, 16);
-    }
-    queue.submit([encoder.finish()]);
-    Ok(Some(PendingCount {
-        tiles_buffer,
-        counts_buffer,
-        params_buffer,
-        readback,
-        tile_count,
-    }))
-}
-
-/// Collect the count, allocate exactly, and run the emit, the deposit and the image
-/// round-trip behind it.
-///
-/// # Errors
-///
-/// [`RenderError::FrameBudgetExceeded`] when the counted edges would not fit the frame
-/// budget — the magnification made more geometry than the host allowed, named before
-/// it is allocated — and [`RenderError::ReadbackFailed`] when the device would not
-/// answer the count's map.
-#[allow(clippy::too_many_lines)]
-// one frame's pass chain, in submission order — the
-// stages read top to bottom and a split would scatter the ordering argument
-#[allow(clippy::too_many_arguments)] // the device's own fields, threaded once from
-// the one call site in `staging.rs`
-#[allow(clippy::cast_possible_truncation)] // strides and word counts are bounded by
-// the device's texture dimension and by the checks above each cast
-pub(crate) fn finish_dispatch(
-    gpu: &wgpu::Device,
-    queue: &wgpu::Queue,
-    pipelines: &mut Option<Pipelines>,
-    arena: &SegmentArena,
-    max_frame_bytes: u64,
-    sheet: &wgpu::Texture,
-    compute: &ComputeSheet,
-    queries: Option<&ComputeQueries>,
-    spans: &mut Vec<(&'static str, std::time::Duration)>,
-    pending: PendingCount,
-) -> Result<(), RenderError> {
-    let pipelines = &*pipelines.get_or_insert_with(|| Pipelines::compile(gpu));
-    let PendingCount {
-        tiles_buffer,
-        counts_buffer,
-        params_buffer,
-        readback,
-        tile_count,
-    } = pending;
-    let Some(arena_buffer) = arena.buffer.as_ref() else {
-        return Ok(()); // submit_count answered None before this could be reached
-    };
-    let stride = compute.stride() as u32;
-    let sized = |label: &str, bytes: u64, extra: wgpu::BufferUsages| {
-        gpu.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: bytes.max(16),
-            usage: wgpu::BufferUsages::STORAGE | extra,
-            mapped_at_creation: false,
-        })
-    };
-    let storage = |label: &str, bytes: &[u8]| {
-        let buffer = gpu.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: bytes.len().max(16) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, bytes);
-        buffer
-    };
-    let flatten_group =
-        |pipeline: &wgpu::ComputePipeline, offsets: &wgpu::Buffer, edges: &wgpu::Buffer| {
-            gpu.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("quorra compute flatten"),
-                layout: &pipeline.get_bind_group_layout(0),
-                entries: &[
-                    entry(0, arena_buffer),
-                    entry(1, &tiles_buffer),
-                    entry(2, &counts_buffer),
-                    entry(3, offsets),
-                    entry(4, edges),
-                    entry(5, &params_buffer),
-                ],
-            })
-        };
-    let stall_started = std::time::Instant::now();
-    let slice = readback.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    gpu.poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|_| RenderError::ReadbackFailed {
-            detail: "the device did not answer the edge count's map".into(),
-        })?;
-    spans.push(("compute count stall", stall_started.elapsed()));
-    let counts: Vec<u32> = {
-        let mapped = slice
-            .get_mapped_range()
-            .map_err(|_| RenderError::ReadbackFailed {
-                detail: "the edge count's readback did not map".into(),
-            })?;
-        mapped
-            .chunks_exact(4)
-            .take(tile_count as usize)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()
-    };
-    readback.unmap();
-    let mut offsets = Vec::with_capacity(counts.len());
-    let mut total: u64 = 0;
-    for count in &counts {
-        offsets.push(u32::try_from(total).unwrap_or(u32::MAX));
-        total = total.saturating_add(u64::from(*count));
-    }
-    let edge_bytes = total.saturating_mul(16);
-    if edge_bytes > max_frame_bytes || total > u64::from(u32::MAX) {
-        return Err(RenderError::FrameBudgetExceeded {
-            needed: edge_bytes,
-            budget: max_frame_bytes,
-        });
-    }
-    let offset_bytes: Vec<u8> = offsets.iter().flat_map(|word| word.to_le_bytes()).collect();
-    let offsets_buffer = storage("quorra compute offsets", &offset_bytes);
-    let edges_buffer = sized(
-        "quorra compute edges",
-        edge_bytes,
-        wgpu::BufferUsages::empty(),
-    );
+    let placeholder_flag = sized("quorra compute placeholder", 4, wgpu::BufferUsages::empty());
     let acc_buffer = sized(
         "quorra compute accumulator",
         compute.acc_floats.saturating_mul(4),
@@ -1038,9 +1055,47 @@ pub(crate) fn finish_dispatch(
         u64::from(stride).saturating_mul(u64::from(compute.height)),
         wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
     );
+    #[allow(clippy::expect_used)] // set by the grow() call above on every road here
+    let edges_buffer = persist
+        .edges
+        .as_ref()
+        .expect("grown before any dispatch")
+        .clone();
 
-    // Passes 2 and 3, and the image round-trip, in one submission.
-    let emit_group = flatten_group(&pipelines.emit, &offsets_buffer, &edges_buffer);
+    let flatten_group = |pipeline: &wgpu::ComputePipeline,
+                         offsets: &wgpu::Buffer,
+                         edges: &wgpu::Buffer,
+                         flag_slot: &wgpu::Buffer| {
+        gpu.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quorra compute flatten"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                entry(0, arena_buffer),
+                entry(1, &tiles_buffer),
+                entry(2, &counts_buffer),
+                entry(3, offsets),
+                entry(4, edges),
+                entry(5, &params_buffer),
+                entry(6, flag_slot),
+            ],
+        })
+    };
+    let count_group = flatten_group(
+        &pipelines.count,
+        &placeholder_read,
+        &placeholder_write,
+        &placeholder_flag,
+    );
+    let emit_group = flatten_group(&pipelines.emit, &offsets_buffer, &edges_buffer, &flag);
+    let scan_group = gpu.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("quorra compute scan"),
+        layout: &pipelines.scan.get_bind_group_layout(0),
+        entries: &[
+            entry(0, &counts_buffer),
+            entry(1, &offsets_buffer),
+            entry(2, &params_buffer),
+        ],
+    });
     let deposit_group = gpu.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("quorra compute deposit"),
         layout: &pipelines.deposit.get_bind_group_layout(0),
@@ -1054,8 +1109,11 @@ pub(crate) fn finish_dispatch(
             entry(6, &params_buffer),
         ],
     });
+
+    // The whole chain, one submission, in pass order: count, scan, emit, deposit,
+    // the image round-trip, and the eight bytes the end of the frame will read.
     let mut encoder = gpu.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("quorra compute coverage"),
+        label: Some("quorra compute chain"),
     });
     let extent = wgpu::Extent3d {
         width: compute.width,
@@ -1081,6 +1139,26 @@ pub(crate) fn finish_dispatch(
         },
         extent,
     );
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: queries.map(|q| wgpu::ComputePassTimestampWrites {
+                query_set: &q.count.set,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            }),
+        });
+        pass.set_pipeline(&pipelines.count);
+        pass.set_bind_group(0, &count_group, &[]);
+        let (x, y) = grid(tile_count);
+        pass.dispatch_workgroups(x, y, 1);
+    }
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&pipelines.scan);
+        pass.set_bind_group(0, &scan_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: None,
@@ -1117,17 +1195,53 @@ pub(crate) fn finish_dispatch(
         sheet_copy,
         extent,
     );
+    encoder.copy_buffer_to_buffer(&flag, 0, &readback, 0, 4);
+    encoder.copy_buffer_to_buffer(
+        &offsets_buffer,
+        u64::from(tile_count).saturating_mul(4),
+        &readback,
+        4,
+        4,
+    );
     if let Some(q) = queries {
+        encoder.resolve_query_set(&q.count.set, 0..2, &q.count.resolve, 0);
+        encoder.copy_buffer_to_buffer(&q.count.resolve, 0, &q.count.map, 0, 16);
         encoder.resolve_query_set(&q.coverage.set, 0..2, &q.coverage.resolve, 0);
         encoder.copy_buffer_to_buffer(&q.coverage.resolve, 0, &q.coverage.map, 0, 16);
     }
     queue.submit([encoder.finish()]);
-    Ok(())
+    Ok(Some(ComputeRun { readback }))
 }
 
 fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: buffer.as_entire_binding(),
+    }
+}
+
+#[cfg(test)]
+mod persist_tests {
+    use super::ComputePersist;
+    use crate::error::RenderError;
+
+    /// The growth refusal keeps the per-frame allocation's name and both numbers
+    /// (ADR 0095), and it precedes any buffer — provable here exactly because
+    /// `price` needs no device to refuse.
+    #[test]
+    fn growth_past_the_budget_refuses_by_name() {
+        // 2^28 edges is 4 GiB of edge bytes against a 1 MiB budget.
+        let refused = ComputePersist::price(1 << 28, 1 << 20);
+        match refused {
+            Err(RenderError::FrameBudgetExceeded { needed, budget }) => {
+                assert_eq!(needed, (1_u64 << 28) * 16);
+                assert_eq!(budget, 1 << 20);
+            }
+            other => panic!("a total past the budget refuses by name: {other:?}"),
+        }
+        // Inside the budget: a quarter of headroom, clamped by what the budget
+        // prices.
+        let priced = ComputePersist::price(1_000, u64::MAX).expect("fits");
+        assert_eq!(priced, 1_250);
     }
 }

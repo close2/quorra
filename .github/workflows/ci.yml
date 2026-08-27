@@ -50,6 +50,12 @@ jobs:
         run: cargo test --workspace
       - name: Perf gate (release, timestamp queries)
         run: cargo test --release -p quorra-gpu --test perf_gate -- --nocapture
+      # ADR 0095's growth road, forced: the sabotage feature starts the persistent
+      # edge capacity at one edge so the first emit overflows and the re-run must
+      # draw the steady road's bytes. A separate step because the seam must never be
+      # compiled into anything else.
+      - name: Capacity growth re-runs and matches
+        run: cargo test --release -p quorra-gpu --features sabotage-capacity --test capacity_growth
       # ADR 0060. `cargo test` neither builds nor runs an example, so every `assert!` in
       # `examples/` was a comment until this step existed — and one of them had been
       # panicking on `main` for two days when the round that added this found it. Each
