@@ -202,12 +202,19 @@ fn viewport(marks: usize) -> Viewport<'static> {
     )
 }
 
-/// A device with a cache too small to stand in front of these marks.
+/// A device with a cache too small to stand in front of these marks — and with the
+/// per-frame hybrid pinned off, because this file's whole construction is that the
+/// atlas-declined marks rasterise on the processor in every arm. ADR 0090's auto rule
+/// would reroute them to the compute lane on any hardware adapter, and the compute
+/// lane's picture agrees with the scanline's only to one coverage step (ADR 0094) —
+/// which would make §B time two pictures and fail §C's identity for a reason this
+/// file does not measure. The hybrid has its own suite (`tests/compute_assist.rs`).
 fn device_for(adapter: Option<String>, coverage: Coverage) -> Device {
     let device = Device::headless(&Options {
         adapter,
         coverage,
         atlas_budget: TINY_ATLAS,
+        compute_assist: Some(false),
         ..Options::default()
     })
     .expect("an adapter");
