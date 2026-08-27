@@ -29,6 +29,13 @@ pub(super) struct Upload {
     pub(super) scratch_view: Option<(wgpu::Texture, wgpu::TextureView)>,
     pub(super) bytes: u64,
     pub(super) time: Duration,
+    /// Host-side spans the upload wants named in the frame's phases — the compute
+    /// lane's residency walk and its count stall — so "upload" stops being one number
+    /// over four different things.
+    pub(super) spans: Vec<(&'static str, Duration)>,
+    /// Whether the compute lane stamped its pass queries this frame, which is what
+    /// says the query buffers hold this frame's numbers rather than an older one's.
+    pub(super) compute_stamped: bool,
 }
 
 impl Device {
@@ -41,6 +48,7 @@ impl Device {
     /// and is bounded by the adapter's dimension.
     pub(super) fn upload(&mut self, encoded: &Encoded) -> Result<Upload, RenderError> {
         let started = Instant::now();
+        let mut spans: Vec<(&'static str, Duration)> = Vec::new();
         // The globals are per plan now (ADR 0036) and made where the pass is recorded,
         // so nothing is charged here for them.
         let mut bytes = 0_u64;
@@ -74,15 +82,18 @@ impl Device {
             .saturating_add(encoded.rect_instances.len() as u64)
             .saturating_add(encoded.quad_instances.len() as u64);
 
-        let scratch_view = self.upload_scratch(encoded, &mut bytes)?;
+        let scratch_view = self.upload_scratch(encoded, &mut bytes, &mut spans)?;
         self.flush_atlas_tiles(&mut bytes);
 
+        let compute_stamped = !encoded.compute.is_empty() && self.compute_queries.is_some();
         Ok(Upload {
             rect_instances,
             quad_instances,
             scratch_view,
             bytes,
             time: started.elapsed(),
+            spans,
+            compute_stamped,
         })
     }
 
@@ -104,6 +115,7 @@ impl Device {
         &mut self,
         encoded: &Encoded,
         bytes: &mut u64,
+        spans: &mut Vec<(&'static str, Duration)>,
     ) -> Result<Option<(wgpu::Texture, wgpu::TextureView)>, RenderError> {
         let Some(scratch) = encoded.scratch.as_ref() else {
             return Ok(None);
@@ -171,6 +183,8 @@ impl Device {
                 self.limits.max_frame_bytes,
                 &texture,
                 &encoded.compute,
+                self.compute_queries.as_ref(),
+                spans,
             )?;
             *bytes = bytes.saturating_add(
                 self.segment_arena

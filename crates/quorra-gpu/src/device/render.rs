@@ -206,9 +206,11 @@ impl Device {
         let paint_started = Instant::now();
         let paint_bytes = self.ensure_paint_textures(encoded)?;
         let paint_time = paint_started.elapsed();
-        let upload = self.upload(encoded)?;
+        let mut upload = self.upload(encoded)?;
         let upload_time = upload.time.saturating_add(paint_time);
         let upload_bytes = upload.bytes.saturating_add(paint_bytes);
+        let upload_spans = std::mem::take(&mut upload.spans);
+        let compute_stamped = upload.compute_stamped;
 
         // Every refusal a scene can earn has been taken; bind the target last, so
         // the acquire happens only for a frame that will run.
@@ -247,6 +249,7 @@ impl Device {
         phases.push(("target acquire", acquire));
         phases.push(("present", present_started.elapsed()));
         phases.extend(encode_phases);
+        phases.extend(upload_spans);
         let (execute, provenance) = timing::read_pass(
             &self.gpu,
             self.timestamps,
@@ -255,6 +258,34 @@ impl Device {
             "content pass",
             &mut phases,
         )?;
+        // The compute lane's own device time, invisible to the frame's one query
+        // because its dispatches run in submissions of their own before the content
+        // pass — the bulk of what the caller's ADR 0084 could only call
+        // "unattributed". Read only on a frame the lane stamped: an unstamped frame's
+        // buffers hold an older frame's ticks.
+        if compute_stamped && let Some(q) = self.compute_queries.as_ref() {
+            timing::read_pass(
+                &self.gpu,
+                self.timestamps,
+                Some(&q.count),
+                Duration::ZERO,
+                "compute count pass",
+                &mut phases,
+            )?;
+            timing::read_pass(
+                &self.gpu,
+                self.timestamps,
+                Some(&q.coverage),
+                Duration::ZERO,
+                "compute emit+deposit",
+                &mut phases,
+            )?;
+        }
+        if provenance == TimingProvenance::TimestampQueries {
+            // What the content submission cost beyond its own pass: recording, submit,
+            // and the wait — host-side, and until now folded silently into the wall.
+            phases.push(("content beyond pass", execute_wall.saturating_sub(execute)));
+        }
         // Read, so the buffers are unmapped and the set is the next frame's to use.
         // Reached only on the `?` above succeeding, which is the whole condition: a
         // query whose read failed is dropped here instead, and the frame after it makes

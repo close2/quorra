@@ -263,6 +263,7 @@ impl Device {
         // Before the device is assembled, because the constructor owns `gpu` until then
         // — and this is the point of making it here at all (ADR 0031).
         let pass_query_at_startup = timestamps.map(|_| PassQuery::new(&gpu));
+        let compute_queries = timestamps.map(|_| crate::compute::ComputeQueries::new(&gpu));
 
         let max_dimension = gpu.limits().max_texture_dimension_2d;
         // Built here rather than sized a second way for `Limits`: the atlas's own
@@ -317,6 +318,7 @@ impl Device {
             // constructed off the critical path by every host that follows §7's advice
             // — where a first frame is on it by definition (ADR 0031).
             pass_query: pass_query_at_startup,
+            compute_queries,
             surface: surface_state,
             startup: StartupSteps {
                 instance_creation: pre.instance_creation,

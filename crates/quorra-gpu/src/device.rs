@@ -178,6 +178,13 @@ pub struct Device {
     /// one frame after a read fails, which is what returns a poisoned map buffer to a
     /// fresh one.
     pass_query: Option<PassQuery>,
+    /// The compute lane's two pass queries — count, and emit+deposit — kept for the
+    /// device's life exactly as [`Self::pass_query`] is, and absent on the same
+    /// conditions. They exist because the lane's dispatches run in submissions of
+    /// their own *before* the content pass, so its device time was invisible to the
+    /// one query the frame had: the caller's ADR 0084 carried ~25 ms of "unattributed"
+    /// per worst-page frame, and most of it was this lane's.
+    compute_queries: Option<crate::compute::ComputeQueries>,
     /// The surface, and who has it: this device, a [`Presenter`](crate::present::Presenter)
     /// it handed out, or nobody because there never was one (ADR 0056).
     surface: SurfaceSlot,

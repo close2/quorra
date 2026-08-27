@@ -697,6 +697,31 @@ fn grid(jobs: u32) -> (u32, u32) {
     (1024, jobs.div_ceil(65536).max(1))
 }
 
+/// The lane's two timestamp queries: the count pass, and the emit+deposit pair.
+///
+/// Kept for the device's life exactly as the frame's `PassQuery` is (ADR 0031). The
+/// lane's dispatches run in submissions of their own before the content pass, so
+/// without these its device time was invisible to the frame's one query — the
+/// caller's ADR 0084 carried ~25 ms of "unattributed" per worst-page frame.
+#[derive(Debug)]
+pub(crate) struct ComputeQueries {
+    /// Begin/end of the count dispatch.
+    pub(crate) count: crate::timing::PassQuery,
+    /// Begin of the emit dispatch, end of the deposit dispatch: one span for the
+    /// submission that draws, because the two run back to back on one queue and the
+    /// seam between them is not a number anybody acts on.
+    pub(crate) coverage: crate::timing::PassQuery,
+}
+
+impl ComputeQueries {
+    pub(crate) fn new(gpu: &wgpu::Device) -> Self {
+        Self {
+            count: crate::timing::PassQuery::new(gpu),
+            coverage: crate::timing::PassQuery::new(gpu),
+        }
+    }
+}
+
 /// Runs the lane: residency, count, exact allocation, emit, deposit, and the image
 /// round-trip.
 ///
@@ -722,9 +747,12 @@ pub(crate) fn dispatch_into(
     max_frame_bytes: u64,
     sheet: &wgpu::Texture,
     compute: &ComputeSheet,
+    queries: Option<&ComputeQueries>,
+    spans: &mut Vec<(&'static str, std::time::Duration)>,
 ) -> Result<(), RenderError> {
     let pipelines = &*pipelines.get_or_insert_with(|| Pipelines::compile(gpu));
     // Residency first: every outline this frame draws, uploaded once ever.
+    let residency_started = std::time::Instant::now();
     let mut records: Vec<u32> = Vec::with_capacity(compute.tiles.len().saturating_mul(TILE_U32S));
     for tile in &compute.tiles {
         let segments: &[Segment] = resources
@@ -756,6 +784,7 @@ pub(crate) fn dispatch_into(
             0,
         ]);
     }
+    spans.push(("compute residency+records", residency_started.elapsed()));
     let Some(arena_buffer) = arena.buffer.as_ref() else {
         return Ok(()); // no outline had segments: nothing to flatten, nothing to draw
     };
@@ -840,7 +869,14 @@ pub(crate) fn dispatch_into(
         label: Some("quorra compute count"),
     });
     {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: queries.map(|q| wgpu::ComputePassTimestampWrites {
+                query_set: &q.count.set,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            }),
+        });
         pass.set_pipeline(&pipelines.count);
         pass.set_bind_group(0, &count_group, &[]);
         let (x, y) = grid(tile_count);
@@ -853,6 +889,11 @@ pub(crate) fn dispatch_into(
         0,
         u64::from(tile_count).saturating_mul(4),
     );
+    if let Some(q) = queries {
+        encoder.resolve_query_set(&q.count.set, 0..2, &q.count.resolve, 0);
+        encoder.copy_buffer_to_buffer(&q.count.resolve, 0, &q.count.map, 0, 16);
+    }
+    let stall_started = std::time::Instant::now();
     queue.submit([encoder.finish()]);
     let slice = readback.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
@@ -860,6 +901,7 @@ pub(crate) fn dispatch_into(
         .map_err(|_| RenderError::ReadbackFailed {
             detail: "the device did not answer the edge count's map".into(),
         })?;
+    spans.push(("compute count stall", stall_started.elapsed()));
     let counts: Vec<u32> = {
         let mapped = slice
             .get_mapped_range()
@@ -947,14 +989,28 @@ pub(crate) fn dispatch_into(
         extent,
     );
     {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: queries.map(|q| wgpu::ComputePassTimestampWrites {
+                query_set: &q.coverage.set,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: None,
+            }),
+        });
         pass.set_pipeline(&pipelines.emit);
         pass.set_bind_group(0, &emit_group, &[]);
         let (x, y) = grid(tile_count);
         pass.dispatch_workgroups(x, y, 1);
     }
     {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: queries.map(|q| wgpu::ComputePassTimestampWrites {
+                query_set: &q.coverage.set,
+                beginning_of_pass_write_index: None,
+                end_of_pass_write_index: Some(1),
+            }),
+        });
         pass.set_pipeline(&pipelines.deposit);
         pass.set_bind_group(0, &deposit_group, &[]);
         let (x, y) = grid(compute.rows);
@@ -968,6 +1024,10 @@ pub(crate) fn dispatch_into(
         sheet_copy,
         extent,
     );
+    if let Some(q) = queries {
+        encoder.resolve_query_set(&q.coverage.set, 0..2, &q.coverage.resolve, 0);
+        encoder.copy_buffer_to_buffer(&q.coverage.resolve, 0, &q.coverage.map, 0, 16);
+    }
     queue.submit([encoder.finish()]);
     Ok(())
 }
