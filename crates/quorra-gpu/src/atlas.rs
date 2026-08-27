@@ -812,11 +812,15 @@ mod tests {
             phase: [0.0, 0.0],
         };
         assert!(
-            !atlas.prospect(placement, 16, 16, true, false).worth_caching(),
+            !atlas
+                .prospect(placement, 16, 16, true, false)
+                .worth_caching(),
             "written once, read once: the cache's whole cost and none of its benefit"
         );
         assert!(
-            atlas.prospect(placement, 16, 16, false, false).worth_caching(),
+            atlas
+                .prospect(placement, 16, 16, false, false)
+                .worth_caching(),
             "placed more than once, so the second placement reads what the first wrote"
         );
     }
