@@ -722,34 +722,45 @@ impl ComputeQueries {
     }
 }
 
-/// Runs the lane: residency, count, exact allocation, emit, deposit, and the image
-/// round-trip.
+/// The count pass in flight: everything [`finish_dispatch`] needs to collect it and
+/// run the emit and deposit behind it.
 ///
-/// # Errors
+/// The split exists so the host does not stand idle while the device counts: the
+/// count is submitted first ([`submit_count`]), the frame's other staging — instance
+/// buffers, the atlas flush — runs beside it, and only then does the host sit down to
+/// wait for the number it cannot proceed without (ADR 0088).
+#[derive(Debug)]
+pub(crate) struct PendingCount {
+    tiles_buffer: wgpu::Buffer,
+    counts_buffer: wgpu::Buffer,
+    params_buffer: wgpu::Buffer,
+    readback: wgpu::Buffer,
+    tile_count: u32,
+}
+
+/// Residency, the tile records, and the count dispatch — submitted, not waited for.
 ///
-/// [`RenderError::FrameBudgetExceeded`] when the counted edges would not fit the frame
-/// budget — the magnification made more geometry than the host allowed, named before
-/// it is allocated — and [`RenderError::ReadbackFailed`] when the device would not
-/// answer the count's map.
-#[allow(clippy::too_many_lines)]
-// one frame's pass chain, in submission order — the
-// stages read top to bottom and a split would scatter the ordering argument
-#[allow(clippy::too_many_arguments)] // the device's own fields, threaded once from
-// the one call site in `staging.rs`
+/// `Ok(None)` when no outline had segments: nothing to flatten, nothing to draw, and
+/// nothing for [`finish_dispatch`] to do.
+///
+/// The `Result` is shape rather than fallibility today — the arena's `ensure` refusal
+/// is absorbed as an empty range exactly as the one-call era did — and it stays
+/// because the split's caller (`staging.rs`) threads one `?` through both halves.
+#[allow(clippy::unnecessary_wraps)]
+#[allow(clippy::too_many_lines)] // one submission's chain, in order, as dispatch_into was
+#[allow(clippy::too_many_arguments)] // the device's own fields, threaded once
 #[allow(clippy::cast_possible_truncation)] // strides and word counts are bounded by
 // the device's texture dimension and by the checks above each cast
-pub(crate) fn dispatch_into(
+pub(crate) fn submit_count(
     gpu: &wgpu::Device,
     queue: &wgpu::Queue,
     pipelines: &mut Option<Pipelines>,
     arena: &mut SegmentArena,
     resources: &crate::resources::ResourceStore,
-    max_frame_bytes: u64,
-    sheet: &wgpu::Texture,
     compute: &ComputeSheet,
     queries: Option<&ComputeQueries>,
     spans: &mut Vec<(&'static str, std::time::Duration)>,
-) -> Result<(), RenderError> {
+) -> Result<Option<PendingCount>, RenderError> {
     let pipelines = &*pipelines.get_or_insert_with(|| Pipelines::compile(gpu));
     // Residency first: every outline this frame draws, uploaded once ever.
     let residency_started = std::time::Instant::now();
@@ -786,7 +797,7 @@ pub(crate) fn dispatch_into(
     }
     spans.push(("compute residency+records", residency_started.elapsed()));
     let Some(arena_buffer) = arena.buffer.as_ref() else {
-        return Ok(()); // no outline had segments: nothing to flatten, nothing to draw
+        return Ok(None); // no outline had segments: nothing to flatten, nothing to draw
     };
     let record_bytes: Vec<u8> = records.iter().flat_map(|word| word.to_le_bytes()).collect();
     let storage = |label: &str, bytes: &[u8]| {
@@ -893,8 +904,90 @@ pub(crate) fn dispatch_into(
         encoder.resolve_query_set(&q.count.set, 0..2, &q.count.resolve, 0);
         encoder.copy_buffer_to_buffer(&q.count.resolve, 0, &q.count.map, 0, 16);
     }
-    let stall_started = std::time::Instant::now();
     queue.submit([encoder.finish()]);
+    Ok(Some(PendingCount {
+        tiles_buffer,
+        counts_buffer,
+        params_buffer,
+        readback,
+        tile_count,
+    }))
+}
+
+/// Collect the count, allocate exactly, and run the emit, the deposit and the image
+/// round-trip behind it.
+///
+/// # Errors
+///
+/// [`RenderError::FrameBudgetExceeded`] when the counted edges would not fit the frame
+/// budget — the magnification made more geometry than the host allowed, named before
+/// it is allocated — and [`RenderError::ReadbackFailed`] when the device would not
+/// answer the count's map.
+#[allow(clippy::too_many_lines)]
+// one frame's pass chain, in submission order — the
+// stages read top to bottom and a split would scatter the ordering argument
+#[allow(clippy::too_many_arguments)] // the device's own fields, threaded once from
+// the one call site in `staging.rs`
+#[allow(clippy::cast_possible_truncation)] // strides and word counts are bounded by
+// the device's texture dimension and by the checks above each cast
+pub(crate) fn finish_dispatch(
+    gpu: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipelines: &mut Option<Pipelines>,
+    arena: &SegmentArena,
+    max_frame_bytes: u64,
+    sheet: &wgpu::Texture,
+    compute: &ComputeSheet,
+    queries: Option<&ComputeQueries>,
+    spans: &mut Vec<(&'static str, std::time::Duration)>,
+    pending: PendingCount,
+) -> Result<(), RenderError> {
+    let pipelines = &*pipelines.get_or_insert_with(|| Pipelines::compile(gpu));
+    let PendingCount {
+        tiles_buffer,
+        counts_buffer,
+        params_buffer,
+        readback,
+        tile_count,
+    } = pending;
+    let Some(arena_buffer) = arena.buffer.as_ref() else {
+        return Ok(()); // submit_count answered None before this could be reached
+    };
+    let stride = compute.stride() as u32;
+    let sized = |label: &str, bytes: u64, extra: wgpu::BufferUsages| {
+        gpu.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: bytes.max(16),
+            usage: wgpu::BufferUsages::STORAGE | extra,
+            mapped_at_creation: false,
+        })
+    };
+    let storage = |label: &str, bytes: &[u8]| {
+        let buffer = gpu.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: bytes.len().max(16) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, bytes);
+        buffer
+    };
+    let flatten_group =
+        |pipeline: &wgpu::ComputePipeline, offsets: &wgpu::Buffer, edges: &wgpu::Buffer| {
+            gpu.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("quorra compute flatten"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    entry(0, arena_buffer),
+                    entry(1, &tiles_buffer),
+                    entry(2, &counts_buffer),
+                    entry(3, offsets),
+                    entry(4, edges),
+                    entry(5, &params_buffer),
+                ],
+            })
+        };
+    let stall_started = std::time::Instant::now();
     let slice = readback.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
     gpu.poll(wgpu::PollType::wait_indefinitely())

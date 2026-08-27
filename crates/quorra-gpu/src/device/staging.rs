@@ -52,6 +52,36 @@ impl Device {
         // The globals are per plan now (ADR 0036) and made where the pass is recorded,
         // so nothing is charged here for them.
         let mut bytes = 0_u64;
+        // The compute lane's count is submitted *first*, so the device counts while
+        // the host stages the instance buffers and flushes the atlas — the stall at
+        // the collect then waits only for what is left of the count (ADR 0088). The
+        // sheet texture exists before it because the lane's image round-trip names
+        // it; nothing else about the lane runs until the staging in between is done.
+        let scratch_view = self.create_scratch_sheet(encoded, &mut bytes)?;
+        let pending = if encoded.compute.is_empty() {
+            None
+        } else {
+            bytes = bytes.saturating_add(encoded.compute.device_bytes());
+            // The arena's growth is this frame's staging too: the first frame that
+            // draws an outline pays its residency once, and the counter says so.
+            let arena_before = self.segment_arena.device_bytes();
+            let pending = crate::compute::submit_count(
+                &self.gpu,
+                &self.queue,
+                &mut self.compute_pipelines,
+                &mut self.segment_arena,
+                &self.resources,
+                &encoded.compute,
+                self.compute_queries.as_ref(),
+                &mut spans,
+            )?;
+            bytes = bytes.saturating_add(
+                self.segment_arena
+                    .device_bytes()
+                    .saturating_sub(arena_before),
+            );
+            pending
+        };
         let make_instances = |gpu: &wgpu::Device, queue: &wgpu::Queue, label, data: &[u8]| {
             if data.is_empty() {
                 None
@@ -81,9 +111,42 @@ impl Device {
         bytes = bytes
             .saturating_add(encoded.rect_instances.len() as u64)
             .saturating_add(encoded.quad_instances.len() as u64);
-
-        let scratch_view = self.upload_scratch(encoded, &mut bytes, &mut spans)?;
         self.flush_atlas_tiles(&mut bytes);
+        // The staging is done; now collect the count and run the passes behind it.
+        if let (Some(pending), Some((texture, _))) = (pending, scratch_view.as_ref()) {
+            crate::compute::finish_dispatch(
+                &self.gpu,
+                &self.queue,
+                &mut self.compute_pipelines,
+                &self.segment_arena,
+                self.limits.max_frame_bytes,
+                texture,
+                &encoded.compute,
+                self.compute_queries.as_ref(),
+                &mut spans,
+                pending,
+            )?;
+        }
+        if !encoded.winding.is_empty()
+            && let Some((_, view)) = scratch_view.as_ref()
+        {
+            bytes = bytes.saturating_add(encoded.winding.device_bytes());
+            crate::winding::render_into(
+                &self.gpu,
+                &self.queue,
+                &self.pipelines,
+                &mut self.winding_texture,
+                view,
+                &encoded.winding,
+                self.coverage_samples,
+                if encoded.scratch.as_ref().is_none_or(|s| s.data.is_empty()) {
+                    crate::winding::SheetUse::LaneAlone
+                } else {
+                    crate::winding::SheetUse::BesideCpuBytes
+                },
+                self.limits.max_target_size,
+            )?;
+        }
 
         let compute_stamped = !encoded.compute.is_empty() && self.compute_queries.is_some();
         Ok(Upload {
@@ -111,11 +174,14 @@ impl Device {
     /// replayed by later frames, so the sheet it names has to survive its first upload
     /// (ADR 0048, and ADR 0045's invalidation list named this as the one plumbing
     /// change the design needs).
-    fn upload_scratch(
+    // The `Result` is the seam's shape: the two lane dispatches that used to live
+    // here kept their refusals, and the caller threads one `?` through all three
+    // steps of the sheet's life.
+    #[allow(clippy::unnecessary_wraps)]
+    fn create_scratch_sheet(
         &mut self,
         encoded: &Encoded,
         bytes: &mut u64,
-        spans: &mut Vec<(&'static str, Duration)>,
     ) -> Result<Option<(wgpu::Texture, wgpu::TextureView)>, RenderError> {
         let Some(scratch) = encoded.scratch.as_ref() else {
             return Ok(None);
@@ -169,47 +235,6 @@ impl Device {
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         *bytes = bytes.saturating_add(scratch.data.len() as u64);
-        if !encoded.compute.is_empty() {
-            *bytes = bytes.saturating_add(encoded.compute.device_bytes());
-            // The arena's growth is this frame's staging too: the first frame that
-            // draws an outline pays its residency once, and the counter says so.
-            let arena_before = self.segment_arena.device_bytes();
-            crate::compute::dispatch_into(
-                &self.gpu,
-                &self.queue,
-                &mut self.compute_pipelines,
-                &mut self.segment_arena,
-                &self.resources,
-                self.limits.max_frame_bytes,
-                &texture,
-                &encoded.compute,
-                self.compute_queries.as_ref(),
-                spans,
-            )?;
-            *bytes = bytes.saturating_add(
-                self.segment_arena
-                    .device_bytes()
-                    .saturating_sub(arena_before),
-            );
-        }
-        if !winding.is_empty() {
-            *bytes = bytes.saturating_add(winding.device_bytes());
-            crate::winding::render_into(
-                &self.gpu,
-                &self.queue,
-                &self.pipelines,
-                &mut self.winding_texture,
-                &view,
-                winding,
-                self.coverage_samples,
-                if scratch.data.is_empty() {
-                    crate::winding::SheetUse::LaneAlone
-                } else {
-                    crate::winding::SheetUse::BesideCpuBytes
-                },
-                self.limits.max_target_size,
-            )?;
-        }
         Ok(Some((texture, view)))
     }
 
