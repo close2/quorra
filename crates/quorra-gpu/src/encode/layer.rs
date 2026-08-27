@@ -236,6 +236,11 @@ impl Encoder<'_> {
     /// Realise a referenced soft mask's plan on first use; masks reference only
     /// earlier masks (the builder enforced it), so this terminates.
     pub(super) fn use_mask(&mut self, mask: Option<MaskId>) -> Result<Option<u32>, RenderError> {
+        // A soft mask is realised once per frame and sampled by many draws: frame-wide
+        // state no record rebuilds, so a frame that uses one re-walks (`replay.rs`).
+        if mask.is_some() {
+            self.unreplayable();
+        }
         let Some(id) = mask else { return Ok(None) };
         let index = id.0 as usize;
         if self.mask_plans[index].is_none() {

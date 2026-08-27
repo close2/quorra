@@ -92,6 +92,18 @@ pub(crate) struct EncodeKey {
 }
 
 impl EncodeKey {
+    /// Whether an encode held under `self` may be **record-replayed** for a frame
+    /// keyed `asked` (`encode/replay.rs`, ADR 0087): same device, same lane, same
+    /// resource generation — the records carry denormalised control boxes and collapse
+    /// tables, which resource ids' never-rebound guarantee keeps true — at **any**
+    /// viewport. The atlas generation is deliberately not compared: a replayable
+    /// encode named no atlas tile, which is part of what admission means.
+    pub(crate) fn replay_compatible(&self, asked: &EncodeKey) -> bool {
+        self.device == asked.device
+            && self.coverage == asked.coverage
+            && self.resource_generation == asked.resource_generation
+    }
+
     /// The key of the frame about to be encoded. Built by the device, which is where
     /// every one of these lives.
     pub(crate) fn new(
@@ -263,15 +275,39 @@ impl RetainedScene {
     pub(crate) fn prepare<E>(
         &mut self,
         key: EncodeKey,
-        encode: impl FnOnce(&Scene) -> Result<Encoded, E>,
+        build: impl FnOnce(&Scene, Option<&crate::encode::ReplayList>) -> Result<Encoded, E>,
     ) -> Result<(EncodeSource, &Encoded), E> {
         // Taken and put back rather than matched in place: `Option::insert` returns the
         // stored value infallibly, so the encode this call draws is the encode this
         // call stored, with no unwrap and no unreachable arm between the two.
         let (source, held) = match self.held.take() {
             Some(held) if held.key == key => (EncodeSource::Replayed, held),
+            // A different viewport over the same everything-else, and the held encode
+            // wrote its records down: the walk is replayed from them instead of the
+            // scene (ADR 0087). A failure falls through to nothing held, exactly as a
+            // failed encode does — what was held was for another viewport anyway.
+            Some(held) if held.key.replay_compatible(&key) && held.encoded.replay.is_some() => {
+                // Admission was checked one line up; a race between the two reads is
+                // not possible on `&mut self`.
+                #[allow(clippy::expect_used)]
+                let list = held
+                    .encoded
+                    .replay
+                    .as_ref()
+                    .expect("checked by the guard above");
+                let encoded = build(&self.scene, Some(list))?;
+                let bytes = encoded.retained_bytes();
+                (
+                    EncodeSource::RecordReplayed,
+                    Held {
+                        key,
+                        encoded,
+                        bytes,
+                    },
+                )
+            }
             _ => {
-                let encoded = encode(&self.scene)?;
+                let encoded = build(&self.scene, None)?;
                 let bytes = encoded.retained_bytes();
                 let held = Held {
                     key,

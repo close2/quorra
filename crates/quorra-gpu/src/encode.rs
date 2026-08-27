@@ -101,6 +101,7 @@ mod parallel;
 mod plan;
 mod rare;
 mod rect;
+mod replay;
 mod residue;
 mod scratch;
 mod stroke;
@@ -118,6 +119,7 @@ use device_space::target_rect;
 use encoded::finish;
 use instance::instance_reserve;
 use parallel::Job;
+pub(crate) use replay::{ReplayList, ReplayRecord};
 
 use crate::atlas::{AtlasStore, GlyphKey};
 use crate::census::Census;
@@ -180,6 +182,16 @@ struct Encoder<'a> {
     scratch: ScratchPacker,
     rect_instances: Vec<u8>,
     quad_instances: Vec<u8>,
+    /// The walk's viewport-free half, recorded as it goes (`replay.rs`, ADR 0087):
+    /// `Some` while every structure met so far can be replayed per record, `None` the
+    /// moment one cannot. Attempted only under [`Coverage::Compute`].
+    replay: Option<ReplayList>,
+    /// The scene index of the command being encoded, for [`Encoder::record_slow`].
+    current_command: usize,
+    /// Where the current command's records begin, so a downgrade replaces exactly them.
+    command_records_start: usize,
+    /// Counters seeded by a replay, which skips the probes that count them.
+    seeded_counts: Option<(u32, u32)>,
     /// The plan under construction: `usize::MAX` is the root, anything else an
     /// index into `layers`.
     current_plan: usize,
@@ -284,7 +296,165 @@ pub(crate) fn encode(
         });
     }
 
-    let mut encoder = Encoder {
+    let mut encoder = encoder_for(
+        scene,
+        viewport,
+        frame_budget_bytes,
+        max_dimension,
+        resources,
+        atlas,
+        quantum,
+        coverage,
+        coverage_samples,
+        instrument,
+        threads,
+        needed,
+        match coverage {
+            // The lane the caller moves views on; the other lanes' encodes name atlas
+            // and winding tiles, which are frame-wide state no record replays.
+            Coverage::Compute => Some(ReplayList::default()),
+            Coverage::Cpu | Coverage::Gpu => None,
+        },
+        None,
+    );
+
+    for (index, command) in commands.iter().enumerate() {
+        encoder.command(index, command)?;
+    }
+    // The last run of marks, which no later command drained. Everything below reads the
+    // sheet, the budget and the plans, and every one of those is what the queue has yet
+    // to touch.
+    encoder.drain_queue()?;
+
+    finish(encoder, commands.len())
+}
+
+/// The walk, replayed from its records at a new viewport (`replay.rs`, ADR 0087).
+///
+/// Same construction as [`encode`], then the record list drives instead of the scene:
+/// a [`ReplayRecord::Rect`] goes back through `encode_rect` (already probe-free), a
+/// [`ReplayRecord::SolidFill`] through the trimmed three-step arm, and a
+/// [`ReplayRecord::Slow`] re-dispatches its scene command through the ordinary walk.
+/// Encounter order is the records' order, which is the walk's, so the ops and both
+/// instance streams come out in draw order exactly as a re-walk's would.
+///
+/// The rebuilt encode records itself as it goes — the fast arms re-push their own
+/// records, a slow command re-records through `command` — so the frame it produces is
+/// as replayable as the one it came from.
+#[allow(clippy::too_many_arguments)] // encode()'s own signature plus the list
+pub(crate) fn replay(
+    scene: &Scene,
+    viewport: &Viewport<'_>,
+    frame_budget_bytes: u64,
+    max_dimension: u32,
+    resources: &ResourceStore,
+    atlas: &mut AtlasStore,
+    quantum: Option<u16>,
+    coverage: Coverage,
+    coverage_samples: u32,
+    instrument: bool,
+    threads: usize,
+    list: &ReplayList,
+) -> Result<Encoded, RenderError> {
+    let commands = scene.commands();
+    let per_command = RECT_INSTANCE_STRIDE.saturating_add(QUAD_INSTANCE_STRIDE);
+    let needed = (commands.len() as u64).saturating_mul(per_command);
+    if needed > frame_budget_bytes {
+        return Err(RenderError::FrameBudgetExceeded {
+            needed,
+            budget: frame_budget_bytes,
+        });
+    }
+    let mut encoder = encoder_for(
+        scene,
+        viewport,
+        frame_budget_bytes,
+        max_dimension,
+        resources,
+        atlas,
+        quantum,
+        coverage,
+        coverage_samples,
+        instrument,
+        threads,
+        needed,
+        Some(ReplayList::default()),
+        Some((list.distinct_outlines, list.segments)),
+    );
+
+    for record in &list.records {
+        match record {
+            ReplayRecord::Rect {
+                rect,
+                transform,
+                color,
+                clip,
+            } => {
+                encoder.begin_command_records(0);
+                encoder.record(record.clone());
+                encoder.encode_rect(*rect, *transform, *color, *clip, None)?;
+            }
+            ReplayRecord::SolidFill {
+                outline,
+                control_box,
+                rect_hint,
+                marks,
+                transform,
+                even_odd,
+                color,
+                clip,
+                style,
+            } => {
+                encoder.begin_command_records(0);
+                encoder.record(record.clone());
+                encoder.replay_solid_fill(
+                    *outline,
+                    *control_box,
+                    *rect_hint,
+                    marks,
+                    *transform,
+                    *even_odd,
+                    *color,
+                    *clip,
+                    *style,
+                )?;
+            }
+            ReplayRecord::Slow { index } => {
+                let index = *index as usize;
+                // Cannot miss: records live inside the `Encoded` held beside the scene
+                // they index (`retained::Held`), and `set_scene`/`forget` drop them with
+                // it — so the scene here is the scene the walk recorded. The bound is
+                // ownership's, not a runtime promise.
+                let command = &commands[index];
+                encoder.command(index, command)?;
+            }
+        }
+    }
+    encoder.drain_queue()?;
+    finish(encoder, commands.len())
+}
+
+/// One frame's [`Encoder`], as both the walk ([`encode`]) and the record replay
+/// ([`replay`]) construct it — one literal, so the two cannot come to disagree about
+/// an initial state.
+#[allow(clippy::too_many_arguments)] // the encode's own signature, shared once
+fn encoder_for<'a>(
+    scene: &'a Scene,
+    viewport: &'a Viewport<'a>,
+    frame_budget_bytes: u64,
+    max_dimension: u32,
+    resources: &'a ResourceStore,
+    atlas: &'a mut AtlasStore,
+    quantum: Option<u16>,
+    coverage: Coverage,
+    coverage_samples: u32,
+    instrument: bool,
+    threads: usize,
+    needed: u64,
+    replay: Option<ReplayList>,
+    seeded_counts: Option<(u32, u32)>,
+) -> Encoder<'a> {
+    Encoder {
         scene,
         viewport,
         visible: target_rect(viewport),
@@ -294,18 +464,10 @@ pub(crate) fn encode(
         compute: crate::compute::ComputeSheet::default(),
         // One pass over the commands before the walk: the lane a fill takes depends on
         // how many *other* fills share its tile, which is not knowable from the fill
-        // (ADR 0029).
-        //
-        // **Only the GPU lane reads it**, and `take_gpu_lane` answers `false` on sight
-        // under `Coverage::Cpu` — so the caller's default configuration must not pay for
-        // the walk. Measured at 25 µs on a 5 933-command page against an encode of 80,
-        // which is a quarter of a phase this project measures in microseconds. An empty
-        // census answers "not placed once" to every shape, which is the lane every fill
-        // would have taken anyway.
+        // (ADR 0029). Only the GPU lane reads it; an empty census answers "not placed
+        // once" to every shape, which is the lane every fill would have taken anyway.
         census: match coverage {
             Coverage::Gpu => Census::of(scene),
-            // The compute lane has no atlas in front of it, so the census — which only
-            // the cache prospect reads — has nothing to answer for it either.
             Coverage::Cpu | Coverage::Compute => Census::default(),
         },
         resources,
@@ -315,21 +477,21 @@ pub(crate) fn encode(
         residue: ResidueRegions::of(scene, residue::budget(frame_budget_bytes)),
         // The scratch sheet spans the full device dimension both ways: its *byte*
         // cost is charged tile by tile against the frame budget, so the dimension
-        // is capacity, not commitment — and a 2048-texel width refused real pages
-        // whose coverage was well inside the budget (QUORRA_FEEDBACK.md §3).
+        // is capacity, not commitment (QUORRA_FEEDBACK.md §3).
         scratch: ScratchPacker::new(max_dimension, max_dimension),
-        // Sized from the count that was just checked, rather than grown into. The
-        // budget above has already *charged* one rect and one quad per command, so
-        // reserving that much allocates exactly what the frame was priced at — which
-        // is §5's "count then allocate" taken literally, where growing is the same
-        // bytes reached through a dozen reallocations. It over-reserves whichever of
-        // the two lanes a page does not use (a page of glyphs never writes a rect
-        // instance), and that is the stated cost: virtual bytes already inside the
-        // budget, never touched, against the growth measured on the dense-text
-        // archetype at 0.13 M of a 19.14 M-instruction encode (callgrind,
-        // `doc/PLAN.md` 2026-08-14).
-        rect_instances: Vec::with_capacity(instance_reserve(commands.len(), RECT_INSTANCE_STRIDE)),
-        quad_instances: Vec::with_capacity(instance_reserve(commands.len(), QUAD_INSTANCE_STRIDE)),
+        // Sized from the count the caller just checked (§5: count then allocate).
+        rect_instances: Vec::with_capacity(instance_reserve(
+            scene.commands().len(),
+            RECT_INSTANCE_STRIDE,
+        )),
+        quad_instances: Vec::with_capacity(instance_reserve(
+            scene.commands().len(),
+            QUAD_INSTANCE_STRIDE,
+        )),
+        replay,
+        current_command: 0,
+        command_records_start: 0,
+        seeded_counts,
         current_plan: usize::MAX,
         root: LayerPlan::default(),
         layers: Vec::new(),
@@ -360,21 +522,12 @@ pub(crate) fn encode(
         queued_weight: 0,
         queued_bytes: 0,
         in_flight_limit: parallel::in_flight_limit(frame_budget_bytes),
-    };
-
-    for (index, command) in commands.iter().enumerate() {
-        encoder.command(index, command)?;
     }
-    // The last run of marks, which no later command drained. Everything below reads the
-    // sheet, the budget and the plans, and every one of those is what the queue has yet
-    // to touch.
-    encoder.drain_queue()?;
-
-    finish(encoder, commands.len())
 }
 
 impl Encoder<'_> {
     fn command(&mut self, index: usize, command: &Command) -> Result<(), RenderError> {
+        self.begin_command_records(index);
         match command {
             Command::Rect {
                 rect,
@@ -382,7 +535,17 @@ impl Encoder<'_> {
                 color,
                 clip,
                 mask,
-            } => self.encode_rect(*rect, *transform, *color, *clip, *mask),
+            } => {
+                // Probe-free at every viewport, so the record is the command itself. A
+                // mask on it takes the whole frame off the replay road (`use_mask`).
+                self.record(ReplayRecord::Rect {
+                    rect: *rect,
+                    transform: *transform,
+                    color: *color,
+                    clip: *clip,
+                });
+                self.encode_rect(*rect, *transform, *color, *clip, *mask)
+            }
             Command::Fill {
                 outline,
                 transform,
@@ -421,8 +584,18 @@ impl Encoder<'_> {
                 clip,
                 blend,
                 mask,
-            } => self.encode_image(*image, *transform, *alpha, *filter, *clip, *blend, *mask),
-            Command::Group { spec, commands } => self.encode_group(spec, commands),
+            } => {
+                // Per-command and self-contained, so the replay re-dispatches it: the
+                // few pay full price, in order.
+                self.record_slow();
+                self.encode_image(*image, *transform, *alpha, *filter, *clip, *blend, *mask)
+            }
+            Command::Group { spec, commands } => {
+                // A child layer is frame-wide state: its plan, its texture, its
+                // composite. No record rebuilds one.
+                self.unreplayable();
+                self.encode_group(spec, commands)
+            }
         }
     }
 

@@ -64,7 +64,7 @@ struct SolidFill<'a> {
 
 /// One §10.7.4 mark's ink: the command's own paint, resolved as far as a mark needs.
 #[derive(Clone, Copy)]
-enum MarkInk {
+pub(super) enum MarkInk {
     /// A solid colour, which may take the analytic rectangle lane.
     Solid(quorra_scene::Color),
     /// A resolved rare paint, which goes over a coverage quad.
@@ -153,6 +153,13 @@ impl<'a> Encoder<'a> {
             .ok_or(RenderError::UnknownOutline { outline })?;
         let to_device = compose(transform, self.viewport);
         let resolved = self.resolve_clip(clip)?;
+        // A residue clip multiplies into every tile from frame-wide rasterisations,
+        // and it also routes a compute-lane fill back through the cache lanes: no
+        // record rebuilds either, so the frame re-walks (`replay.rs`).
+        if resolved.residues.is_some() {
+            self.unreplayable();
+        }
+        self.record_fill(outline, stored, transform, rule, paint, clip, compose_mode);
         // The compute lane bounds by the resident control box's corners — for an
         // axis-preserving transform the same box to the bit, for a rotated one a
         // superset whose extra pixels read zero coverage (ADR 0083) — because the
@@ -286,6 +293,48 @@ impl<'a> Encoder<'a> {
         self.push_rare_coverage(rare, &polylines, rule, &resolved, style, mask)
     }
 
+    /// The fill's replay record, before any viewport question is asked: a fill culled
+    /// at *this* viewport may be visible at the one the records are replayed for, so
+    /// the cull must not decide whether it is remembered (`replay.rs`, ADR 0087). The
+    /// style is the same expression the solid arm computes; a blended fill re-enters
+    /// through a child layer, which takes the whole frame off the replay road before
+    /// the copy could lie.
+    #[allow(clippy::too_many_arguments)] // the fill's own fields, forwarded once
+    fn record_fill(
+        &mut self,
+        outline: OutlineId,
+        stored: &crate::resources::StoredOutline,
+        transform: Affine,
+        rule: FillRule,
+        paint: Paint,
+        clip: Option<ClipId>,
+        compose_mode: Compose,
+    ) {
+        let style = match compose_mode {
+            Compose::Src => DrawStyle::Knockout,
+            Compose::DestOut => DrawStyle::DestOut,
+            Compose::Plus => DrawStyle::Plus,
+            Compose::SrcOver => self.style,
+        };
+        if let Paint::Solid(color) = paint {
+            self.record(super::ReplayRecord::SolidFill {
+                outline: outline.0,
+                control_box: stored.control_box,
+                rect_hint: stored.rect_hint,
+                marks: stored.marks.clone(),
+                transform,
+                even_odd: rule == FillRule::EvenOdd,
+                color,
+                clip,
+                style,
+            });
+        } else {
+            // A rare paint re-resolves per frame; the replay re-dispatches the whole
+            // command, in order.
+            self.record_slow();
+        }
+    }
+
     /// The marks ISO 32000-2 §10.7.4 asks for, one per collapsed subpath, placed on
     /// this viewport's pixel grid from the resident collapse table
     /// ([`StoredOutline::marks`](crate::resources::StoredOutline)).
@@ -317,7 +366,7 @@ impl<'a> Encoder<'a> {
     /// No stretch at all — a placement that lengthens nothing — leaves no space for a
     /// mark to be stated in, and makes none: their `split_collapsed_fill` returns
     /// nothing on the same test.
-    fn encode_collapsed_marks(
+    pub(super) fn encode_collapsed_marks(
         &mut self,
         marks: &[crate::resources::CollapsedMark],
         to_device: &DeviceTransform,
@@ -458,7 +507,16 @@ impl<'a> Encoder<'a> {
     ) -> Result<(), RenderError> {
         let stored = fill.stored;
         if self.coverage == Coverage::Compute && resolved.residues.is_none() {
-            return self.fill_compute(fill, resolved);
+            return self.fill_compute(
+                fill.outline,
+                &fill.to_device,
+                fill.bounds,
+                fill.rule == Rule::EvenOdd,
+                fill.color,
+                fill.style,
+                fill.mask,
+                resolved,
+            );
         }
         let (bx0, by0, bx1, by1) = fill.bounds;
         let (tile_width, tile_height) = (tile_side(bx0, bx1), tile_side(by0, by1));
@@ -578,12 +636,25 @@ impl<'a> Encoder<'a> {
     /// them itself. The tile is the control hull's, a superset of the flattened
     /// geometry's, whose extra pixels read zero coverage. Taken before the cache is
     /// consulted, because there is no atlas in front of this lane.
-    fn fill_compute(
+    /// The compute lane's tile for one solid fill: cull to the visible tile, charge,
+    /// seat, record for the dispatch, and emit the quad that samples the result.
+    ///
+    /// Explicit arguments rather than the [`SolidFill`] bundle, because the record
+    /// replay (`replay.rs`, ADR 0087) reaches here with every input denormalised — the
+    /// bundle's `stored` borrow is the one thing a probe-free replay must not need.
+    #[allow(clippy::too_many_arguments)] // one tile's inputs, from two callers
+    pub(super) fn fill_compute(
         &mut self,
-        fill: &SolidFill<'a>,
+        outline: OutlineId,
+        to_device: &DeviceTransform,
+        bounds: (f32, f32, f32, f32),
+        even_odd: bool,
+        color: quorra_scene::Color,
+        style: DrawStyle,
+        mask: Option<u32>,
         resolved: &ResolvedClip,
     ) -> Result<(), RenderError> {
-        let Some((left, top, width, height)) = self.visible_tile(fill.bounds, resolved) else {
+        let Some((left, top, width, height)) = self.visible_tile(bounds, resolved) else {
             return Ok(());
         };
         self.charge_tile(width, height)?;
@@ -598,16 +669,22 @@ impl<'a> Encoder<'a> {
             .scratch
             .reserve(width, height)
             .ok_or_else(|| self.scratch.exhausted(width, height))?;
-        let device = fill.to_device;
         #[allow(clippy::cast_precision_loss)] // the corner is a device pixel, the
         // same cast the CPU rasteriser makes on the same value
         let corner = (left as f32, top as f32);
         if !self.compute.push_tile(
             seat,
             (corner.0, corner.1, width, height),
-            fill.rule == Rule::EvenOdd,
-            [device.a, device.b, device.c, device.d, device.e, device.f],
-            fill.outline.0,
+            even_odd,
+            [
+                to_device.a,
+                to_device.b,
+                to_device.c,
+                to_device.d,
+                to_device.e,
+                to_device.f,
+            ],
+            outline.0,
         ) {
             // Only reachable when a host stated a budget past what the lane's u32
             // counters can address; the refusal is the budget's shape because that
@@ -625,10 +702,10 @@ impl<'a> Encoder<'a> {
             seat.0 as f32,
             seat.1 as f32,
             super::instance::CoverageSource::Sheet,
-            fill.color,
+            color,
             resolved.rect,
-            fill.style,
-            fill.mask,
+            style,
+            mask,
         );
     }
 }
@@ -636,7 +713,10 @@ impl<'a> Encoder<'a> {
 /// The box of a box under an affine: the four corners transformed and min/maxed —
 /// exact for an axis-preserving transform by `hull.rs`'s monotonicity argument, a
 /// superset under rotation (ADR 0083).
-fn corner_bounds(control_box: [f32; 4], to_device: &DeviceTransform) -> (f32, f32, f32, f32) {
+pub(super) fn corner_bounds(
+    control_box: [f32; 4],
+    to_device: &DeviceTransform,
+) -> (f32, f32, f32, f32) {
     let corners = [
         apply(
             to_device,

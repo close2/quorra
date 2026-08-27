@@ -464,6 +464,10 @@ pub enum EncodeSource {
     /// replayed: the walk, the coverage rasterisation and the instance layout of this
     /// frame were all paid for by an earlier one.
     Replayed,
+    /// The scene's walk was **record-replayed** for a new viewport (ADR 0087): the
+    /// per-scene answers came from records an earlier encode wrote down, and only the
+    /// per-viewport arithmetic — compose, cull, seat, the instance bytes — ran again.
+    RecordReplayed,
 }
 
 /// A drawn frame: what it cost, what it counted, and what it could not do as asked.

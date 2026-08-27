@@ -128,8 +128,10 @@ impl Device {
         let encode_started = Instant::now();
         // Borrowed from `retained`, which is not `self`: the encode and the device it
         // draws through are two objects, so nothing here needs a clone.
-        let (source, encoded) =
-            retained.prepare(key, |scene| self.encode_scene(scene, viewport))?;
+        let (source, encoded) = retained.prepare(key, |scene, list| match list {
+            Some(list) => self.replay_scene(scene, viewport, list),
+            None => self.encode_scene(scene, viewport),
+        })?;
         let encode_time = encode_started.elapsed();
 
         let mut frame = self.draw_encoded(
@@ -170,6 +172,30 @@ impl Device {
             self.coverage_samples,
             self.instrument_encode,
             self.encode_threads,
+        )
+    }
+
+    /// Phase 1 replayed from records (`encode/replay.rs`, ADR 0087): the per-scene
+    /// answers come from the list, only the per-viewport arithmetic runs.
+    fn replay_scene(
+        &mut self,
+        scene: &Scene,
+        viewport: &Viewport<'_>,
+        list: &encode::ReplayList,
+    ) -> Result<Encoded, RenderError> {
+        encode::replay(
+            scene,
+            viewport,
+            self.limits.max_frame_bytes,
+            self.limits.max_target_size,
+            &self.resources,
+            &mut self.atlas,
+            self.glyph_quantum,
+            self.coverage,
+            self.coverage_samples,
+            self.instrument_encode,
+            self.encode_threads,
+            list,
         )
     }
 
@@ -228,7 +254,11 @@ impl Device {
         // retained encode still holds what the frame that *made* it spent — so the
         // subdivision has to come from the source, not from the clock (ADR 0048).
         let encode_phases = match source {
-            EncodeSource::Encoded => encoded.encode_phases.phases(encode_time),
+            // A record replay ran its own (much shorter) walk, and its clock holds
+            // what that walk spent — the same claim an ordinary encode's makes.
+            EncodeSource::Encoded | EncodeSource::RecordReplayed => {
+                encoded.encode_phases.phases(encode_time)
+            }
             EncodeSource::Replayed => encoded.encode_phases.replayed(),
         };
         let (execute_wall, mut phases, layer_textures) =

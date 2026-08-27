@@ -35,6 +35,9 @@ impl Encoder<'_> {
         blend: BlendMode,
         mask: Option<MaskId>,
     ) -> Result<(), RenderError> {
+        // A stroke expands in device space per viewport; the replay re-dispatches the
+        // whole command, in order (`replay.rs`).
+        self.record_slow();
         let mask = self.use_mask(mask)?;
         let stored = self
             .resources

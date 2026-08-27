@@ -82,6 +82,11 @@ pub(crate) struct Encoded {
     /// is the whole of what a repack can reclaim, and ADR 0050 is the argument that when
     /// it is zero a repack provably cannot change the outcome.
     pub atlas_entries_used: u32,
+    /// The walk's viewport-free half, when every structure this frame met can be
+    /// replayed per record at another viewport (`replay.rs`, ADR 0087) — `None` for a
+    /// frame with a child layer, a soft mask, a residue clip, an atlas or winding
+    /// tile, and for every lane but [`Coverage::Compute`](crate::startup::Coverage).
+    pub replay: Option<super::ReplayList>,
     /// Glyph-lane marks this frame drew through the scratch sheet because the packer had
     /// no room — see `Counters::atlas_overflow_tiles`, which reports it.
     pub atlas_overflow_tiles: u32,
@@ -123,6 +128,9 @@ impl Encoded {
         [
             self.rect_instances.len() as u64,
             self.quad_instances.len() as u64,
+            self.replay
+                .as_ref()
+                .map_or(0, super::ReplayList::retained_bytes),
             scratch,
             bytes_of(self.winding.vertices.len(), size_of::<f32>()),
             bytes_of(self.winding.tiles.len(), size_of::<crate::pane::Tile>()),
@@ -189,7 +197,19 @@ pub(super) fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encode
         ids
     };
 
+    // The list carries the two counters the replay cannot recount, so the encode it
+    // produces reports what the walk reported.
+    let replay = encoder.replay.take().map(|mut list| {
+        let (distinct, segments) = encoder.seeded_counts.unwrap_or((
+            u32::try_from(encoder.distinct_outlines.len()).unwrap_or(u32::MAX),
+            u32::try_from(encoder.segments).unwrap_or(u32::MAX),
+        ));
+        list.distinct_outlines = distinct;
+        list.segments = segments;
+        list
+    });
     Ok(Encoded {
+        replay,
         rect_instances: encoder.rect_instances,
         quad_instances: encoder.quad_instances,
         root: encoder.root,
@@ -208,9 +228,15 @@ pub(super) fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encode
         clip_distinct_regions: distinct_clip_regions(&encoder.clips),
         clip_residue_regions: encoder.residue.regions,
         clip_residue_tiles: encoder.residue.tiles,
-        distinct_outlines: u32::try_from(encoder.distinct_outlines.len()).unwrap_or(u32::MAX),
+        distinct_outlines: encoder.seeded_counts.map_or_else(
+            || u32::try_from(encoder.distinct_outlines.len()).unwrap_or(u32::MAX),
+            |(distinct, _)| distinct,
+        ),
         atlas_distinct_keys: u32::try_from(encoder.atlas_keys.len()).unwrap_or(u32::MAX),
-        segments: u32::try_from(encoder.segments).unwrap_or(u32::MAX),
+        segments: encoder.seeded_counts.map_or_else(
+            || u32::try_from(encoder.segments).unwrap_or(u32::MAX),
+            |(_, segments)| segments,
+        ),
         commands_culled: encoder.culled,
         layers_culled: encoder.culled_layers,
         winding,
