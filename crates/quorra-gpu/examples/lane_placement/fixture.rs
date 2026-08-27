@@ -258,12 +258,22 @@ fn stroke_into(
     let outline = device
         .upload_outline(&[Segment::MoveTo(from), Segment::LineTo(to)])
         .expect("two points are inside every coordinate ceiling");
+    // `Case::width` states the rule's *device* width — the population the caller
+    // measured is "rules about one device pixel wide" — and since ADR 0085 the
+    // scene's width is in the command's own space, resolved per placement. So a case
+    // whose position rides the CTM states the width in the space that CTM scales,
+    // exactly as `band` below always stated its half-width.
+    let stated_width = if case.through_transform {
+        case.width / CTM
+    } else {
+        case.width
+    };
     builder
         .stroke(
             outline,
             placement,
             Stroke {
-                width: case.width,
+                width: stated_width,
                 adjust: false,
                 cap: LineCap::Butt,
                 join: LineJoin::Miter,
