@@ -33,13 +33,16 @@ here:
    every unit test.
 3. **A decision either side can make alone is a decision neither side has made.**
    Three things are settled upstream on purpose — `/Interpolate`, area averaging, and
-   degenerate subpaths (§4.5). We honour them; we do not re-take them. **The stroke's
-   device width moved to our side by the owner's amendment of 2026-08-27** (ADR 0085,
-   their ADR 0701): the width crosses the boundary in the command's own space with
-   §10.7.5's `adjust` flag, and the encode resolves §8.4.3.2's zero and the adjustment
-   per placement — mirrored statement for statement from their resolution, held
-   together by the pixel gates. One decision is ours to make and to expose: the
-   sub-pixel quantum of the glyph cache.
+   degenerate subpaths (§4.5). We honour them; we do not re-take them. **Two moved to
+   our side by the owner's amendments of 2026-08-27**, both because a scene that
+   carries a placement-resolved answer dies with the placement: the stroke's device
+   width (ADR 0085, their ADR 0701 — the width crosses in the command's own space
+   with §10.7.5's `adjust` flag, and the encode resolves §8.4.3.2's zero and the
+   adjustment per placement) and §10.7.4's collapsed-fill marks (ADR 0086, their
+   ADR 0703 — the collapse table is found at upload, the marks floored per
+   placement). Both mirrored statement for statement from their implementations,
+   held together by the pixel gates. One decision is ours to make and to expose:
+   the sub-pixel quantum of the glyph cache.
 
 ## Non-negotiable principles
 

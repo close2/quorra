@@ -20,11 +20,12 @@ use quorra_scene::{Affine, BlendMode, ClipId, Compose, FillRule, MaskId, Outline
 use super::clips::ResolvedClip;
 use super::device_space::{apply, compose, tile_side, transform_preserves_axes};
 use super::parallel::{Draw, Job};
+use super::rare::RarePaint;
 use super::thin::ThinAxis;
 use super::{ChildOp, DrawStyle, Encoder, Op};
 use crate::atlas::GlyphPlacement;
 use crate::error::RenderError;
-use crate::raster::{self, DeviceTransform, Rule};
+use crate::raster::{self, DeviceTransform, Polyline, Rule};
 use crate::startup::Coverage;
 
 /// One solid fill, resolved as far as the lane choice needs it.
@@ -59,6 +60,60 @@ struct SolidFill<'a> {
     bounds: (f32, f32, f32, f32),
     style: DrawStyle,
     mask: Option<u32>,
+}
+
+/// One §10.7.4 mark's ink: the command's own paint, resolved as far as a mark needs.
+#[derive(Clone, Copy)]
+enum MarkInk {
+    /// A solid colour, which may take the analytic rectangle lane.
+    Solid(quorra_scene::Color),
+    /// A resolved rare paint, which goes over a coverage quad.
+    Rare(RarePaint),
+}
+
+/// The snapped mark: the run of whole device pixels the collapsed axis passes
+/// through, as a device rectangle — the caller's `snapped_span` without the
+/// round-trip through the placement's inverse, since this side's output is already
+/// device geometry.
+///
+/// `None` where the device box is degenerate in neither axis or in both, which an
+/// axis-preserving placement of a subpath collapsed along exactly one axis cannot
+/// produce — the same guard as theirs, kept because reading it off the arithmetic is
+/// cheaper than trusting the table's, and a mark on the wrong axis would be a line
+/// across the page. The caller then falls back to the band, and so does this side.
+#[expect(
+    clippy::float_cmp,
+    reason = "exactness identifies the collapsed axis, as in the caller's snapped_span: an \
+              axis-preserving placement carries a shared coordinate to a shared coordinate \
+              through the same arithmetic"
+)]
+fn snapped_mark(
+    mark: &crate::resources::CollapsedMark,
+    to_device: &DeviceTransform,
+) -> Option<quorra_scene::Rect> {
+    let a = apply(to_device, mark.min);
+    let b = apply(to_device, mark.max);
+    let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+    let (y0, y1) = (a.y.min(b.y), a.y.max(b.y));
+    let (lo, hi) = if x0 == x1 && y0 != y1 {
+        let column = x0.floor();
+        (
+            quorra_scene::Point::new(column, y0),
+            quorra_scene::Point::new(column + 1.0, y1),
+        )
+    } else if y0 == y1 && x0 != x1 {
+        let row = y0.floor();
+        (
+            quorra_scene::Point::new(x0, row),
+            quorra_scene::Point::new(x1, row + 1.0),
+        )
+    } else {
+        return None;
+    };
+    if !lo.x.is_finite() || !lo.y.is_finite() || !hi.x.is_finite() || !hi.y.is_finite() {
+        return None;
+    }
+    Some(quorra_scene::Rect::new(lo, hi))
 }
 
 /// The linear part of a transform as the bits a census counts by.
@@ -151,6 +206,11 @@ impl<'a> Encoder<'a> {
             let Some(bounds) = bounds else {
                 return Ok(()); // no geometry: draws nothing
             };
+            // ISO 32000-2 §10.7.4's marks for the subpaths that enclose no area,
+            // placed per viewport from the resident collapse table — before the
+            // fill itself, whose area rules paint nothing of them at any scale.
+            let ink = MarkInk::Solid(color);
+            self.encode_collapsed_marks(&stored.marks, &to_device, &resolved, ink, style, mask)?;
             // A rectangle is not a path (RENDER_LIBRARY.md §6.4) and a fill is the only
             // way a document says one: the caller's 995-page corpus emits no
             // `Command::Rect` at all, so this is the door real pages take to ADR 0007's
@@ -209,6 +269,11 @@ impl<'a> Encoder<'a> {
         if bounds.is_none_or(|b| self.culled(b, &resolved)) {
             return Ok(());
         }
+        // §10.7.4's marks again, with the command's own paint — the clause names the
+        // shape, not the ink (the caller's `pdf_render::collapsed` fills its marks
+        // with the command's paint for the same reason).
+        let ink = MarkInk::Rare(rare);
+        self.encode_collapsed_marks(&stored.marks, &to_device, &resolved, ink, style, mask)?;
         if resolved.residues.is_none()
             && transform_preserves_axes(&to_device)
             && let Some(rect) = stored.rect_hint
@@ -219,6 +284,159 @@ impl<'a> Encoder<'a> {
         let polylines = raster::flatten(&stored.segments, to_device);
         self.clock.geometry(span);
         self.push_rare_coverage(rare, &polylines, rule, &resolved, style, mask)
+    }
+
+    /// The marks ISO 32000-2 §10.7.4 asks for, one per collapsed subpath, placed on
+    /// this viewport's pixel grid from the resident collapse table
+    /// ([`StoredOutline::marks`](crate::resources::StoredOutline)).
+    ///
+    /// > A shape shall be scan-converted by painting any pixel whose half-open square
+    /// > region intersects the shape, no matter how small the intersection is. This
+    /// > ensures that no shape ever disappears as a result of unfavourable placement
+    /// > relative to the device pixel grid […] A zero-width or zero-height rectangle
+    /// > paints a line 1 pixel wide. (ISO 32000-2 §10.7.4)
+    ///
+    /// The arithmetic mirrors the caller's `pdf_render::collapsed` statement for
+    /// statement, as [`raster::resolve_width`] mirrors their width resolution
+    /// (ADR 0085) — their CPU oracle keeps the original and the cross-lane gates
+    /// compare the two continuously:
+    ///
+    /// - Under an **axis-preserving, invertible** placement, the mark is the run of
+    ///   whole device pixels the collapsed axis passes through: the axis's device
+    ///   coordinate `v` lies in row or column `floor(v)`, and the mark spans
+    ///   `floor(v)` to `floor(v) + 1` while the other axis keeps the subpath's own
+    ///   extent (their `snapped_span` — stated here directly in device space, where
+    ///   they round-trip through the placement's inverse because their output is path
+    ///   geometry; the difference is ulps on coordinates that are exact integers
+    ///   here, inside ADR 0082's contract).
+    /// - Otherwise — a rotation, a shear, a placement with no inverse left to name a
+    ///   grid — the mark is a **band** one device pixel thick about the subpath's own
+    ///   line, stated in outline space as `1 / max_stretch` (their `thinnest_line`)
+    ///   and carried through the placement (their `band_span`).
+    ///
+    /// No stretch at all — a placement that lengthens nothing — leaves no space for a
+    /// mark to be stated in, and makes none: their `split_collapsed_fill` returns
+    /// nothing on the same test.
+    fn encode_collapsed_marks(
+        &mut self,
+        marks: &[crate::resources::CollapsedMark],
+        to_device: &DeviceTransform,
+        resolved: &ResolvedClip,
+        ink: MarkInk,
+        style: DrawStyle,
+        mask: Option<u32>,
+    ) -> Result<(), RenderError> {
+        // Empty for almost every outline, and first so the hottest walk pays one
+        // branch: the collapse table is resident precisely so this costs nothing
+        // where there is nothing.
+        if marks.is_empty() {
+            return Ok(());
+        }
+        let stretch = to_device.max_stretch();
+        if !stretch.is_finite() || stretch <= 0.0 {
+            return Ok(());
+        }
+        // The grid exists where a device axis is an outline axis and the placement
+        // has an inverse — the same two conditions as the caller's, though only the
+        // first is arithmetic this side needs: a singular placement has flattened
+        // the page onto a line, so there is no pixel grid for the snap to be right
+        // about, and the band draws what the oracle draws.
+        let determinant = to_device.a * to_device.d - to_device.b * to_device.c;
+        let snappable =
+            transform_preserves_axes(to_device) && determinant.is_finite() && determinant != 0.0;
+        for mark in marks {
+            let device_rect = if snappable {
+                snapped_mark(mark, to_device)
+            } else {
+                None
+            };
+            if let Some(rect) = device_rect {
+                // The snapped mark is axis-aligned in device space by construction,
+                // so it takes the analytic lane where a solid rectangle would
+                // (ADR 0007) and the coverage quad where it cannot.
+                if let (MarkInk::Solid(color), None) = (ink, &resolved.residues) {
+                    let clipped = rect.intersection(resolved.rect).intersection(self.visible);
+                    if !clipped.is_empty() {
+                        self.push_rect_instance(clipped, color, style, mask)?;
+                    }
+                    continue;
+                }
+                self.push_mark_corners(
+                    [
+                        rect.min,
+                        quorra_scene::Point::new(rect.max.x, rect.min.y),
+                        rect.max,
+                        quorra_scene::Point::new(rect.min.x, rect.max.y),
+                    ],
+                    resolved,
+                    ink,
+                    style,
+                    mask,
+                )?;
+                continue;
+            }
+            // The band: half the thinnest line each side of the collapsed axis, in
+            // outline space, carried through the placement (their `band_span`).
+            let half = (1.0 / stretch) / 2.0;
+            let (lo, hi) = if mark.vertical {
+                (
+                    quorra_scene::Point::new(mark.min.x - half, mark.min.y),
+                    quorra_scene::Point::new(mark.min.x + half, mark.max.y),
+                )
+            } else {
+                (
+                    quorra_scene::Point::new(mark.min.x, mark.min.y - half),
+                    quorra_scene::Point::new(mark.max.x, mark.min.y + half),
+                )
+            };
+            self.push_mark_corners(
+                [
+                    apply(to_device, lo),
+                    apply(to_device, quorra_scene::Point::new(hi.x, lo.y)),
+                    apply(to_device, hi),
+                    apply(to_device, quorra_scene::Point::new(lo.x, hi.y)),
+                ],
+                resolved,
+                ink,
+                style,
+                mask,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// One mark as four device corners through the coverage path — the route for a
+    /// residue clip, a rare paint, or a band under an oblique placement. Non-finite
+    /// corners make no mark, as in the caller's `append_mark`.
+    fn push_mark_corners(
+        &mut self,
+        corners: [quorra_scene::Point; 4],
+        resolved: &ResolvedClip,
+        ink: MarkInk,
+        style: DrawStyle,
+        mask: Option<u32>,
+    ) -> Result<(), RenderError> {
+        if corners.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            return Ok(());
+        }
+        let polylines = vec![Polyline {
+            points: corners.to_vec(),
+            closed: true,
+        }];
+        match ink {
+            MarkInk::Solid(color) => self.push_coverage_styled(
+                &polylines,
+                Rule::NonZero,
+                color,
+                resolved,
+                style,
+                None,
+                mask,
+            ),
+            MarkInk::Rare(rare) => {
+                self.push_rare_coverage(rare, &polylines, Rule::NonZero, resolved, style, mask)
+            }
+        }
     }
 
     /// The solid arm of the fill walk: three lanes, and the cache decides between them.

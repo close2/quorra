@@ -356,6 +356,7 @@ These are settled in `pdf-render` precisely so that two backends cannot answer t
 | `Image::area_averaged` | a documented departure from §10.7.4 | honour it |
 | `Stroke::device_width` | §8.4.3.2 with §10.7.5 — a `0 w` line is **one device pixel** | **amended 2026-08-27 (ADR 0085/0701): resolve it yourself, per placement, from the scene-space width and the `adjust` flag** |
 | degenerate subpaths | §8.5.3.2 — a zero-length subpath is a dot under round caps and *nothing* under butt or square | we pre-split them; draw what you are given |
+| collapsed fills | §10.7.4 — a fill's subpath with no extent along one axis paints the whole pixel run its line lies in; "no shape ever disappears" | **amended 2026-08-27 (ADR 0086/0703): yours now — the collapse table is found at upload, the encode places the marks per placement, and we stopped pre-splitting** |
 
 The last two are worth an extra sentence because they cost us. `tiny-skia` draws a zero-width
 stroke as one device pixel, which happens to be exactly what §8.4.3.2 says — so the rule was never

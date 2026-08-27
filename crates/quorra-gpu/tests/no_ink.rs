@@ -359,12 +359,19 @@ fn append_no_shape(
         ),
         Nothing::ZeroAreaFill => {
             // Three collinear points enclose no region under either fill rule (§8.5.3.3);
-            // moving the middle one off the line gives the same outline an area.
+            // moving the middle one off the line gives the same outline an area. Collinear
+            // **at an angle**, deliberately: an axis-aligned degenerate subpath has a shape
+            // since §10.7.4's marks became the encode's (ADR 0086) — "a filling region is
+            // considered to intersect every pixel through which its boundary passes, even
+            // if the interior of the filling region is empty" — while the diagonal case is
+            // outside the resident table's test (extent in both axes), exactly as it is
+            // outside the caller's `pdf_render::collapsed`, whose module comment names it
+            // as the stated absence.
             let flat = device
                 .upload_outline(&triangle(
-                    Point::new(10.0, 20.0),
-                    Point::new(30.0, if full { 44.0 } else { 20.0 }),
-                    Point::new(50.0, 20.0),
+                    Point::new(10.0, 12.0),
+                    Point::new(30.0, if full { 44.0 } else { 28.0 }),
+                    Point::new(50.0, 44.0),
                 ))
                 .expect("upload");
             builder.fill(

@@ -97,6 +97,14 @@ pub(crate) struct StoredOutline {
     /// walks every control point per placement, which on a page of 58 009 distinct
     /// outlines was three million transforms per frame.
     pub control_box: [f32; 4],
+    /// The subpaths that enclose no area because one extent is exactly zero, as the
+    /// marks ISO 32000-2 §10.7.4 asks the scan conversion for — taken once at upload,
+    /// because whether a subpath collapses is a property of its control points and of
+    /// nothing else; only the mark's *placement* is the encode's, per viewport
+    /// (`encode/fill.rs`). Empty for almost every outline, which is why the walk that
+    /// finds them is a second pass rather than a burden on the first: the common
+    /// answer allocates nothing.
+    pub marks: Box<[CollapsedMark]>,
     /// What the segments cost, charged at upload.
     bytes: u64,
     /// What [`Self::quads`] cost, charged when it was converted and zero until then.
@@ -157,6 +165,124 @@ impl StoredOutline {
     pub(crate) fn quads_converted(&self) -> bool {
         self.quads.get().is_some()
     }
+}
+
+/// One subpath of an outline that encloses no area: its extent is exactly zero along
+/// one axis, so an area rule paints nothing of it at any scale — the shape ISO 32000-2
+/// §10.7.4 says "shall not disappear", and the reason a table of them rides beside the
+/// outline. The box over *control* points as well as endpoints, which is exact for
+/// this question: a cubic lies within its control points' hull, so control points
+/// sharing one coordinate is the same statement as the curve having no extent there.
+///
+/// Mirrors the caller's `pdf_render::collapsed` walk statement for statement (their
+/// `subpath_extents` and `Extent::collapse`), for the same reason the stroke width's
+/// resolution mirrors their `device_width` (ADR 0085): the caller's CPU oracle keeps
+/// the original, and the cross-lane gates compare the two continuously.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CollapsedMark {
+    /// The corner with the smallest coordinates, in outline space.
+    pub min: quorra_scene::Point,
+    /// The corner with the largest.
+    pub max: quorra_scene::Point,
+    /// Whether the subpath collapsed along x — every point sharing one x, the mark a
+    /// vertical rule. `false` is a horizontal one; a subpath collapsed along both axes
+    /// is a point, which is §8.5.3.3.1's case and not in this table.
+    pub vertical: bool,
+}
+
+/// The collapse table [`StoredOutline::marks`] holds: one entry per subpath whose
+/// extent is exactly zero along exactly one axis.
+///
+/// Exact equality rather than a tolerance, deliberately, as in the caller's
+/// `Extent::collapse`: a subpath thinner than a pixel but not *flat* has an area, and
+/// what an area gets is the coverage it implies — only a subpath with literally no
+/// extent vanishes at every placement and every resolution, which is what makes the
+/// question one about the geometry rather than about the scale.
+///
+/// A subpath ends at a `Close` or at the next `MoveTo`; a segment following a `Close`
+/// with no `MoveTo` of its own re-opens at the last `MoveTo`'s point — the same walk as
+/// the caller's `subpath_extents`, adapted to [`Segment`]'s spelling of the same
+/// commands.
+#[expect(
+    clippy::float_cmp,
+    reason = "exactness is the rule, as in the caller's collapse test: a margin would               claim a shape with an area is flat"
+)]
+fn collapsed_marks(path: &[Segment]) -> Box<[CollapsedMark]> {
+    let mut marks = Vec::new();
+    let mut index = 0usize;
+    // Where the most recent MoveTo put the current point. A subpath opened by a
+    // segment after a Close has no MoveTo of its own and starts here.
+    let mut opened_at: Option<quorra_scene::Point> = None;
+    while index < path.len() {
+        let mut bounds: Option<(quorra_scene::Point, quorra_scene::Point)> = None;
+        let include =
+            |p: quorra_scene::Point,
+             bounds: &mut Option<(quorra_scene::Point, quorra_scene::Point)>| {
+                match bounds {
+                    Some((min, max)) => {
+                        min.x = min.x.min(p.x);
+                        min.y = min.y.min(p.y);
+                        max.x = max.x.max(p.x);
+                        max.y = max.y.max(p.y);
+                    }
+                    None => *bounds = Some((p, p)),
+                }
+            };
+        let mut opened = false;
+        while index < path.len() {
+            match path[index] {
+                Segment::MoveTo(p) => {
+                    if opened {
+                        break;
+                    }
+                    opened = true;
+                    opened_at = Some(p);
+                    include(p, &mut bounds);
+                }
+                Segment::LineTo(p) => {
+                    if !opened && let Some(start) = opened_at {
+                        include(start, &mut bounds);
+                    }
+                    opened = true;
+                    include(p, &mut bounds);
+                }
+                Segment::CubicTo { c1, c2, to } => {
+                    if !opened && let Some(start) = opened_at {
+                        include(start, &mut bounds);
+                    }
+                    opened = true;
+                    include(c1, &mut bounds);
+                    include(c2, &mut bounds);
+                    include(to, &mut bounds);
+                }
+                Segment::Close => {
+                    index = index.saturating_add(1);
+                    break;
+                }
+            }
+            index = index.saturating_add(1);
+        }
+        if let Some((min, max)) = bounds {
+            // Collapsed along exactly one axis: a point (both) is §8.5.3.3.1's case
+            // and gets no mark, a shape with area (neither) gets its own coverage.
+            match (min.x == max.x, min.y == max.y) {
+                (true, false) => marks.push(CollapsedMark {
+                    min,
+                    max,
+                    vertical: true,
+                }),
+                (false, true) => marks.push(CollapsedMark {
+                    min,
+                    max,
+                    vertical: false,
+                }),
+                _ => {}
+            }
+        }
+        // Bounds-less commands (a stray Close) end no walk: keep going, as the
+        // caller's walk does, rather than hiding every subpath after them.
+    }
+    marks.into()
 }
 
 /// A validated, resident image.
@@ -340,10 +466,13 @@ impl ResourceStore {
             }
         }
         let rect_hint = axis_aligned_rect(path);
-        // The segments, and only the segments: those are what this call makes resident.
+        let marks = collapsed_marks(path);
+        // The segments and the collapse table: those are what this call makes resident.
         // The converted form is charged by the frame that converts it, so that the
         // ceiling counts bytes that exist rather than bytes that might (ADR 0075).
-        let bytes = (path.len() as u64).saturating_mul(size_of::<Segment>() as u64);
+        let bytes = (path.len() as u64)
+            .saturating_mul(size_of::<Segment>() as u64)
+            .saturating_add((marks.len() as u64).saturating_mul(size_of::<CollapsedMark>() as u64));
         let id = self.allocate_id()?;
         self.budget.charge(bytes)?;
         self.outlines.insert(
@@ -351,6 +480,7 @@ impl ResourceStore {
             StoredOutline {
                 rect_hint,
                 control_box,
+                marks,
                 quads: OnceLock::new(),
                 segments: path.into(),
                 bytes,

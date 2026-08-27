@@ -196,15 +196,19 @@ fn a_soft_mask_whose_group_marks_nothing_masks_everything() {
     );
 }
 
-/// **A mark whose device box rounds to no pixel in one axis is drawn as nothing**, `Ok`,
-/// with the rest of the page untouched.
+/// **A fill whose device box rounds to no pixel in one axis charges no coverage tile,
+/// stops no frame — and still marks its pixel row**, which is §10.7.4's own sentence
+/// about it since ADR 0086.
 ///
 /// This is the caller's `#351`/`#352`/`#357` shape one level down from the page: their
 /// `/MediaBox` rounds to zero pixels in one axis, ours is a path whose device extent does.
-/// `coverage_tile` returns `None` before a tile is charged or allocated, which is the
-/// "zero-length buffer slice that follows from a blank scene" `doc/PLAN.md` calls
-/// legitimate — and the second mark is here so that a frame which gave up on the *page*
-/// rather than on the *mark* would be visible.
+/// The fill itself still reaches `coverage_tile`, which returns `None` before a tile is
+/// charged or allocated — the "zero-length buffer slice that follows from a blank scene"
+/// `doc/PLAN.md` calls legitimate — while the *ink* the row shows is the resident
+/// collapse table's mark, placed beside the fill by the encode (`tests/collapsed_fills.rs`
+/// holds the mark itself; this test holds that the degenerate coverage path underneath it
+/// neither charges nor refuses). The second mark is here so that a frame which gave up on
+/// the *page* rather than on the path would be visible.
 #[test]
 fn a_mark_with_a_zero_extent_axis_draws_nothing_and_stops_no_frame() {
     let mut device = device();
@@ -239,7 +243,16 @@ fn a_mark_with_a_zero_extent_axis_draws_nothing_and_stops_no_frame() {
         .unwrap();
     let pixels = render(&mut device, &builder.finish(), SIZE, SIZE);
     let at = |x: u32, y: u32| pixels[((y * SIZE + x) * 4 + 3) as usize];
-    assert_eq!(at(16, 10), 0, "the flat path inks no pixel of its own row");
-    assert_eq!(at(16, 9), 0, "nor the row above it");
+    assert_eq!(
+        at(16, 10),
+        255,
+        "§10.7.4's mark: the whole pixel row the line lies in"
+    );
+    assert_eq!(
+        at(16, 9),
+        0,
+        "and only that row — floor(10.0) is row 10, not a band"
+    );
+    assert_eq!(at(16, 11), 0, "on either side");
     assert_eq!(at(24, 24), 255, "and the frame kept drawing after it");
 }
