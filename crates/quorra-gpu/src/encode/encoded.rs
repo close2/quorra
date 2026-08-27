@@ -35,6 +35,9 @@ pub(crate) struct Encoded {
     /// The raw ids of every image, ramp and mesh this frame draws, for the device
     /// to realise as textures before the passes run.
     pub used_images: Vec<u32>,
+    /// Reduced image variants this frame draws, `(image, x factor, y factor)`, sorted
+    /// (ADR 0089).
+    pub used_reductions: Vec<(u32, u32, u32)>,
     pub used_ramps: Vec<u32>,
     pub used_meshes: Vec<u32>,
     /// The raw ids of every §7.10.5 program this frame paints with. Nothing has to be
@@ -140,6 +143,7 @@ impl Encoded {
             bytes_of(self.layers.len(), size_of::<LayerPlan>()),
             bytes_of(self.mask_plans.len(), size_of::<Option<MaskPlan>>()),
             bytes_of(self.used_images.len(), size_of::<u32>()),
+            bytes_of(self.used_reductions.len(), size_of::<(u32, u32, u32)>()),
             bytes_of(self.used_ramps.len(), size_of::<u32>()),
             bytes_of(self.used_meshes.len(), size_of::<u32>()),
             bytes_of(self.used_functions.len(), size_of::<u32>()),
@@ -217,6 +221,11 @@ pub(super) fn finish(mut encoder: Encoder<'_>, commands: usize) -> Result<Encode
         mask_plans: encoder.mask_plans,
         scratch,
         used_images: sorted(encoder.used_images),
+        used_reductions: {
+            let mut ids: Vec<(u32, u32, u32)> = encoder.used_reductions.into_iter().collect();
+            ids.sort_unstable();
+            ids
+        },
         used_ramps: sorted(encoder.used_ramps),
         used_meshes: sorted(encoder.used_meshes),
         used_functions: sorted(encoder.used_functions),

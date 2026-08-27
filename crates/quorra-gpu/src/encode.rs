@@ -219,6 +219,9 @@ struct Encoder<'a> {
     distinct_outlines: FastSet<u32>,
     atlas_keys: FastSet<GlyphKey>,
     used_images: HashSet<u32>,
+    /// Reduced image variants this frame draws, as `(image, x factor, y factor)`
+    /// (ADR 0089) — realised by the device beside [`Self::used_images`].
+    used_reductions: HashSet<(u32, u32, u32)>,
     used_ramps: HashSet<u32>,
     used_meshes: HashSet<u32>,
     used_functions: HashSet<u32>,
@@ -503,6 +506,7 @@ fn encoder_for<'a>(
         distinct_outlines: FastSet::default(),
         atlas_keys: FastSet::default(),
         used_images: HashSet::new(),
+        used_reductions: HashSet::new(),
         used_ramps: HashSet::new(),
         used_meshes: HashSet::new(),
         used_functions: HashSet::new(),

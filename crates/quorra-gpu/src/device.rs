@@ -145,6 +145,9 @@ pub struct Device {
     /// Device-resident forms of uploaded paints, realised lazily on first use
     /// (M2 owns the validated CPU copy; this lane owns the bytes on the GPU).
     image_textures: HashMap<u32, (wgpu::Texture, wgpu::TextureView)>,
+    /// Area-averaged variants, keyed `(image, x factor, y factor)` (ADR 0089) —
+    /// realised once per key for the device's life, exactly as the base textures are.
+    reduced_textures: HashMap<(u32, u32, u32), (wgpu::Texture, wgpu::TextureView)>,
     ramp_textures: HashMap<u32, (wgpu::Texture, wgpu::TextureView)>,
     mesh_textures: HashMap<u32, (wgpu::Texture, wgpu::TextureView)>,
     /// The one filtering sampler (clamp-to-edge linear), for `ImageFilter::Linear`.

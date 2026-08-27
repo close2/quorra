@@ -199,6 +199,29 @@ impl Device {
             bytes = bytes.saturating_add(spec.data.len() as u64);
             self.image_textures.insert(id, pair);
         }
+        for &(id, fx, fy) in &encoded.used_reductions {
+            if self.reduced_textures.contains_key(&(id, fx, fy)) {
+                continue;
+            }
+            let Some(stored) = self.resources.image(ImageId(id)) else {
+                return Err(RenderError::UnknownImage { image: ImageId(id) });
+            };
+            // The encode resolved the factors from the same spec (ADR 0089), so the
+            // reduction here reproduces exactly the grid it named. Once per
+            // `(image, factors)` for the device's life — the module comment on
+            // `raster::reduce` prices the one-time cost.
+            let reduced = crate::raster::reduce::Reduction {
+                factors: (fx, fy),
+                width: stored.spec.width.div_ceil(fx.max(1)),
+                height: stored.spec.height.div_ceil(fy.max(1)),
+                smoothed: false, // the op carries the resolved filter; unused here
+            };
+            let spec = crate::raster::reduce::area_averaged(&stored.spec, reduced);
+            let pair =
+                self.rgba_texture("quorra reduced image", spec.width, spec.height, &spec.data);
+            bytes = bytes.saturating_add(spec.data.len() as u64);
+            self.reduced_textures.insert((id, fx, fy), pair);
+        }
         for &id in &encoded.used_ramps {
             if self.ramp_textures.contains_key(&id) {
                 continue;

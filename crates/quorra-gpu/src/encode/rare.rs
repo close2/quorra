@@ -63,10 +63,51 @@ pub(crate) struct ImageOp {
     /// The command's constant alpha (§11.6.4.4).
     pub alpha: f32,
     /// The placement's resolved filter: `true` for linear (§4.5, integration
-    /// note 1).
+    /// note 1 — resolved here since ADR 0089 where the command says `Auto`).
     pub linear: bool,
+    /// The area-averaged variant this placement asks for, as `(x, y)` factors — the
+    /// caller's documented §10.7.4 departure, resolved per placement (ADR 0089).
+    /// `None` draws the image's own samples.
+    pub reduced: Option<(u32, u32)>,
     pub style: DrawStyle,
     pub mask: Option<u32>,
+}
+
+/// `Auto` resolved where the placement is known (ADR 0089): the filter by the
+/// mirrored §8.9.5.3 rule, and the caller's documented area-averaging reduction where
+/// a device pixel gathers two samples — as `(linear, Some(factors))` naming a
+/// resident variant the device realises once per `(image, factors)`.
+fn resolve_filter(
+    filter: ImageFilter,
+    spec: &quorra_scene::ImageSpec,
+    to_device: &DeviceTransform,
+) -> (bool, Option<(u32, u32)>) {
+    let placement = [
+        to_device.a,
+        to_device.b,
+        to_device.c,
+        to_device.d,
+        to_device.e,
+        to_device.f,
+    ];
+    match filter {
+        ImageFilter::Nearest => (false, None),
+        ImageFilter::Linear => (true, None),
+        ImageFilter::Auto { interpolate } => {
+            match crate::raster::reduce::reduction(spec, interpolate, &placement) {
+                Some(reduction) => (reduction.smoothed, Some(reduction.factors)),
+                None => (
+                    crate::raster::reduce::smoothed(
+                        spec.width,
+                        spec.height,
+                        interpolate,
+                        &placement,
+                    ),
+                    None,
+                ),
+            }
+        }
+    }
 }
 
 /// Which texture paints a [`ShadedOp`].
@@ -185,12 +226,16 @@ impl Encoder<'_> {
             self.push_op(Op::Child(ChildOp::implicit_blend_group(child, blend, mask)))?;
             return Ok(());
         }
-        if self.resources.image(image).is_none() {
+        let Some(stored) = self.resources.image(image) else {
             return Err(RenderError::UnknownImage { image });
-        }
-        self.used_images.insert(image.0);
+        };
         let resolved = self.resolve_clip(clip)?;
         let to_device = compose(transform, self.viewport);
+        let (linear, reduced) = resolve_filter(filter, &stored.spec, &to_device);
+        match reduced {
+            Some(factors) => self.used_reductions.insert((image.0, factors.0, factors.1)),
+            None => self.used_images.insert(image.0),
+        };
         let Some(inverse) = transform.then(self.viewport.transform).invert() else {
             // A singular placement collapses the unit square to a zero-area set:
             // nothing to paint, and no way to map pixels back into it.
@@ -261,7 +306,8 @@ impl Encoder<'_> {
             residue_origin,
             axis_aligned: transform_preserves_axes(&to_device),
             alpha,
-            linear: filter == ImageFilter::Linear,
+            linear,
+            reduced,
             style: self.style,
             mask,
         })))

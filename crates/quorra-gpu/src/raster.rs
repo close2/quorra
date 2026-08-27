@@ -51,6 +51,7 @@
 
 mod fill;
 mod flatten;
+pub(crate) mod reduce;
 mod stroke;
 
 pub(crate) use fill::{CoverageMask, Rule, fill_mask};

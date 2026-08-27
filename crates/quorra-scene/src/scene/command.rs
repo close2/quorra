@@ -27,6 +27,19 @@ pub enum ImageFilter {
     /// Linear interpolation: `/Interpolate` true, or a placement the caller decided
     /// to smooth.
     Linear,
+    /// The encode resolves the filter — and the caller's documented area-averaging
+    /// reduction for minification — per placement, from `/Interpolate` and the device
+    /// extent the viewport gives the image (ADR 0089; the caller's ADR 0706).
+    ///
+    /// This is the §4.5 amendment pattern a third time: the decision is
+    /// resolution-dependent by nature, so a scene that carried its answer was true at
+    /// exactly one viewport. With the flag crossing instead, an image command is true
+    /// at every viewport and the caller's page-space scenes survive zooming a page
+    /// with pictures on it.
+    Auto {
+        /// ISO 32000-2 §8.9.5.3's `/Interpolate`, as the document stated it.
+        interpolate: bool,
+    },
 }
 
 /// The deepest a group may nest. The brief's §1.1 bounds the caller's display list at

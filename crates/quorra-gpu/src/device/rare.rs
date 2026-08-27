@@ -33,7 +33,13 @@ impl Device {
         mask: (&wgpu::TextureView, MaskPlacement),
         scratch: &wgpu::TextureView,
     ) -> Result<wgpu::BindGroup, RenderError> {
-        let Some((_, image_view)) = self.image_textures.get(&op.image) else {
+        // The placement's resolved variant (ADR 0089): the reduced texture where the
+        // encode named factors, the image's own samples otherwise.
+        let looked_up = match op.reduced {
+            Some((fx, fy)) => self.reduced_textures.get(&(op.image, fx, fy)),
+            None => self.image_textures.get(&op.image),
+        };
+        let Some((_, image_view)) = looked_up else {
             return Err(RenderError::UnknownImage {
                 image: ImageId(op.image),
             });
@@ -253,6 +259,7 @@ mod tests {
             dest: [21.0, 22.0, 23.0, 24.0],
             clip: [31.0, 32.0, 33.0, 34.0],
             residue_origin: Some([41.0, 42.0]),
+            reduced: None,
             axis_aligned: true,
             alpha: 0.5,
             linear: true,

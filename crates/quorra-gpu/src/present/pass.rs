@@ -38,7 +38,10 @@ fn params_bytes(
     target: (u32, u32),
 ) -> [u8; 64] {
     let filter = match filter {
-        ImageFilter::Linear => 1.0,
+        // A presented layer has no document placement for `Auto` to resolve against —
+        // the variant belongs to the *scene's* image command (ADR 0089) — so a host
+        // that passes it here gets the tap a smoothed layer gets.
+        ImageFilter::Linear | ImageFilter::Auto { .. } => 1.0,
         ImageFilter::Nearest => 0.0,
     };
     let inverse = placed.inverse;

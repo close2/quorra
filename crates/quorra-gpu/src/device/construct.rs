@@ -319,6 +319,7 @@ impl Device {
             // — where a first frame is on it by definition (ADR 0031).
             pass_query: pass_query_at_startup,
             compute_queries,
+            reduced_textures: HashMap::new(),
             surface: surface_state,
             startup: StartupSteps {
                 instance_creation: pre.instance_creation,
