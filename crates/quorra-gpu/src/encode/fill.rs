@@ -611,6 +611,14 @@ impl<'a> Encoder<'a> {
                 Draw::new(fill.color, resolved.rect, fill.style, fill.mask),
             ));
         }
+        // ADR 0090's hybrid: a tile the atlas will not hold flattens on the device
+        // where one is worth using. After the atlas admission — glyphs keep the cache
+        // and its replay — and gated off residues exactly as the compute lane itself
+        // is. Cpu↔Compute are held to zero pixels (`tests/compute_lane.rs`), so the
+        // reroute is invisible except in time.
+        if self.assisted(fill, resolved)? {
+            return Ok(());
+        }
         if let Some(rect) = self.deferrable_bounds(resolved) {
             let bound = self.tile_bound(fill.bounds, resolved);
             return self.enqueue(Job::sheet(
@@ -636,6 +644,29 @@ impl<'a> Encoder<'a> {
     /// them itself. The tile is the control hull's, a superset of the flattened
     /// geometry's, whose extra pixels read zero coverage. Taken before the cache is
     /// consulted, because there is no atlas in front of this lane.
+    /// ADR 0090's reroute, taken or declined: `Ok(true)` where the hybrid flattened
+    /// this fill on the device, `Ok(false)` where the scratch lane keeps it.
+    fn assisted(
+        &mut self,
+        fill: &SolidFill<'a>,
+        resolved: &ResolvedClip,
+    ) -> Result<bool, RenderError> {
+        if !(self.compute_assist && self.coverage == Coverage::Cpu && resolved.residues.is_none()) {
+            return Ok(false);
+        }
+        self.fill_compute(
+            fill.outline,
+            &fill.to_device,
+            fill.bounds,
+            fill.rule == Rule::EvenOdd,
+            fill.color,
+            fill.style,
+            fill.mask,
+            resolved,
+        )?;
+        Ok(true)
+    }
+
     /// The compute lane's tile for one solid fill: cull to the visible tile, charge,
     /// seat, record for the dispatch, and emit the quad that samples the result.
     ///

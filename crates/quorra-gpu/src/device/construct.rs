@@ -229,6 +229,11 @@ impl Device {
 
         let info = adapter.get_info();
         let description = format!("{} ({:?}, {:?})", info.name, info.device_type, info.backend);
+        // ADR 0090's auto: the hybrid's compute dispatches only pay on a real device;
+        // a software "device" loses to the scanline they replace.
+        let compute_assist = options
+            .compute_assist
+            .unwrap_or(info.device_type != wgpu::DeviceType::Cpu);
 
         let surface_state = surface
             .map(|surface| SurfaceState::new(surface, &adapter, &info.name))
@@ -295,6 +300,7 @@ impl Device {
             dummy_texture: None,
             glyph_quantum: options.glyph_quantum,
             coverage: options.coverage,
+            compute_assist,
             instrument_encode: options.instrument_encode,
             // A request becomes a number here: zero means "one", and nothing above the
             // machine's own parallelism can be honoured by the machine.

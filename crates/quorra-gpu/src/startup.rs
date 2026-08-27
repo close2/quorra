@@ -262,6 +262,18 @@ pub struct Options {
     /// which is the lane whose bytes are exact and whose output the caller's CPU
     /// oracle agrees with.
     pub coverage: Coverage,
+    /// Under [`Coverage::Cpu`], flatten the tiles the atlas will not hold on the
+    /// device instead of the processor (ADR 0090) — the per-frame hybrid: glyphs keep
+    /// the atlas, everything else takes the compute lane's flattening, and the two
+    /// lanes are held to zero pixels against each other so the reroute is invisible
+    /// except in time.
+    ///
+    /// `None` decides by adapter: on for a real device, off where the "device" is a
+    /// software rasteriser (a compute dispatch on llvmpipe loses to the scanline it
+    /// replaces — the caller measured 600 ms against 229). `Some` overrides either
+    /// way, which is what lets the pixel gates run the hybrid on the CI's own
+    /// software adapter.
+    pub compute_assist: Option<bool>,
     /// Subdivide [`Timings::encode`] into geometry, staging and recording, reported
     /// through [`Timings::phases`] (the caller's feedback §13; ADR 0023).
     ///
@@ -321,6 +333,7 @@ impl Default for Options {
             atlas_budget: DEFAULT_ATLAS_BUDGET,
             glyph_quantum: Some(DEFAULT_GLYPH_QUANTUM),
             coverage: Coverage::Cpu,
+            compute_assist: None,
             coverage_samples: DEFAULT_COVERAGE_SAMPLES,
             instrument_encode: false,
             encode_threads: 1,

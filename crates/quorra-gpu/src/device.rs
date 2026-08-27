@@ -156,6 +156,11 @@ pub struct Device {
     glyph_quantum: Option<u16>,
     /// Which lane makes coverage bytes, and how finely the GPU one samples (ADR 0016).
     coverage: Coverage,
+    /// ADR 0090's per-frame hybrid: under [`Coverage::Cpu`], tiles the atlas will not
+    /// hold flatten on the device. Decided at construction (auto by adapter type, or
+    /// the option's override) and fixed for the device's life, so a retained encode's
+    /// key needs no extra field for it.
+    compute_assist: bool,
     /// Whether a frame subdivides its encode phase (ADR 0023).
     instrument_encode: bool,
     /// How many threads a frame's geometry may use, as the host stated it

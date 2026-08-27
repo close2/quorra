@@ -152,6 +152,9 @@ struct Encoder<'a> {
     visible: Rect,
     /// Which lane makes coverage bytes (ADR 0016).
     coverage: Coverage,
+    /// ADR 0090: under [`Coverage::Cpu`], tiles the atlas will not hold flatten on
+    /// the device instead of the processor.
+    compute_assist: bool,
     /// The device lane's sample-column spacing in device pixels, from the frame's own
     /// sample count — the width ADR 0070's fifth lane condition compares a mark's thin
     /// axis against.
@@ -280,6 +283,7 @@ pub(crate) fn encode(
     atlas: &mut AtlasStore,
     quantum: Option<u16>,
     coverage: Coverage,
+    compute_assist: bool,
     // The device's *effective* sample count — already rounded to a square and clamped by
     // construction, so this is what the grid really is rather than what was asked for.
     coverage_samples: u32,
@@ -308,6 +312,7 @@ pub(crate) fn encode(
         atlas,
         quantum,
         coverage,
+        compute_assist,
         coverage_samples,
         instrument,
         threads,
@@ -354,6 +359,7 @@ pub(crate) fn replay(
     atlas: &mut AtlasStore,
     quantum: Option<u16>,
     coverage: Coverage,
+    compute_assist: bool,
     coverage_samples: u32,
     instrument: bool,
     threads: usize,
@@ -377,6 +383,7 @@ pub(crate) fn replay(
         atlas,
         quantum,
         coverage,
+        compute_assist,
         coverage_samples,
         instrument,
         threads,
@@ -450,6 +457,7 @@ fn encoder_for<'a>(
     atlas: &'a mut AtlasStore,
     quantum: Option<u16>,
     coverage: Coverage,
+    compute_assist: bool,
     coverage_samples: u32,
     instrument: bool,
     threads: usize,
@@ -462,6 +470,7 @@ fn encoder_for<'a>(
         viewport,
         visible: target_rect(viewport),
         coverage,
+        compute_assist,
         sample_spacing: thin::sample_column_spacing(coverage_samples),
         winding: crate::winding::Sheet::default(),
         compute: crate::compute::ComputeSheet::default(),
