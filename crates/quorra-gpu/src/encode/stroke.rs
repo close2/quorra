@@ -42,13 +42,16 @@ impl Encoder<'_> {
             .ok_or(RenderError::UnknownOutline { outline })?;
         let to_device = compose(transform, self.viewport);
         let resolved = self.resolve_clip(clip)?;
+        // The device width, resolved here — §8.4.3.2's thinnest line and §10.7.5's
+        // adjustment applied where the composed transform is known (ADR 0085) — so
+        // one scene states one stroke and is true at every magnification.
+        let device_width = raster::resolve_width(stroke, to_device);
         // Visibility before the blend wrap, so a stroke outside the target costs
         // neither its expansion nor the implicit group §11.3.5 would put it in. The
-        // outline's hull grows by the stroke's own reach: the width is device-space
-        // (§4.5 resolved it per placement), a miter join may carry a corner half the
-        // width times the limit away from it (§8.4.3.5), and a cap extends half the
-        // width — which a limit of at least 1 already covers.
-        let reach = stroke.width * 0.5 * stroke.miter_limit;
+        // outline's hull grows by the stroke's own reach: a miter join may carry a
+        // corner half the width times the limit away from it (§8.4.3.5), and a cap
+        // extends half the width — which a limit of at least 1 already covers.
+        let reach = device_width * 0.5 * stroke.miter_limit;
         if let Some((x0, y0, x1, y1)) = self.hulls.bounds(outline, &stored.segments, &to_device)
             && self.culled((x0 - reach, y0 - reach, x1 + reach, y1 + reach), &resolved)
         {
@@ -101,7 +104,7 @@ impl Encoder<'_> {
         // resolved (§4.5), so our job is caps, joins and miters only.
         let span = self.clock.start();
         let polylines = raster::flatten(&stored.segments, to_device);
-        let stroked = raster::stroke_polylines(&polylines, stroke);
+        let stroked = raster::stroke_polylines(&polylines, stroke, device_width);
         self.clock.geometry(span);
         match paint {
             Paint::Solid(color) => {
@@ -114,7 +117,7 @@ impl Encoder<'_> {
                     Rule::NonZero,
                     color,
                     &resolved,
-                    Some(stroke.width),
+                    Some(device_width),
                     mask,
                 )
             }

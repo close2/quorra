@@ -330,7 +330,11 @@ pub(super) fn rasterise(job: &Job<'_>) -> Rasterised {
     }
     let flattened = raster::flatten(job.segments, job.transform);
     let polylines = match job.stroke {
-        Some(stroke) => raster::stroke_polylines(&flattened, stroke),
+        Some(stroke) => raster::stroke_polylines(
+            &flattened,
+            stroke,
+            raster::resolve_width(stroke, job.transform),
+        ),
         None => flattened,
     };
     let (x0, y0, x1, y1) = raster::polyline_bounds(&polylines)?;

@@ -152,6 +152,7 @@ fn a_stroke_is_a_path_lane_mark() {
             Affine::IDENTITY,
             Stroke {
                 width: 2.0,
+                adjust: false,
                 cap: LineCap::Butt,
                 join: LineJoin::Miter,
                 miter_limit: 4.0,
@@ -335,6 +336,7 @@ fn the_four_lanes_partition_a_mixed_page_s_marks() {
             Affine::IDENTITY,
             Stroke {
                 width: 1.0,
+                adjust: false,
                 cap: LineCap::Round,
                 join: LineJoin::Round,
                 miter_limit: 4.0,

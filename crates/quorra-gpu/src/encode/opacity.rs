@@ -133,6 +133,7 @@ mod tests {
     fn hairline() -> Stroke {
         Stroke {
             width: 1.0,
+            adjust: false,
             cap: LineCap::Butt,
             join: LineJoin::Miter,
             miter_limit: 10.0,

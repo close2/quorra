@@ -29,11 +29,12 @@ fn butt_stroke_of_a_horizontal_line_is_a_rectangle() {
     ];
     let stroke = Stroke {
         width: 2.0,
+        adjust: false,
         cap: LineCap::Butt,
         join: LineJoin::Miter,
         miter_limit: 10.0,
     };
-    let stroked = stroke_polylines(&flatten(&line, IDENTITY), stroke);
+    let stroked = stroke_polylines(&flatten(&line, IDENTITY), stroke, stroke.width);
     let a = fill_mask(&stroked, Rule::NonZero, 0, 0, 10, 6);
     let b = fill_mask(
         &flatten(&rect_path(2.0, 2.0, 8.0, 4.0), IDENTITY),
@@ -55,11 +56,12 @@ fn square_caps_extend_by_half_the_width() {
     ];
     let stroke = Stroke {
         width: 2.0,
+        adjust: false,
         cap: LineCap::Square,
         join: LineJoin::Miter,
         miter_limit: 10.0,
     };
-    let stroked = stroke_polylines(&flatten(&line, IDENTITY), stroke);
+    let stroked = stroke_polylines(&flatten(&line, IDENTITY), stroke, stroke.width);
     let a = fill_mask(&stroked, Rule::NonZero, 0, 0, 10, 6);
     let b = fill_mask(
         &flatten(&rect_path(1.0, 2.0, 9.0, 4.0), IDENTITY),
@@ -83,11 +85,12 @@ fn miter_join_fills_the_corner() {
     ];
     let stroke = Stroke {
         width: 2.0,
+        adjust: false,
         cap: LineCap::Butt,
         join: LineJoin::Miter,
         miter_limit: 10.0,
     };
-    let stroked = stroke_polylines(&flatten(&l_path, IDENTITY), stroke);
+    let stroked = stroke_polylines(&flatten(&l_path, IDENTITY), stroke, stroke.width);
     let mask = fill_mask(&stroked, Rule::NonZero, 0, 0, 11, 11);
     // The outer corner pixel (9 - epsilon region: x in 8..9, y in 1..2) is inside
     // the miter; with a bevel it would be half-covered at best.
@@ -136,12 +139,13 @@ fn each_cap_deposits_the_area_table_53_gives_it() {
         };
         let stroke = Stroke {
             width: WIDTH,
+            adjust: false,
             cap,
             join: LineJoin::Round,
             miter_limit: 10.0,
         };
         let mask = fill_mask(
-            &stroke_polylines(&[line], stroke),
+            &stroke_polylines(&[line], stroke, stroke.width),
             Rule::NonZero,
             left,
             0,
@@ -193,6 +197,7 @@ const LARGEST_DEVICE_COORDINATE: f32 = 2e27;
 fn hairline() -> Stroke {
     Stroke {
         width: 4.0,
+        adjust: false,
         cap: LineCap::Butt,
         join: LineJoin::Miter,
         miter_limit: 10.0,
@@ -215,7 +220,7 @@ fn a_stroke_spanning_the_coordinate_range_is_not_drawn_as_nothing() {
         ],
         closed: false,
     };
-    let expanded = stroke_polylines(&[line], hairline());
+    let expanded = stroke_polylines(&[line], hairline(), hairline().width);
     assert!(
         expanded
             .iter()
@@ -244,7 +249,7 @@ fn a_segment_below_the_float_grid_produces_finite_geometry() {
         points: vec![Point::new(0.0, 4.0), Point::new(1e-30, 4.0)],
         closed: false,
     };
-    let expanded = stroke_polylines(&[line], hairline());
+    let expanded = stroke_polylines(&[line], hairline(), hairline().width);
     assert!(
         expanded
             .iter()

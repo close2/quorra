@@ -124,6 +124,7 @@ fn commands_off_the_target_are_counted_and_change_no_pixel() {
                 placement,
                 Stroke {
                     width: 2.0,
+                    adjust: false,
                     cap: LineCap::Butt,
                     join: LineJoin::Miter,
                     miter_limit: 4.0,
@@ -169,6 +170,7 @@ fn a_stroke_reaching_in_from_outside_still_draws() {
             Affine::IDENTITY,
             Stroke {
                 width: 10.0,
+                adjust: false,
                 cap: LineCap::Butt,
                 join: LineJoin::Miter,
                 miter_limit: 4.0,

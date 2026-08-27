@@ -125,6 +125,7 @@ fn rule(left: f32) -> Vec<Segment> {
 fn wide_stroke() -> Stroke {
     Stroke {
         width: BAR_WIDTH,
+        adjust: false,
         cap: LineCap::Butt,
         join: LineJoin::Miter,
         miter_limit: 10.0,

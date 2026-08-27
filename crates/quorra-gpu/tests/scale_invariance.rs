@@ -238,7 +238,10 @@ fn a_stroke_deposits_its_own_band_at_every_magnification() {
                 outline,
                 Affine::IDENTITY,
                 Stroke {
-                    width: 4.0 * scale as f32,
+                    // Scene-space since ADR 0085: the encode scales it with the
+                    // viewport, which is the invariance this test states.
+                    width: 4.0,
+                    adjust: false,
                     cap: LineCap::Butt,
                     join: LineJoin::Miter,
                     miter_limit: 10.0,

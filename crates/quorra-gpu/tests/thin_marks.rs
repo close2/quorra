@@ -690,6 +690,7 @@ fn a_turned_hairline_stroke_is_declined_by_its_own_width() {
                 Affine::IDENTITY,
                 Stroke {
                     width,
+                    adjust: false,
                     cap: LineCap::Butt,
                     join: LineJoin::Miter,
                     miter_limit: 10.0,
@@ -759,7 +760,12 @@ fn a_stroke_is_exactly_its_stated_device_width_at_every_scale() {
                     outline,
                     Affine::IDENTITY,
                     Stroke {
-                        width: w,
+                        // Scene-space since ADR 0085: `w / scale` under a viewport of
+                        // `scale` is a device band of exactly `w`, which is what the
+                        // assertion below holds — the *resolution* follows the
+                        // viewport now, and the stated band must not.
+                        width: w / scale,
+                        adjust: false,
                         cap: LineCap::Butt,
                         join: LineJoin::Miter,
                         miter_limit: 10.0,
@@ -784,8 +790,8 @@ fn a_stroke_is_exactly_its_stated_device_width_at_every_scale() {
             assert_the_clause_holds(ink, w, "a stroke");
             assert!(
                 (ink - w).abs() <= 2.0 / 255.0,
-                "a stroke of stated device width {w} at viewport scale {scale} laid down \
-                 {ink} of ink; the width is device-space and must not follow the viewport"
+                "a stroke stating a device band of {w} at viewport scale {scale} laid \
+                 down {ink} of ink; the encode's resolution moved the band (ADR 0085)"
             );
         }
     }

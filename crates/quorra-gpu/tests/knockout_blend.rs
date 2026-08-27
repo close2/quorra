@@ -160,6 +160,7 @@ fn stroked(
             // Wide enough that the band holds interior pixels of its own, so the
             // discriminating case is not only the antialiased edge.
             width: 9.0,
+            adjust: false,
             cap: LineCap::Butt,
             join: LineJoin::Miter,
             miter_limit: 4.0,

@@ -357,7 +357,9 @@ mod tests {
         ));
 
         let bad_stroke = Stroke {
-            width: 0.0,
+            // Zero became valid with ADR 0085; a negative width stays refused.
+            width: -1.0,
+            adjust: false,
             cap: LineCap::Butt,
             join: LineJoin::Miter,
             miter_limit: 4.0,

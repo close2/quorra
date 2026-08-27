@@ -179,6 +179,7 @@ fn a_stroke_across_the_coordinate_range_still_draws_its_band() {
             command,
             Stroke {
                 width: 4.0,
+                adjust: false,
                 cap: LineCap::Butt,
                 join: LineJoin::Miter,
                 miter_limit: 10.0,
@@ -290,6 +291,7 @@ fn a_stroke_segment_below_the_float_grid_still_draws_its_cap() {
             Affine::IDENTITY,
             Stroke {
                 width: 8.0,
+                adjust: false,
                 cap: LineCap::Round,
                 join: LineJoin::Miter,
                 miter_limit: 10.0,

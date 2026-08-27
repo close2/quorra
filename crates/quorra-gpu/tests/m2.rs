@@ -201,6 +201,7 @@ fn each_missing_lane_is_named() {
             Affine::IDENTITY,
             quorra_scene::Stroke {
                 width: 1.0,
+                adjust: false,
                 cap: quorra_scene::LineCap::Butt,
                 join: quorra_scene::LineJoin::Miter,
                 miter_limit: 4.0,

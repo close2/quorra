@@ -342,9 +342,11 @@ fn a_stroke_draws_the_same_band_in_both_lanes() {
                 outline,
                 Affine::IDENTITY,
                 Stroke {
-                    // Device-space (§4.5), so it carries `MAGNIFY` like the geometry
-                    // does — an 8-unit band drawn at 16x is 128 device pixels.
-                    width: 8.0 * MAGNIFY as f32,
+                    // Scene-space since ADR 0085: the encode carries `MAGNIFY` for it,
+                    // so an 8-unit band at 16x is 128 device pixels with nothing
+                    // restated here — which is the amendment's whole point.
+                    width: 8.0,
+                    adjust: false,
                     cap: LineCap::Butt,
                     join: LineJoin::Miter,
                     miter_limit: 4.0,

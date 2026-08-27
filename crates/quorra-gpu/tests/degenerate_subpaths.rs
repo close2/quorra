@@ -83,6 +83,7 @@ const CAPS: [LineCap; 3] = [LineCap::Butt, LineCap::Round, LineCap::Square];
 fn stroke_of(cap: LineCap) -> Stroke {
     Stroke {
         width: HALF_WIDTH * 2.0,
+        adjust: false,
         cap,
         join: LineJoin::Miter,
         miter_limit: 10.0,

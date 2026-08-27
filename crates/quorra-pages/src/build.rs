@@ -222,6 +222,7 @@ fn emit(
             at,
             Stroke {
                 width: 1.5,
+                adjust: false,
                 cap: LineCap::Butt,
                 join: LineJoin::Miter,
                 miter_limit: 4.0,

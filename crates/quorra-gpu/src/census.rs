@@ -254,6 +254,7 @@ mod tests {
                 Affine::IDENTITY,
                 Stroke {
                     width: 2.0,
+                    adjust: false,
                     cap: LineCap::Butt,
                     join: LineJoin::Miter,
                     miter_limit: 4.0,

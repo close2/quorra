@@ -70,6 +70,17 @@ impl DeviceTransform {
             self.b * p.x + self.d * p.y + self.f,
         )
     }
+
+    /// The largest factor by which this transform lengthens a vector — the linear
+    /// part's larger singular value, mirrored **statement for statement** from the
+    /// caller's `Transform::max_stretch` so the width the encode resolves is the width
+    /// their own resolution produced, to the bit (ADR 0085).
+    pub(crate) fn max_stretch(self) -> f32 {
+        let sum = self.a * self.a + self.b * self.b + self.c * self.c + self.d * self.d;
+        let determinant = self.a * self.d - self.b * self.c;
+        let discriminant = (sum * sum - 4.0 * determinant * determinant).max(0.0);
+        f32::midpoint(sum, discriminant.sqrt()).max(0.0).sqrt()
+    }
 }
 
 /// One flattened subpath: device-space points, and whether the source closed it.

@@ -123,6 +123,7 @@ pub fn artwork_page(device: &mut Device) -> Scene {
                 place(index, 30.0),
                 Stroke {
                     width: 2.0,
+                    adjust: false,
                     cap: LineCap::Round,
                     join: LineJoin::Miter,
                     miter_limit: 4.0,

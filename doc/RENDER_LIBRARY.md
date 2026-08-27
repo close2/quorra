@@ -354,7 +354,7 @@ These are settled in `pdf-render` precisely so that two backends cannot answer t
 |---|---|---|
 | `Image::is_smoothed` | §8.9.5.3's `/Interpolate` | honour the flag; do not choose a filter yourself |
 | `Image::area_averaged` | a documented departure from §10.7.4 | honour it |
-| `Stroke::device_width` | §8.4.3.2 with §10.7.5 — a `0 w` line is **one device pixel** | take the width we give you |
+| `Stroke::device_width` | §8.4.3.2 with §10.7.5 — a `0 w` line is **one device pixel** | **amended 2026-08-27 (ADR 0085/0701): resolve it yourself, per placement, from the scene-space width and the `adjust` flag** |
 | degenerate subpaths | §8.5.3.2 — a zero-length subpath is a dot under round caps and *nothing* under butt or square | we pre-split them; draw what you are given |
 
 The last two are worth an extra sentence because they cost us. `tiny-skia` draws a zero-width

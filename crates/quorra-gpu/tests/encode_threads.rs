@@ -150,6 +150,7 @@ fn stroked(builder: &mut SceneBuilder, outline: OutlineId, index: u32, shade: f3
             at(index),
             Stroke {
                 width: 2.0,
+                adjust: false,
                 cap: LineCap::Round,
                 join: LineJoin::Miter,
                 miter_limit: 4.0,

@@ -264,6 +264,7 @@ fn stroke_into(
             placement,
             Stroke {
                 width: case.width,
+                adjust: false,
                 cap: LineCap::Butt,
                 join: LineJoin::Miter,
                 miter_limit: 10.0,

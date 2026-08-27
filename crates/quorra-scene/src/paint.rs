@@ -299,13 +299,22 @@ pub enum LineJoin {
 /// pixel's width), dashing already happened, and degenerate subpaths were pre-split.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Stroke {
-    /// The resolved width, in **device pixels**. Always positive: zero was resolved
-    /// upstream per ISO 32000-2 §8.4.3.2 with §10.7.5, and the caller resolves per
-    /// placement — which is also why the width is device-space: expansion happens on
-    /// the flattened device geometry (caps, joins and miters are all the device's
-    /// business). The stated consequence: a scene reused at a different zoom must
-    /// restate its strokes, which a caller interpreting per render does anyway.
+    /// The width in the **command's own space** — the space the outline's coordinates
+    /// are stated in — resolved to a device width by the encode, per placement
+    /// (ADR 0085; the caller's contract amendment of 2026-08-27).
+    ///
+    /// Zero is a legitimate width and means what ISO 32000-2 §8.4.3.2 says of it:
+    ///
+    /// > A line width of 0 shall denote the thinnest line that can be rendered at
+    /// > device resolution: 1 device pixel wide.
+    ///
+    /// [`Stroke::adjust`] carries §10.7.5's automatic stroke adjustment. Both rules
+    /// are applied where the composed device transform is known — the encode — which
+    /// is what lets one scene state one stroke and be true at every magnification.
     pub width: f32,
+    /// ISO 32000-2 §10.7.5's automatic stroke adjustment: when set, a stroke whose
+    /// device width would fall below half a pixel is drawn one device pixel wide.
+    pub adjust: bool,
     /// Treatment of open subpath ends.
     pub cap: LineCap,
     /// Treatment of segment joins.
@@ -316,13 +325,14 @@ pub struct Stroke {
 }
 
 impl Stroke {
-    /// Whether the stroke's numbers are valid at the scene boundary: a finite positive
-    /// width no larger than [`MAX_COORDINATE`], and a finite miter limit of at least 1
-    /// (ISO 32000-2 §8.4.3.5 defines the limit as a ratio ≥ 1).
+    /// Whether the stroke's numbers are valid at the scene boundary: a finite,
+    /// non-negative width no larger than [`MAX_COORDINATE`] — zero is §8.4.3.2's
+    /// thinnest-line request, resolved at encode (ADR 0085) — and a finite miter
+    /// limit of at least 1 (ISO 32000-2 §8.4.3.5 defines the limit as a ratio ≥ 1).
     #[must_use]
     pub fn is_valid(self) -> bool {
         self.width.is_finite()
-            && self.width > 0.0
+            && self.width >= 0.0
             && self.width <= MAX_COORDINATE
             && self.miter_limit.is_finite()
             && self.miter_limit >= 1.0
@@ -345,27 +355,41 @@ mod tests {
         assert!(!Color::new(0.0, 0.0, 0.0, f32::INFINITY).is_valid());
     }
 
-    /// A stroke's width is positive by contract — zero was resolved upstream — and its
-    /// miter limit is a ratio of at least one, per §8.4.3.5.
+    /// A stroke's width is scene-space and non-negative since ADR 0085 — zero is
+    /// §8.4.3.2's thinnest-line request, resolved at encode — and its miter limit is a
+    /// ratio of at least one, per §8.4.3.5.
     #[test]
     fn stroke_validity_pins_the_resolved_width_contract() {
         let valid = Stroke {
             width: 1.5,
+            adjust: false,
             cap: LineCap::Round,
             join: LineJoin::Miter,
             miter_limit: 10.0,
         };
         assert!(valid.is_valid());
         assert!(
-            !Stroke {
+            Stroke {
                 width: 0.0,
+                adjust: false,
                 ..valid
             }
-            .is_valid()
+            .is_valid(),
+            "zero means the thinnest line, and the encode resolves it (ADR 0085)"
+        );
+        assert!(
+            !Stroke {
+                width: -0.5,
+                adjust: false,
+                ..valid
+            }
+            .is_valid(),
+            "a negative width is not a width (§8.4.3.2's range)"
         );
         assert!(
             !Stroke {
                 width: f32::NAN,
+                adjust: false,
                 ..valid
             }
             .is_valid()

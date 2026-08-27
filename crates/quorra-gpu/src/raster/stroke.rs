@@ -15,19 +15,50 @@
 
 use quorra_scene::{LineCap, LineJoin, Point, Stroke};
 
-use super::flatten::Polyline;
+use super::flatten::{DeviceTransform, Polyline};
+
+/// The device width a stroke resolves to under a placement (ADR 0085).
+///
+/// ISO 32000-2 §8.4.3.2:
+///
+/// > A line width of 0 shall denote the thinnest line that can be rendered at device
+/// > resolution: 1 device pixel wide.
+///
+/// And §10.7.5's automatic stroke adjustment, where the stroke asked for it: a width
+/// under half a device pixel is drawn at one. The comparison is the caller's own —
+/// their `Stroke::device_width` asks `width < 0.5 · (1 / stretch)` in path space,
+/// which is `width · stretch < 0.5` here — and the substituted width is exactly one
+/// device pixel where theirs is `(1 / stretch) · stretch`, the same value to within an
+/// ulp (ADR 0082's contract covers the ulp).
+pub(crate) fn resolve_width(stroke: Stroke, t: DeviceTransform) -> f32 {
+    let stretch = t.max_stretch();
+    if !stretch.is_finite() || stretch <= 0.0 {
+        return stroke.width.max(1.0);
+    }
+    let device = stroke.width * stretch;
+    if stroke.width <= 0.0 || (stroke.adjust && device < 0.5) {
+        1.0
+    } else {
+        device
+    }
+}
 
 /// Expand a stroke into closed polygons (ISO 32000-2 §8.4.3: quads per segment,
 /// §8.4.3.4's joins at interior vertices, §8.4.3.3's caps at open ends), for filling
 /// with the non-zero rule — overlaps between pieces double the winding, which
 /// non-zero coverage clamps away.
 ///
-/// Widths arrive resolved and positive, dashing already applied, degenerate subpaths
-/// pre-split (§4.5 of the brief); consecutive coincident points are skipped here so
-/// flattening artefacts cannot produce zero-length pieces.
+/// The device width arrives from [`resolve_width`] (ADR 0085: §8.4.3.2's zero and
+/// §10.7.5's adjustment applied at encode); dashing is already applied and degenerate
+/// subpaths pre-split upstream (§4.5 of the brief); consecutive coincident points are
+/// skipped here so flattening artefacts cannot produce zero-length pieces.
 #[allow(clippy::arithmetic_side_effects)]
-pub(crate) fn stroke_polylines(polylines: &[Polyline], stroke: Stroke) -> Vec<Polyline> {
-    let hw = stroke.width * 0.5;
+pub(crate) fn stroke_polylines(
+    polylines: &[Polyline],
+    stroke: Stroke,
+    device_width: f32,
+) -> Vec<Polyline> {
+    let hw = device_width * 0.5;
     let mut out = Vec::new();
     for polyline in polylines {
         // Dedupe coincident neighbours (and the closing wrap, when closed).

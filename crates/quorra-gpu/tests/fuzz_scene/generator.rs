@@ -439,13 +439,15 @@ fn op_stroke(
     };
     let paint = paint(&mut generator.rng, &generator.pool);
     let stroke = Stroke {
-        // Widths arrive resolved and positive (§4.5); a quarter of them do not, which
-        // is `InvalidStroke`.
+        // Widths are scene-space and non-negative since ADR 0085 (zero is §8.4.3.2's
+        // thinnest line); a quarter of these are arbitrary bits, most of which are
+        // negative or non-finite and so `InvalidStroke`.
         width: if generator.rng.one_in(4) {
             generator.rng.f32()
         } else {
             generator.rng.unit() * 4.0 + 0.25
         },
+        adjust: false,
         cap: LineCap::Round,
         join: LineJoin::Bevel,
         miter_limit: if generator.rng.one_in(4) {

@@ -328,6 +328,7 @@ fn stroke_agrees_with_the_rectangle_it_is() {
             Affine::IDENTITY,
             Stroke {
                 width: 6.0,
+                adjust: false,
                 cap: LineCap::Butt,
                 join: LineJoin::Miter,
                 miter_limit: 10.0,
@@ -448,6 +449,7 @@ fn cross_adapter_bound_holds_for_coverage_lanes() {
                     Affine::IDENTITY,
                     Stroke {
                         width: 2.5,
+                        adjust: false,
                         cap: LineCap::Round,
                         join: LineJoin::Round,
                         miter_limit: 4.0,

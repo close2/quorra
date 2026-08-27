@@ -218,6 +218,7 @@ fn stroke_scene(outline: OutlineId, transform: Affine, width: f32, paint: Paint)
             transform,
             Stroke {
                 width,
+                adjust: false,
                 cap: LineCap::Butt,
                 join: LineJoin::Miter,
                 miter_limit: 10.0,
@@ -340,13 +341,14 @@ fn a_stroke_reads_the_ramp_at_the_page_position_however_it_was_placed() {
         let outline = device
             .upload_outline(&diagonal_in(placed_square(index)))
             .expect("upload");
-        // The width is device-space and already resolved upstream (§4.5 of the brief), so
-        // it does **not** change with the placement's scale: the same device band under
-        // all three, which is what makes the three frames comparable at all.
+        // The width is scene-space since ADR 0085, so the same *device* band under all
+        // three placements — what makes the frames comparable at all — is stated by
+        // dividing each placement's own scale back out.
+        let (_, scale) = PLACEMENTS[index];
         stroke_scene(
             outline,
             placement_transform(index),
-            5.0,
+            5.0 / scale,
             page_wide_ramp(ramp),
         )
     });
