@@ -56,4 +56,4 @@ document format at all — it never sees a PDF byte. The full list, with reasons
 
 ## Licence
 
-MIT. See `LICENSE`.
+Apache License, Version 2.0. See `LICENSE`.

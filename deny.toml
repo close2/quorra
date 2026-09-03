@@ -24,7 +24,7 @@ ignore = [
 
 [licenses]
 version = 2
-# Permissive licences only. This project is MIT, and so is everything it links: a
+# Permissive licences only. This project is Apache-2.0, and everything it links is permissive: a
 # file-level copyleft such as MPL-2.0 would be compatible but is not needed by
 # anything in the graph, and leaving it out keeps the answer to "what may I do with a
 # build of this?" a single sentence.
